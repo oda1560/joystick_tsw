@@ -33,7 +33,9 @@ except ImportError:
 HERE = os.path.dirname(os.path.abspath(__file__))
 SETTINGS_FILE = os.path.join(HERE, "settings.json")
 DEFAULTS = {"axis": core.Y_AXIS, "invert": core.INVERT_Y, "deadzone": core.DEADZONE,
-            "toggle_button": None, "on_top": False, "joystick": ""}
+            "toggle_button": None, "on_top": False, "joystick": "",
+            "rev_enabled": core.USE_REVERSER, "rev_axis": core.REVERSER_AXIS,
+            "rev_invert": core.REVERSER_INVERT}
 
 BG, PANEL, TRACK = "#16181d", "#1f232b", "#2b3039"
 FG, MUTED = "#e6e8ec", "#8a919e"
@@ -95,6 +97,11 @@ class Bridge(threading.Thread):
         self.running = True
         self.last_sent = None
         self.last_check = 0.0
+        self.rev_zone = None          # slider zone from the UI thread, None = reverser control off
+        self.rev_sync = core.ReverserSync(log)
+        self.rev_actual = None        # train's current reverser notch, for display
+        self.speed = None             # m/s, for display
+        self.last_poll = 0.0
 
     def set_game(self, level, text):
         if (level, text) != self.game_status:
@@ -105,6 +112,8 @@ class Bridge(threading.Thread):
         self.controls = None
         self.train = None
         self.last_sent = None
+        self.rev_sync.reset()
+        self.rev_actual = self.speed = None
 
     def run(self):
         while self.running:
@@ -148,10 +157,25 @@ class Bridge(threading.Thread):
                 controls.detect()
                 controls.train_id = train
                 self.controls, self.train, self.last_sent = controls, train, None
+                self.rev_sync.reset()
                 self.log(f"Train: {pretty_train(train)} -> {controls.describe()}")
 
-        controls, y = self.controls, self.y
-        if controls is None or y is None or not self.enabled:
+        controls = self.controls
+        if controls is None:
+            return
+        if now - self.last_poll > 0.5:
+            self.last_poll = now
+            self.speed = controls.speed()
+            self.rev_actual = controls.reverser.position() if controls.reverser else None
+
+        if not self.enabled:
+            self.last_sent = None
+            self.rev_sync.reset()
+            return
+        self.rev_sync.update(controls, self.rev_zone)
+
+        y = self.y
+        if y is None:
             self.last_sent = None
             return
         if self.last_sent is None:
@@ -183,6 +207,8 @@ class App:
         self.assigning = False
         self.raw_y = 0.0
         self.y = 0.0
+        self.rev_s = 0.0              # slider position, +1 = forward end
+        self.rev_zone = None
         self.frame = 0
         self.k = root.winfo_fpixels("1i") / 96.0     # display scaling for canvas drawing
 
@@ -305,9 +331,22 @@ class App:
         self.dz_label.pack(side="left", padx=(10, 0))
         self.on_deadzone(self.s["deadzone"])
 
-        ttk.Label(grid, text="Pause button", style="Muted.TLabel").grid(row=3, column=0, sticky="w", pady=3, padx=(0, 14))
+        ttk.Label(grid, text="Reverser", style="Muted.TLabel").grid(row=3, column=0, sticky="w", pady=3, padx=(0, 14))
+        rev_row = ttk.Frame(grid, style="Panel.TFrame")
+        rev_row.grid(row=3, column=1, columnspan=3, sticky="w", pady=3)
+        self.rev_var = tk.BooleanVar(value=bool(self.s["rev_enabled"]))
+        ttk.Checkbutton(rev_row, text="Use slider", variable=self.rev_var, style="Panel.TCheckbutton",
+                        command=self.on_rev_enabled).pack(side="left", padx=(0, 12))
+        self.rev_axis_combo = ttk.Combobox(rev_row, state="readonly", width=8)
+        self.rev_axis_combo.pack(side="left")
+        self.rev_axis_combo.bind("<<ComboboxSelected>>", self.on_rev_axis)
+        self.rev_invert_var = tk.BooleanVar(value=bool(self.s["rev_invert"]))
+        ttk.Checkbutton(rev_row, text="Invert", variable=self.rev_invert_var, style="Panel.TCheckbutton",
+                        command=self.on_rev_invert).pack(side="left", padx=(12, 0))
+
+        ttk.Label(grid, text="Pause button", style="Muted.TLabel").grid(row=4, column=0, sticky="w", pady=3, padx=(0, 14))
         btn_row = ttk.Frame(grid, style="Panel.TFrame")
-        btn_row.grid(row=3, column=1, columnspan=3, sticky="w", pady=3)
+        btn_row.grid(row=4, column=1, columnspan=3, sticky="w", pady=3)
         self.btn_label = ttk.Label(btn_row, text="", style="Panel.TLabel", width=24)
         self.btn_label.pack(side="left")
         ttk.Button(btn_row, text="Assign", command=self.on_assign).pack(side="left", padx=(0, 6))
@@ -379,6 +418,19 @@ class App:
         self.s["axis"] = self.axis_combo.current()
         save_settings(self.s)
 
+    def on_rev_enabled(self):
+        self.s["rev_enabled"] = bool(self.rev_var.get())
+        save_settings(self.s)
+        self.log("Reverser control " + ("on" if self.s["rev_enabled"] else "off"))
+
+    def on_rev_axis(self, _event=None):
+        self.s["rev_axis"] = self.rev_axis_combo.current()
+        save_settings(self.s)
+
+    def on_rev_invert(self):
+        self.s["rev_invert"] = bool(self.rev_invert_var.get())
+        save_settings(self.s)
+
     def on_invert(self):
         self.s["invert"] = bool(self.invert_var.get())
         save_settings(self.s)
@@ -420,6 +472,9 @@ class App:
         self.axis_combo["values"] = [f"Axis {i}" for i in range(n)]
         if self.s["axis"] < n:
             self.axis_combo.current(self.s["axis"])
+        self.rev_axis_combo["values"] = [f"Axis {i}" for i in range(n)]
+        if self.s["rev_axis"] < n:
+            self.rev_axis_combo.current(self.s["rev_axis"])
         self.log(f"Joystick: {chosen.get_name()}")
 
     def _poll_joystick(self):
@@ -445,7 +500,17 @@ class App:
             self._open_stick()
         if self.stick is None:
             self.bridge.y = None
+            self.bridge.rev_zone = self.rev_zone = None
             return
+
+        rev_axis = self.s["rev_axis"]
+        if self.s["rev_enabled"] and rev_axis < self.stick.get_numaxes():
+            raw = self.stick.get_axis(rev_axis)
+            self.rev_s = raw if self.s["rev_invert"] else -raw
+            self.rev_zone = core.reverser_zone(self.rev_s, self.rev_zone)
+        else:
+            self.rev_zone = None
+        self.bridge.rev_zone = self.rev_zone
 
         axis, invert, dz = self.s["axis"], bool(self.s["invert"]), float(self.s["deadzone"])
         raw = self.stick.get_axis(axis) if axis < self.stick.get_numaxes() else 0.0
@@ -483,6 +548,10 @@ class App:
                 parts.append(f"Brake: {pretty_lever(c.brake.name)}")
             if any(lv.safe_lo > lv.lo or lv.safe_hi < lv.hi for lv in (c.throttle, c.brake) if lv):
                 parts.append("emergency position blocked")
+            if c.reverser and c.reverser.ok:
+                parts.append(f"Reverser: {pretty_lever(c.reverser.name)}")
+            else:
+                parts.append("reverser not found")
             desc = "  ·  ".join(parts)
         elif c:
             self._set_status("train", "warn", f"{pretty_train(self.bridge.train)} - no throttle/brake found")
@@ -564,14 +633,55 @@ class App:
             text, color = f"BRAKE {-self.y * 100:.0f}%", BRAKE
         else:
             text, color = "NEUTRAL", FG
-        cv.create_text(rx, H / 2 - 12 * k, text=text, anchor="e", fill=color, font=(FONT, 17, "bold"))
+        cv.create_text(rx, 62 * k, text=text, anchor="e", fill=color, font=(FONT, 17, "bold"))
         if not self.bridge.enabled:
             sub = "Paused - not sending"
         elif live:
             sub = "Sending to game"
         else:
             sub = "Preview - not connected"
-        cv.create_text(rx, H / 2 + 14 * k, text=sub, anchor="e", fill=mark, font=(FONT, 9))
+        cv.create_text(rx, 88 * k, text=sub, anchor="e", fill=mark, font=(FONT, 9))
+        self._draw_reverser(rx, 130 * k, live)
+
+    def _draw_reverser(self, rx, y, live):
+        """R / N / F pills: filled = where the train's reverser is, outlined = where the slider is."""
+        k, cv = self.k, self.canvas
+        c = self.bridge.controls
+        pw, ph, gap = 40 * k, 26 * k, 6 * k
+        left = rx - 3 * pw - 2 * gap
+        cv.create_text(left, y, text="REVERSER", anchor="w", fill=MUTED, font=(FONT, 8, "bold"))
+        y += 12 * k
+        actual = self.bridge.rev_actual
+        slider = self.rev_zone
+        for i, (pos, letter) in enumerate((("reverse", "R"), ("neutral", "N"), ("forward", "F"))):
+            x0 = left + i * (pw + gap)
+            is_actual = actual == pos
+            fill = (GOOD if live else MUTED) if is_actual else TRACK
+            outline = FG if slider == pos else ""
+            cv.create_rectangle(x0, y, x0 + pw, y + ph, fill=fill, outline=outline,
+                                width=max(2, round(2 * k)))
+            cv.create_text(x0 + pw / 2, y + ph / 2, text=letter, font=(FONT, 10, "bold"),
+                           fill="#0b1a12" if is_actual else FG)
+        y += ph + 14 * k
+
+        if not self.s["rev_enabled"]:
+            note, color = "Slider control off", MUTED
+        elif c is None:
+            note, color = "", MUTED
+        elif not (c.reverser and c.reverser.ok):
+            note, color = "No reverser found on this train", WARN
+        elif slider is None:
+            note, color = "Slider axis not available", WARN
+        elif actual not in (None, "forward", "neutral", "reverse"):
+            note, color = f"Train reverser: {actual.title()}", MUTED
+        elif actual and slider != actual and abs(self.bridge.speed or 0) > core.REVERSER_MAX_SPEED:
+            note, color = "Locked while moving", WARN
+        elif actual and slider != actual:
+            note, color = "Move the slider to apply", MUTED
+        else:
+            note, color = "", MUTED
+        if note:
+            cv.create_text(rx, y, text=note, anchor="e", fill=color, font=(FONT, 9))
 
     def _draw_lever(self, lever, role, value, x, top, bot, mark):
         k, cv = self.k, self.canvas

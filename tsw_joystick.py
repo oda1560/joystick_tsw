@@ -6,6 +6,9 @@ Joystick Y axis:
     centre        -> neutral (throttle 0, brake released)
     pull back     -> train brake
 
+Base slider (Z axis) -> reverser: + end Forward, middle Neutral, - end Reverse
+    (only moved when the train is stopped, never to Off)
+
 Talks to TSW's External Interface API (launch the game with -HTTPAPI).
 The stick only sends values when you move it, so the keyboard keeps working.
 
@@ -42,6 +45,11 @@ SEND_THRESHOLD = 0.01            # minimum change before sending to the game
 POLL_HZ = 30
 TRAIN_CHECK_SECONDS = 2.0        # how often to check whether you changed train
 
+USE_REVERSER = True
+REVERSER_AXIS = 3                # Extreme 3D Pro base slider: + end Forward, middle Neutral, - end Reverse
+REVERSER_INVERT = False
+REVERSER_MAX_SPEED = 0.3         # m/s; the reverser is never moved faster than this (~1 km/h)
+
 # Primary detection: the game's own input identifier on each control (same across trains).
 THROTTLE_IDS = ["throttle", "mastercontroller", "combinedthrottle"]   # substring match
 BRAKE_IDS = ["automaticbrake", "trainbrake"]                           # substring match
@@ -52,6 +60,11 @@ COMBINED_NAMES = ["throttlebrake", "throttleandbrake", "mastercontroller", "comb
 THROTTLE_NAMES = ["throttle", "powerhandle", "power"]
 BRAKE_NAMES = ["trainbrake", "train_brake", "automaticbrake", "brakehandle", "stepbrake", "brake"]
 NEUTRAL_LABELS = ["off", "neutral", "coast", "idle", "n", "0"]
+
+REVERSER_IDS = ["reverser"]
+REVERSER_LABELS = {"forward": ["forward", "fwd", "fw", "f", "ahead"],
+                   "neutral": ["neutral", "n", "mid", "centre", "center"],
+                   "reverse": ["reverse", "rev", "r", "backward", "back"]}
 EXCLUDE = ["dynamic", "independent", "loco", "emergency", "park", "handbrake", "release",
            "bail", "reverser", "horn", "light", "wiper", "door", "sander", "pantograph",
            # circuit breakers, isolation switches, covers etc. are not the driving levers
@@ -276,14 +289,121 @@ class Lever:
         return f"{text} ({self.note})" if self.note else text
 
 
+def reverser_label(label, prefix=True):
+    """Map a notch name to 'forward' / 'neutral' / 'reverse', or None."""
+    s = label.strip().lower()
+    for pos, words in REVERSER_LABELS.items():
+        if s in words:
+            return pos
+    if prefix:
+        for pos, words in REVERSER_LABELS.items():
+            if any(len(w) >= 3 and s.startswith(w) for w in words):
+                return pos
+    return None
+
+
+def reverser_zone(s, previous=None, hysteresis=0.06):
+    """Slider value s (-1..+1, +1 = forward end) -> 'forward' / 'neutral' / 'reverse'.
+    Hysteresis stops the choice flickering when the slider sits on a boundary."""
+    edge = 1.0 / 3.0
+    if previous == "forward" and s > edge - hysteresis:
+        return "forward"
+    if previous == "reverse" and s < -edge + hysteresis:
+        return "reverse"
+    if previous == "neutral" and -edge - hysteresis < s < edge + hysteresis:
+        return "neutral"
+    return "forward" if s > edge else "reverse" if s < -edge else "neutral"
+
+
+class Reverser:
+    """The train's reverser, driven to its Forward / Neutral / Reverse notches only."""
+
+    def __init__(self, api, name, ident=""):
+        self.lever = Lever(api, name, ident)
+        self.name = name
+        self.notches = {}                 # 'forward' / 'neutral' / 'reverse' -> input value
+        lo, hi = self.lever.lo, self.lever.hi
+        for prefix in (False, True):      # exact names first, then e.g. "Forward 1"
+            for a, b, label, _ in self.lever.zones:
+                pos = reverser_label(label, prefix)
+                if a is not None and pos and pos not in self.notches:
+                    self.notches[pos] = min(hi, max(lo, (a + b) / 2))
+        self.ok = all(p in self.notches for p in REVERSER_LABELS)
+
+    def set(self, position):
+        self.lever.set_value(self.notches[position])
+
+    def position(self):
+        """Current notch: 'forward' / 'neutral' / 'reverse', another notch name (e.g. 'off'), or None."""
+        v = self.lever.api.get_value(self.lever.path)
+        zones = [z for z in self.lever.zones if z[0] is not None]
+        if not isinstance(v, (int, float)) or not zones:
+            return None
+        lo, hi = self.lever.lo, self.lever.hi
+        nearest = min(zones, key=lambda z: abs((max(z[0], lo) + min(z[1], hi)) / 2 - v))
+        return reverser_label(nearest[2]) or nearest[2].strip()
+
+    def __repr__(self):
+        if not self.ok:
+            return f"{self.name} (Forward/Neutral/Reverse notches not recognised - not used)"
+        return f"{self.name} (" + ", ".join(f"{p} {v:.3g}" for p, v in self.notches.items()) + ")"
+
+
+class ReverserSync:
+    """Moves the reverser when the slider enters a different zone; never while the train is moving."""
+
+    def __init__(self, log):
+        self.log = log
+        self.reset()
+
+    def reset(self):
+        self.last = None
+        self.verify = None
+
+    def update(self, controls, zone):
+        rev = controls.reverser
+        if rev is None or not rev.ok or zone is None:
+            self.reset()
+            return
+        now = time.time()
+        if self.verify and now >= self.verify[0]:
+            expected, self.verify = self.verify[1], None
+            actual = rev.position()
+            if actual != expected:
+                self.log(f"Reverser is at {actual or '?'}, not {expected} - the train may need "
+                         f"the master key in or the brake applied first")
+        if self.last is None:
+            self.last = zone          # don't move the reverser until the slider actually moves
+            return
+        if zone == self.last:
+            return
+        self.last = zone
+        speed = controls.speed()
+        if speed is not None and abs(speed) > REVERSER_MAX_SPEED:
+            self.log(f"Reverser NOT moved to {zone}: train is moving ({abs(speed) * 3.6:.0f} km/h)")
+            return
+        rev.set(zone)
+        self.log(f"Reverser -> {zone}")
+        self.verify = (now + 0.7, zone)
+
+
 class TrainControls:
     def __init__(self, api):
         self.api = api
         self.train_id = None
-        self.throttle = self.brake = None
+        self.throttle = self.brake = self.reverser = None
+
+    def speed(self):
+        """Train speed in m/s, or None if the game doesn't report it."""
+        try:
+            v = self.api.get_value("CurrentDrivableActor.Function.HUD_GetSpeed")
+            return float(v) if isinstance(v, (int, float)) else None
+        except Exception:
+            return None
 
     def _identifiers(self, names):
-        candidates = [n for n in names if not any(x in n.lower() for x in EXCLUDE)]
+        skip = [x for x in EXCLUDE if x != "reverser"]
+        candidates = [n for n in names if not any(x in n.lower() for x in skip)]
 
         def ident(n):
             try:
@@ -297,8 +417,14 @@ class TrainControls:
 
     def detect(self):
         names = node_names(self.api.list("CurrentDrivableActor"))
-        self.throttle = self.brake = None
+        self.throttle = self.brake = self.reverser = None
         ids = self._identifiers(names)
+
+        r = (next((n for n, i in ids if any(k in i.lower() for k in REVERSER_IDS)), None)
+             or pick(names, ["reverser"], [x for x in EXCLUDE if x != "reverser"]))
+        if r:
+            rev = Reverser(self.api, r, dict(ids).get(r, ""))
+            self.reverser = rev if rev.lever.works() else None
 
         t = next((n for n, i in ids if any(k in i.lower() for k in THROTTLE_IDS)), None)
         b = next((n for n, i in ids if any(k in i.lower() for k in BRAKE_IDS)), None)
@@ -343,7 +469,10 @@ class TrainControls:
             parts.append(f"{kind} {self.throttle}")
         if self.brake:
             parts.append(f"brake {self.brake}")
-        return ", ".join(parts) or "NO throttle/brake controls found (run with --list)"
+        if not parts:
+            parts.append("NO throttle/brake controls found (run with --list)")
+        parts.append(f"reverser {self.reverser}" if self.reverser else "no reverser found")
+        return ", ".join(parts)
 
 
 # ---------------------------------------------------------------- joystick
@@ -420,6 +549,9 @@ def run():
             print(time.strftime("%H:%M:%S"), msg, flush=True)
             status = msg
 
+    rev_sync = ReverserSync(lambda msg: print(time.strftime("%H:%M:%S"), msg, flush=True))
+    rev_zone = None
+
     print("TSW7 joystick bridge running. Ctrl+C to stop.")
     while True:
         time.sleep(1.0 / POLL_HZ)
@@ -449,6 +581,7 @@ def run():
                     controls.train_id = train
                     controls.detect()
                     last_sent = None
+                    rev_sync.reset()
                     say(f"Train: {train} -> {controls.describe()}")
             except urllib.error.HTTPError as e:
                 if e.code == 403:
@@ -463,6 +596,16 @@ def run():
 
         if controls.train_id is None:
             continue
+
+        if USE_REVERSER and REVERSER_AXIS < stick.get_numaxes():
+            raw = stick.get_axis(REVERSER_AXIS)
+            rev_zone = reverser_zone(raw if REVERSER_INVERT else -raw, rev_zone)
+            try:
+                rev_sync.update(controls, rev_zone)
+            except Exception as e:
+                say(f"Reverser failed: {e}")
+                controls.train_id = None
+                continue
 
         y = read_y(stick)
         if last_sent is not None and abs(y - last_sent) < SEND_THRESHOLD:
