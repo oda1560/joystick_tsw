@@ -148,13 +148,20 @@ def node_names(listing):
     return names
 
 
-def pick(names, wanted, exclude):
+def pick_all(names, wanted, exclude):
+    """Names matching any wanted word (in order of preference) and none of the excluded words."""
     lowered = [(n, n.lower()) for n in names]
+    found = []
     for w in wanted:
         for orig, low in lowered:
-            if w in low and not any(x in low for x in exclude):
-                return orig
-    return None
+            if w in low and not any(x in low for x in exclude) and orig not in found:
+                found.append(orig)
+    return found
+
+
+def pick(names, wanted, exclude):
+    found = pick_all(names, wanted, exclude)
+    return found[0] if found else None
 
 
 def is_emergency(label):
@@ -178,7 +185,7 @@ class Lever:
         self.zones = self._zones()
         self.safe_lo, self.safe_hi = self._exclude_emergency()
         self.combined = ("brake" in name.lower() or "brake" in self.ident.lower()
-                         or any(is_brake_label(z[2]) for z in self.zones if z[3] == "Input")) \
+                         or any(is_brake_label(z[2]) for z in self.zones)) \
             and not any(b in self.ident.lower() for b in BRAKE_IDS)
         self.neutral = self.safe_lo
         self.power_end = self.safe_hi
@@ -790,15 +797,23 @@ class TrainControls:
             rev = Reverser(self.api, r, dict(ids).get(r, ""))
             self.reverser = rev if rev.lever.works() else None
 
-        t = next((n for n, i in ids if any(k in i.lower() for k in THROTTLE_IDS)), None)
-        b = next((n for n, i in ids if any(k in i.lower() for k in BRAKE_IDS)), None)
+        def is_lever(n):
+            # some trains give push buttons a driving-lever identifier (Class 375 "BrakeHold" button
+            # is "AutomaticBrake"); throttle and brake must be real levers
+            try:
+                cls = self.api.get_value(f"CurrentDrivableActor/{n}.ObjectClass") or ""
+            except Exception:
+                cls = ""
+            return "button" not in str(cls).lower()
+
+        t = next((n for n, i in ids if any(k in i.lower() for k in THROTTLE_IDS) and is_lever(n)), None)
+        b = next((n for n, i in ids if any(k in i.lower() for k in BRAKE_IDS) and is_lever(n)), None)
         id_of = dict(ids)
         if not t:
-            t = pick(names, COMBINED_NAMES, EXCLUDE) or pick(names, THROTTLE_NAMES, EXCLUDE + ["brake"])
+            t = next((n for n in pick_all(names, COMBINED_NAMES, EXCLUDE)
+                      + pick_all(names, THROTTLE_NAMES, EXCLUDE + ["brake"]) if is_lever(n)), None)
         if not b:
-            b = pick(names, BRAKE_NAMES, EXCLUDE)
-            if b == t:
-                b = None
+            b = next((n for n in pick_all(names, BRAKE_NAMES, EXCLUDE) if n != t and is_lever(n)), None)
         if t:
             lever = Lever(self.api, t, id_of.get(t, ""))
             self.throttle = lever if lever.works() else None
