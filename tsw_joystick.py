@@ -9,6 +9,8 @@ Joystick Y axis:
 Base slider (Z axis) -> reverser: + end Forward, middle Neutral, - end Reverse
     (only moved when the train is stopped, never to Off)
 
+Button 1 (trigger)   -> AWS acknowledge (held for as long as you hold the trigger)
+
 Talks to TSW's External Interface API (launch the game with -HTTPAPI).
 The stick only sends values when you move it, so the keyboard keeps working.
 
@@ -50,6 +52,8 @@ REVERSER_AXIS = 3                # Extreme 3D Pro base slider: + end Forward, mi
 REVERSER_INVERT = False
 REVERSER_MAX_SPEED = 0.3         # m/s; the reverser is never moved faster than this (~1 km/h)
 
+AWS_BUTTON = 0                   # joystick button for AWS acknowledge (0 = trigger, labelled "1")
+
 # Primary detection: the game's own input identifier on each control (same across trains).
 THROTTLE_IDS = ["throttle", "mastercontroller", "combinedthrottle"]   # substring match
 BRAKE_IDS = ["automaticbrake", "trainbrake"]                           # substring match
@@ -60,6 +64,9 @@ COMBINED_NAMES = ["throttlebrake", "throttleandbrake", "mastercontroller", "comb
 THROTTLE_NAMES = ["throttle", "powerhandle", "power"]
 BRAKE_NAMES = ["trainbrake", "train_brake", "automaticbrake", "brakehandle", "stepbrake", "brake"]
 NEUTRAL_LABELS = ["off", "neutral", "coast", "idle", "n", "0"]
+
+AWS_IDS = ["awsreset", "awsacknowledge"]      # compared with "_" removed, lower case
+AWS_NAME_SKIP = ["isolat", "cover", "cutout", "fault", "sunflower", "mcb", "service", "test"]
 
 REVERSER_IDS = ["reverser"]
 REVERSER_LABELS = {"forward": ["forward", "fwd", "fw", "f", "ahead"],
@@ -89,8 +96,16 @@ class TSWApi:
         if params:
             url += "?" + urllib.parse.urlencode(params)
         req = urllib.request.Request(url, method=method, headers={"DTGCommKey": self.key or ""})
-        with urllib.request.urlopen(req, timeout=1.0) as r:
-            return json.loads(r.read().decode("utf-8") or "{}")
+        for attempt in range(2):
+            try:
+                with urllib.request.urlopen(req, timeout=1.0) as r:
+                    return json.loads(r.read().decode("utf-8") or "{}")
+            except urllib.error.HTTPError:
+                raise
+            except (urllib.error.URLError, ConnectionError):
+                if attempt:                # the game occasionally drops a connection: retry once
+                    raise
+                time.sleep(0.05)
 
     def get(self, path):
         return self._req("GET", "get/" + path)
@@ -349,6 +364,30 @@ class Reverser:
         return f"{self.name} (" + ", ".join(f"{p} {v:.3g}" for p, v in self.notches.items()) + ")"
 
 
+class PushButton:
+    """A momentary cab button, held down in the game for as long as the joystick button is held."""
+
+    def __init__(self, api, name):
+        self.api = api
+        self.name = name
+        self.path = f"CurrentDrivableActor/{name}.InputValue"
+        try:
+            lo = api.get_value(f"CurrentDrivableActor/{name}.Function.GetMinimumInputValue")
+            hi = api.get_value(f"CurrentDrivableActor/{name}.Function.GetMaximumInputValue")
+        except Exception:
+            lo = hi = None
+        if isinstance(lo, (int, float)) and isinstance(hi, (int, float)) and hi > lo:
+            self.released, self.pressed = float(lo), float(hi)
+        else:
+            self.released, self.pressed = 0.0, 1.0
+
+    def set(self, down):
+        self.api.set(self.path, self.pressed if down else self.released)
+
+    def __repr__(self):
+        return self.name
+
+
 class ReverserSync:
     """Moves the reverser when the slider enters a different zone; never while the train is moving."""
 
@@ -391,7 +430,7 @@ class TrainControls:
     def __init__(self, api):
         self.api = api
         self.train_id = None
-        self.throttle = self.brake = self.reverser = None
+        self.throttle = self.brake = self.reverser = self.aws = None
 
     def speed(self):
         """Train speed in m/s, or None if the game doesn't report it."""
@@ -403,7 +442,8 @@ class TrainControls:
 
     def _identifiers(self, names):
         skip = [x for x in EXCLUDE if x != "reverser"]
-        candidates = [n for n in names if not any(x in n.lower() for x in skip)]
+        candidates = [n for n in names if not any(x in n.lower() for x in skip)
+                      or ("aws" in n.lower() and not any(x in n.lower() for x in AWS_NAME_SKIP))]
 
         def ident(n):
             try:
@@ -417,8 +457,15 @@ class TrainControls:
 
     def detect(self):
         names = node_names(self.api.list("CurrentDrivableActor"))
-        self.throttle = self.brake = self.reverser = None
+        self.throttle = self.brake = self.reverser = self.aws = None
         ids = self._identifiers(names)
+
+        a = (next((n for n, i in ids if i.lower().replace("_", "") in AWS_IDS), None)
+             or next((n for n in names if "aws" in n.lower()
+                      and any(w in n.lower() for w in ("reset", "ack"))
+                      and not any(x in n.lower() for x in AWS_NAME_SKIP)), None))
+        if a:
+            self.aws = PushButton(self.api, a)
 
         r = (next((n for n, i in ids if any(k in i.lower() for k in REVERSER_IDS)), None)
              or pick(names, ["reverser"], [x for x in EXCLUDE if x != "reverser"]))
@@ -472,6 +519,7 @@ class TrainControls:
         if not parts:
             parts.append("NO throttle/brake controls found (run with --list)")
         parts.append(f"reverser {self.reverser}" if self.reverser else "no reverser found")
+        parts.append(f"AWS {self.aws}" if self.aws else "no AWS button found")
         return ", ".join(parts)
 
 
@@ -558,6 +606,12 @@ def run():
         for event in pygame.event.get():
             if event.type == pygame.JOYDEVICEREMOVED:
                 stick = None
+            elif (event.type in (pygame.JOYBUTTONDOWN, pygame.JOYBUTTONUP) and event.button == AWS_BUTTON
+                  and controls.aws and controls.train_id is not None):
+                try:
+                    controls.aws.set(event.type == pygame.JOYBUTTONDOWN)
+                except Exception as e:
+                    say(f"AWS button failed: {e}")
 
         if stick is None:
             stick = open_joystick()

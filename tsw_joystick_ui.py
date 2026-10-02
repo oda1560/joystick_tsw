@@ -35,7 +35,7 @@ SETTINGS_FILE = os.path.join(HERE, "settings.json")
 DEFAULTS = {"axis": core.Y_AXIS, "invert": core.INVERT_Y, "deadzone": core.DEADZONE,
             "toggle_button": None, "on_top": False, "joystick": "",
             "rev_enabled": core.USE_REVERSER, "rev_axis": core.REVERSER_AXIS,
-            "rev_invert": core.REVERSER_INVERT}
+            "rev_invert": core.REVERSER_INVERT, "aws_button": core.AWS_BUTTON}
 
 BG, PANEL, TRACK = "#16181d", "#1f232b", "#2b3039"
 FG, MUTED = "#e6e8ec", "#8a919e"
@@ -52,6 +52,8 @@ def load_settings():
             s.update({k: v for k, v in json.load(f).items() if k in DEFAULTS})
     except (OSError, ValueError):
         pass
+    if s["toggle_button"] is not None and s["toggle_button"] == s["aws_button"]:
+        s["toggle_button"] = None      # one joystick button can't do both
     return s
 
 
@@ -102,6 +104,7 @@ class Bridge(threading.Thread):
         self.rev_actual = None        # train's current reverser notch, for display
         self.speed = None             # m/s, for display
         self.last_poll = 0.0
+        self.aws_queue = queue.Queue()   # True = AWS button pressed, False = released (from UI thread)
 
     def set_game(self, level, text):
         if (level, text) != self.game_status:
@@ -114,6 +117,20 @@ class Bridge(threading.Thread):
         self.last_sent = None
         self.rev_sync.reset()
         self.rev_actual = self.speed = None
+
+    def _handle_aws(self, controls):
+        while True:
+            try:
+                down = self.aws_queue.get_nowait()
+            except queue.Empty:
+                return
+            if controls is None or controls.aws is None:
+                continue
+            if down and not self.enabled:
+                continue              # paused: ignore presses, but always pass releases through
+            controls.aws.set(down)
+            if down:
+                self.log("AWS acknowledged")
 
     def run(self):
         while self.running:
@@ -161,6 +178,7 @@ class Bridge(threading.Thread):
                 self.log(f"Train: {pretty_train(train)} -> {controls.describe()}")
 
         controls = self.controls
+        self._handle_aws(controls)
         if controls is None:
             return
         if now - self.last_poll > 0.5:
@@ -204,7 +222,8 @@ class App:
         self.bridge.enabled = not start_paused
         self.stick = None
         self.next_stick_try = 0.0
-        self.assigning = False
+        self.assigning = None         # settings key waiting for a joystick button press
+        self.aws_held = False
         self.raw_y = 0.0
         self.y = 0.0
         self.rev_s = 0.0              # slider position, +1 = forward end
@@ -344,13 +363,19 @@ class App:
         ttk.Checkbutton(rev_row, text="Invert", variable=self.rev_invert_var, style="Panel.TCheckbutton",
                         command=self.on_rev_invert).pack(side="left", padx=(12, 0))
 
-        ttk.Label(grid, text="Pause button", style="Muted.TLabel").grid(row=4, column=0, sticky="w", pady=3, padx=(0, 14))
-        btn_row = ttk.Frame(grid, style="Panel.TFrame")
-        btn_row.grid(row=4, column=1, columnspan=3, sticky="w", pady=3)
-        self.btn_label = ttk.Label(btn_row, text="", style="Panel.TLabel", width=24)
-        self.btn_label.pack(side="left")
-        ttk.Button(btn_row, text="Assign", command=self.on_assign).pack(side="left", padx=(0, 6))
-        ttk.Button(btn_row, text="Clear", command=self.on_clear_button).pack(side="left")
+        self.btn_labels = {}
+        for row, (key, title) in enumerate((("aws_button", "AWS button"),
+                                            ("toggle_button", "Pause button")), start=4):
+            ttk.Label(grid, text=title, style="Muted.TLabel").grid(row=row, column=0, sticky="w",
+                                                                   pady=3, padx=(0, 14))
+            btn_row = ttk.Frame(grid, style="Panel.TFrame")
+            btn_row.grid(row=row, column=1, columnspan=3, sticky="w", pady=3)
+            self.btn_labels[key] = ttk.Label(btn_row, text="", style="Panel.TLabel", width=24)
+            self.btn_labels[key].pack(side="left")
+            ttk.Button(btn_row, text="Assign",
+                       command=lambda k=key: self.on_assign(k)).pack(side="left", padx=(0, 6))
+            ttk.Button(btn_row, text="Clear",
+                       command=lambda k=key: self.on_clear_button(k)).pack(side="left")
 
         bottom = ttk.Frame(setp, style="Panel.TFrame")
         bottom.pack(fill="x", pady=(8, 0))
@@ -390,23 +415,36 @@ class App:
                                    activebackground=WARN, activeforeground="#1f1600")
 
     def _refresh_button_label(self):
-        if self.assigning:
-            text = "Press a joystick button..."
-        elif self.s["toggle_button"] is None:
-            text = "Not set"
-        else:
-            text = f"Button {self.s['toggle_button'] + 1} pauses / resumes"
-        self.btn_label.config(text=text)
+        action = {"aws_button": "acknowledges AWS", "toggle_button": "pauses / resumes"}
+        for key, label in self.btn_labels.items():
+            if self.assigning == key:
+                text = "Press a joystick button..."
+            elif self.s[key] is None:
+                text = "Not set"
+            else:
+                text = f"Button {self.s[key] + 1} {action[key]}"
+            label.config(text=text)
 
-    def on_assign(self):
-        self.assigning = True
+    def on_assign(self, key):
+        self.assigning = key
         self._refresh_button_label()
 
-    def on_clear_button(self):
-        self.assigning = False
-        self.s["toggle_button"] = None
+    def on_clear_button(self, key):
+        self.assigning = None
+        self.s[key] = None
         save_settings(self.s)
         self._refresh_button_label()
+
+    def _assign_button(self, button):
+        key, self.assigning = self.assigning, None
+        other = "toggle_button" if key == "aws_button" else "aws_button"
+        if self.s[other] == button:
+            self.s[other] = None          # one joystick button can't do both
+        self.s[key] = button
+        save_settings(self.s)
+        self._refresh_button_label()
+        what = "acknowledges AWS" if key == "aws_button" else "pauses / resumes the bridge"
+        self.log(f"Button {button + 1} now {what}")
 
     def on_joystick(self, _event=None):
         self.s["joystick"] = self.joy_combo.get()
@@ -477,22 +515,27 @@ class App:
             self.rev_axis_combo.current(self.s["rev_axis"])
         self.log(f"Joystick: {chosen.get_name()}")
 
+    def _set_aws(self, down):
+        if down != self.aws_held:
+            self.aws_held = down
+            self.bridge.aws_queue.put(down)
+
     def _poll_joystick(self):
         sid = self.stick.get_instance_id() if self.stick else None
         for ev in pygame.event.get():
             if ev.type == pygame.JOYDEVICEREMOVED and ev.instance_id == sid:
                 self.stick = None
                 self.log("Joystick disconnected")
+                self._set_aws(False)
             elif ev.type == pygame.JOYDEVICEADDED and self.stick is None:
                 self.next_stick_try = 0.0
-            elif ev.type == pygame.JOYBUTTONDOWN and ev.instance_id == sid:
-                if self.assigning:
-                    self.assigning = False
-                    self.s["toggle_button"] = ev.button
-                    save_settings(self.s)
-                    self._refresh_button_label()
-                    self.log(f"Button {ev.button + 1} now pauses / resumes the bridge")
-                elif ev.button == self.s["toggle_button"]:
+            elif ev.type in (pygame.JOYBUTTONDOWN, pygame.JOYBUTTONUP) and ev.instance_id == sid:
+                down = ev.type == pygame.JOYBUTTONDOWN
+                if down and self.assigning:
+                    self._assign_button(ev.button)
+                elif ev.button == self.s["aws_button"]:
+                    self._set_aws(down)
+                elif down and ev.button == self.s["toggle_button"]:
                     self.toggle()
 
         if self.stick is None and time.time() >= self.next_stick_try:
@@ -552,6 +595,7 @@ class App:
                 parts.append(f"Reverser: {pretty_lever(c.reverser.name)}")
             else:
                 parts.append("reverser not found")
+            parts.append(f"AWS: {pretty_lever(c.aws.name)}" if c.aws else "AWS button not found")
             desc = "  ·  ".join(parts)
         elif c:
             self._set_status("train", "warn", f"{pretty_train(self.bridge.train)} - no throttle/brake found")
@@ -682,6 +726,23 @@ class App:
             note, color = "", MUTED
         if note:
             cv.create_text(rx, y, text=note, anchor="e", fill=color, font=(FONT, 9))
+
+        # AWS: lights up while the AWS joystick button is held
+        y += 18 * k
+        width = 3 * pw + 2 * gap
+        has_aws = c is not None and c.aws is not None
+        button = self.s["aws_button"]
+        if button is None:
+            text = "AWS  -  no button set"
+        elif c is not None and not has_aws:
+            text = "AWS  -  not on this train"
+        else:
+            text = f"AWS  -  button {button + 1}"
+        lit = self.aws_held and button is not None
+        cv.create_rectangle(rx - width, y, rx, y + ph, outline="",
+                            fill=(GOOD if live and has_aws else MUTED) if lit else TRACK)
+        cv.create_text(rx - width / 2, y + ph / 2, text=text, font=(FONT, 9, "bold"),
+                       fill="#0b1a12" if lit else (FG if has_aws else MUTED))
 
     def _draw_lever(self, lever, role, value, x, top, bot, mark):
         k, cv = self.k, self.canvas
