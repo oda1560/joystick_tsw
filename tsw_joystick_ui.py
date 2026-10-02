@@ -36,6 +36,7 @@ DEFAULTS = {"axis": core.Y_AXIS, "invert": core.INVERT_Y, "deadzone": core.DEADZ
             "toggle_button": None, "on_top": False, "joystick": "",
             "rev_enabled": core.USE_REVERSER, "rev_axis": core.REVERSER_AXIS,
             "rev_invert": core.REVERSER_INVERT, "aws_button": core.AWS_BUTTON,
+            "alerter_button": core.ALERTER_BUTTON,
             "look_enabled": core.USE_LOOK, "look_axis": core.LOOK_AXIS, "look_invert": core.LOOK_INVERT,
             "look_deadzone": core.LOOK_DEADZONE, "look_angle": core.LOOK_MAX_ANGLE,
             "look_smoothing": core.LOOK_SMOOTHING}
@@ -47,6 +48,13 @@ POWER, BRAKE = "#4c9be8", "#e08a3c"
 FONT = "Segoe UI"
 DOT = {"ok": GOOD, "warn": WARN, "bad": BAD, "idle": MUTED}
 
+# joystick button settings and what they do; one joystick button can't do two of these
+BUTTON_ACTIONS = {"aws_button": "acknowledges AWS", "alerter_button": "acknowledges alerter / DSD / SIFA",
+                  "toggle_button": "pauses / resumes"}
+# cab buttons held down for as long as their joystick button is held: setting -> TrainControls attribute
+CAB_BUTTONS = {"aws_button": "aws", "alerter_button": "alerter"}
+CAB_BUTTON_NAMES = {"aws": "AWS", "alerter": "Alerter"}
+
 
 def load_settings():
     s = dict(DEFAULTS)
@@ -55,8 +63,12 @@ def load_settings():
             s.update({k: v for k, v in json.load(f).items() if k in DEFAULTS})
     except (OSError, ValueError):
         pass
-    if s["toggle_button"] is not None and s["toggle_button"] == s["aws_button"]:
-        s["toggle_button"] = None      # one joystick button can't do both
+    used = set()
+    for key in BUTTON_ACTIONS:         # one joystick button can't do two things
+        if s[key] in used:
+            s[key] = None
+        elif s[key] is not None:
+            used.add(s[key])
     return s
 
 
@@ -107,7 +119,7 @@ class Bridge(threading.Thread):
         self.rev_actual = None        # train's current reverser notch, for display
         self.speed = None             # m/s, for display
         self.last_poll = 0.0
-        self.aws_queue = queue.Queue()   # True = AWS button pressed, False = released (from UI thread)
+        self.button_queue = queue.Queue()   # (cab button "aws" / "alerter", pressed) from the UI thread
 
     def set_game(self, level, text):
         if (level, text) != self.game_status:
@@ -121,19 +133,20 @@ class Bridge(threading.Thread):
         self.rev_sync.reset()
         self.rev_actual = self.speed = None
 
-    def _handle_aws(self, controls):
+    def _handle_buttons(self, controls):
         while True:
             try:
-                down = self.aws_queue.get_nowait()
+                name, down = self.button_queue.get_nowait()
             except queue.Empty:
                 return
-            if controls is None or controls.aws is None:
+            button = getattr(controls, name) if controls else None
+            if button is None:
                 continue
             if down and not self.enabled:
                 continue              # paused: ignore presses, but always pass releases through
-            controls.aws.set(down)
+            button.set(down)
             if down:
-                self.log("AWS acknowledged")
+                self.log(f"{CAB_BUTTON_NAMES[name]} acknowledged")
 
     def run(self):
         while self.running:
@@ -181,7 +194,7 @@ class Bridge(threading.Thread):
                 self.log(f"Train: {pretty_train(train)} -> {controls.describe()}")
 
         controls = self.controls
-        self._handle_aws(controls)
+        self._handle_buttons(controls)
         if controls is None:
             return
         if now - self.last_poll > 0.5:
@@ -229,7 +242,7 @@ class App:
         self.stick = None
         self.next_stick_try = 0.0
         self.assigning = None         # settings key waiting for a joystick button press
-        self.aws_held = False
+        self.held = {name: False for name in CAB_BUTTONS.values()}   # cab buttons held down now
         self.raw_y = 0.0
         self.y = 0.0
         self.y_filter = core.AxisFilter()
@@ -415,7 +428,7 @@ class App:
         self.on_look_smoothing(self.s["look_smoothing"])
 
         self.btn_labels = {}
-        for row, (key, title) in enumerate((("aws_button", "AWS button"),
+        for row, (key, title) in enumerate((("aws_button", "AWS button"), ("alerter_button", "Alerter button"),
                                             ("toggle_button", "Pause button")), start=6):
             ttk.Label(grid, text=title, style="Muted.TLabel").grid(row=row, column=0, sticky="w",
                                                                    pady=3, padx=(0, 14))
@@ -466,14 +479,13 @@ class App:
                                    activebackground=WARN, activeforeground="#1f1600")
 
     def _refresh_button_label(self):
-        action = {"aws_button": "acknowledges AWS", "toggle_button": "pauses / resumes"}
         for key, label in self.btn_labels.items():
             if self.assigning == key:
                 text = "Press a joystick button..."
             elif self.s[key] is None:
                 text = "Not set"
             else:
-                text = f"Button {self.s[key] + 1} {action[key]}"
+                text = f"Button {self.s[key] + 1} {BUTTON_ACTIONS[key]}"
             label.config(text=text)
 
     def on_assign(self, key):
@@ -482,20 +494,21 @@ class App:
 
     def on_clear_button(self, key):
         self.assigning = None
+        self._release_all()
         self.s[key] = None
         save_settings(self.s)
         self._refresh_button_label()
 
     def _assign_button(self, button):
         key, self.assigning = self.assigning, None
-        other = "toggle_button" if key == "aws_button" else "aws_button"
-        if self.s[other] == button:
-            self.s[other] = None          # one joystick button can't do both
+        self._release_all()               # its release would no longer reach the cab button
+        for other in BUTTON_ACTIONS:
+            if other != key and self.s[other] == button:
+                self.s[other] = None      # one joystick button can't do two things
         self.s[key] = button
         save_settings(self.s)
         self._refresh_button_label()
-        what = "acknowledges AWS" if key == "aws_button" else "pauses / resumes the bridge"
-        self.log(f"Button {button + 1} now {what}")
+        self.log(f"Button {button + 1} now {BUTTON_ACTIONS[key]}")
 
     def on_joystick(self, _event=None):
         self.s["joystick"] = self.joy_combo.get()
@@ -596,10 +609,14 @@ class App:
             self.rev_axis_combo.current(self.s["rev_axis"])
         self.log(f"Joystick: {chosen.get_name()}")
 
-    def _set_aws(self, down):
-        if down != self.aws_held:
-            self.aws_held = down
-            self.bridge.aws_queue.put(down)
+    def _set_held(self, name, down):
+        if down != self.held[name]:
+            self.held[name] = down
+            self.bridge.button_queue.put((name, down))
+
+    def _release_all(self):
+        for name in self.held:
+            self._set_held(name, False)
 
     def _poll_joystick(self):
         sid = self.stick.get_instance_id() if self.stick else None
@@ -607,15 +624,16 @@ class App:
             if ev.type == pygame.JOYDEVICEREMOVED and ev.instance_id == sid:
                 self.stick = None
                 self.log("Joystick disconnected")
-                self._set_aws(False)
+                self._release_all()
             elif ev.type == pygame.JOYDEVICEADDED and self.stick is None:
                 self.next_stick_try = 0.0
             elif ev.type in (pygame.JOYBUTTONDOWN, pygame.JOYBUTTONUP) and ev.instance_id == sid:
                 down = ev.type == pygame.JOYBUTTONDOWN
+                cab_button = next((name for key, name in CAB_BUTTONS.items() if ev.button == self.s[key]), None)
                 if down and self.assigning:
                     self._assign_button(ev.button)
-                elif ev.button == self.s["aws_button"]:
-                    self._set_aws(down)
+                elif cab_button:
+                    self._set_held(cab_button, down)
                 elif down and ev.button == self.s["toggle_button"]:
                     self.toggle()
 
@@ -689,6 +707,8 @@ class App:
             else:
                 parts.append("reverser not found")
             parts.append(f"AWS: {pretty_lever(c.aws.name)}" if c.aws else "AWS button not found")
+            parts.append(f"Alerter: {pretty_lever(c.alerter.name)}" if c.alerter
+                         else "alerter / DSD / SIFA not found")
             desc = "  ·  ".join(parts)
         elif c:
             self._set_status("train", "warn", f"{pretty_train(self.bridge.train)} - no throttle/brake found")
@@ -857,22 +877,25 @@ class App:
         if note:
             cv.create_text(rx, y, text=note, anchor="e", fill=color, font=(FONT, 9))
 
-        # AWS: lights up while the AWS joystick button is held
-        y += 18 * k
-        width = 3 * pw + 2 * gap
-        has_aws = c is not None and c.aws is not None
-        button = self.s["aws_button"]
-        if button is None:
-            text = "AWS  -  no button set"
-        elif c is not None and not has_aws:
-            text = "AWS  -  not on this train"
-        else:
-            text = f"AWS  -  button {button + 1}"
-        lit = self.aws_held and button is not None
-        cv.create_rectangle(rx - width, y, rx, y + ph, outline="",
-                            fill=(GOOD if live and has_aws else MUTED) if lit else TRACK)
-        cv.create_text(rx - width / 2, y + ph / 2, text=text, font=(FONT, 9, "bold"),
-                       fill="#0b1a12" if lit else (FG if has_aws else MUTED))
+        # AWS and alerter: light up while their joystick button is held
+        y += 14 * k
+        width, bh = 170 * k, 22 * k
+        for key, name in CAB_BUTTONS.items():
+            title = CAB_BUTTON_NAMES[name].upper()
+            found = c is not None and getattr(c, name) is not None
+            button = self.s[key]
+            if button is None:
+                text = f"{title}  -  no button set"
+            elif c is not None and not found:
+                text = f"{title}  -  not on this train"
+            else:
+                text = f"{title}  -  button {button + 1}"
+            lit = self.held[name] and button is not None
+            cv.create_rectangle(rx - width, y, rx, y + bh, outline="",
+                                fill=(GOOD if live and found else MUTED) if lit else TRACK)
+            cv.create_text(rx - width / 2, y + bh / 2, text=text, font=(FONT, 9, "bold"),
+                           fill="#0b1a12" if lit else (FG if found else MUTED))
+            y += bh + 4 * k
 
     def _draw_lever(self, lever, role, value, x, top, bot, mark):
         k, cv = self.k, self.canvas

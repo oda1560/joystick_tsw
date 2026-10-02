@@ -10,6 +10,7 @@ Base slider (Z axis) -> reverser: + end Forward, middle Neutral, - end Reverse
     (only moved when the train is stopped, never to Off)
 
 Button 1 (trigger)   -> AWS acknowledge (held for as long as you hold the trigger)
+Button 2             -> alerter / DSD / SIFA acknowledge (held for as long as you hold the button)
 
 Twist (Z rotation)   -> look left / right; centre the twist and the view returns to straight ahead
     (emulated mouse movement, only while Train Sim World is the active window)
@@ -62,6 +63,7 @@ REVERSER_INVERT = False
 REVERSER_MAX_SPEED = 0.3         # m/s; the reverser is never moved faster than this (~1 km/h)
 
 AWS_BUTTON = 0                   # joystick button for AWS acknowledge (0 = trigger, labelled "1")
+ALERTER_BUTTON = 1               # joystick button for alerter / DSD / SIFA acknowledge (labelled "2")
 
 USE_LOOK = True
 LOOK_AXIS = 2                    # stick twist (Z rotation): look left / right
@@ -83,6 +85,13 @@ NEUTRAL_LABELS = ["off", "neutral", "coast", "idle", "n", "0"]
 
 AWS_IDS = ["awsreset", "awsacknowledge"]      # compared with "_" removed, lower case
 AWS_NAME_SKIP = ["isolat", "cover", "cutout", "fault", "sunflower", "mcb", "service", "test"]
+
+# Vigilance: the game's "Alerter" input covers the US alerter, UK DSD / vigilance and German SIFA
+ALERTER_IDS = ["alerter", "alerterreset", "vigilance", "vigilancereset", "dsd", "sifa", "sifareset",
+               "deadman"]                     # compared with "_" removed, lower case
+ALERTER_NAMES = ["alerter", "vigilance", "dsd", "sifa", "deadman"]
+ALERTER_NAME_SKIP = ["isolat", "cover", "cutout", "fault", "mcb", "_cb", "service", "test", "device",
+                     "light", "lamp"]
 
 REVERSER_IDS = ["reverser"]
 REVERSER_LABELS = {"forward": ["forward", "fwd", "fw", "f", "ahead"],
@@ -527,7 +536,9 @@ class PushButton:
             hi = api.get_value(f"CurrentDrivableActor/{name}.Function.GetMaximumInputValue")
         except Exception:
             lo = hi = None
-        if isinstance(lo, (int, float)) and isinstance(hi, (int, float)) and hi > lo:
+        if isinstance(lo, (int, float)) and isinstance(hi, (int, float)) and hi != lo:
+            # the minimum is where the button rests; a pedal the game holds down by default (Class 350
+            # DSD) counts backwards, resting at 1 and pressed at 0
             self.released, self.pressed = float(lo), float(hi)
         else:
             self.released, self.pressed = 0.0, 1.0
@@ -886,7 +897,7 @@ class TrainControls:
         self.api = api
         self.log = log
         self.train_id = None
-        self.throttle = self.brake = self.reverser = self.aws = None
+        self.throttle = self.brake = self.reverser = self.aws = self.alerter = None
 
     def speed(self):
         """Train speed in m/s, or None if the game doesn't report it."""
@@ -899,7 +910,9 @@ class TrainControls:
     def _identifiers(self, names):
         skip = [x for x in EXCLUDE if x != "reverser"]
         candidates = [n for n in names if not any(x in n.lower() for x in skip)
-                      or ("aws" in n.lower() and not any(x in n.lower() for x in AWS_NAME_SKIP))]
+                      or ("aws" in n.lower() and not any(x in n.lower() for x in AWS_NAME_SKIP))
+                      or (any(w in n.lower() for w in ALERTER_NAMES)
+                          and not any(x in n.lower() for x in ALERTER_NAME_SKIP))]
 
         def ident(n):
             try:
@@ -913,7 +926,7 @@ class TrainControls:
 
     def detect(self):
         names = node_names(self.api.list("CurrentDrivableActor"))
-        self.throttle = self.brake = self.reverser = self.aws = None
+        self.throttle = self.brake = self.reverser = self.aws = self.alerter = None
         ids = self._identifiers(names)
 
         a = (next((n for n, i in ids if i.lower().replace("_", "") in AWS_IDS), None)
@@ -922,6 +935,21 @@ class TrainControls:
                       and not any(x in n.lower() for x in AWS_NAME_SKIP)), None))
         if a:
             self.aws = PushButton(self.api, a)
+
+        def enabled(n):
+            # some trains carry a spare copy of a control that the game has switched off
+            try:
+                return self.api.get_value(f"CurrentDrivableActor/{n}.Property.bInputEnabled") is not False
+            except Exception:
+                return True
+
+        alerters = ([n for n, i in ids if i.lower().replace("_", "") in ALERTER_IDS and enabled(n)]
+                    or [n for n in names if any(w in n.lower() for w in ALERTER_NAMES)
+                        and not any(x in n.lower() for x in ALERTER_NAME_SKIP) and enabled(n)])
+        if alerters:
+            # where a train has both, use a push button rather than a pedal the game holds down
+            self.alerter = min((PushButton(self.api, n) for n in alerters),
+                               key=lambda b: b.pressed < b.released)
 
         r = (next((n for n, i in ids if any(k in i.lower() for k in REVERSER_IDS)), None)
              or pick(names, ["reverser"], [x for x in EXCLUDE if x != "reverser"]))
@@ -990,6 +1018,7 @@ class TrainControls:
             parts.append("NO throttle/brake controls found (run with --list)")
         parts.append(f"reverser {self.reverser}" if self.reverser else "no reverser found")
         parts.append(f"AWS {self.aws}" if self.aws else "no AWS button found")
+        parts.append(f"alerter {self.alerter}" if self.alerter else "no alerter / DSD / SIFA found")
         return ", ".join(parts)
 
 
@@ -1113,12 +1142,14 @@ def run():
         for event in pygame.event.get():
             if event.type == pygame.JOYDEVICEREMOVED:
                 stick = None
-            elif (event.type in (pygame.JOYBUTTONDOWN, pygame.JOYBUTTONUP) and event.button == AWS_BUTTON
-                  and controls.aws and controls.train_id is not None):
-                try:
-                    controls.aws.set(event.type == pygame.JOYBUTTONDOWN)
-                except Exception as e:
-                    say(f"AWS button failed: {e}")
+            elif event.type in (pygame.JOYBUTTONDOWN, pygame.JOYBUTTONUP) and controls.train_id is not None:
+                for button, cab_button, name in ((AWS_BUTTON, controls.aws, "AWS"),
+                                                 (ALERTER_BUTTON, controls.alerter, "Alerter")):
+                    if event.button == button and cab_button:
+                        try:
+                            cab_button.set(event.type == pygame.JOYBUTTONDOWN)
+                        except Exception as e:
+                            say(f"{name} button failed: {e}")
 
         if stick is None:
             stick = open_joystick()
