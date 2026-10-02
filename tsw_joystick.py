@@ -11,6 +11,9 @@ Base slider (Z axis) -> reverser: + end Forward, middle Neutral, - end Reverse
 
 Button 1 (trigger)   -> AWS acknowledge (held for as long as you hold the trigger)
 
+Twist (Z rotation)   -> look left / right; centre the twist and the view returns to straight ahead
+    (emulated mouse movement, only while Train Sim World is the active window)
+
 Talks to TSW's External Interface API (launch the game with -HTTPAPI).
 The stick only sends values when you move it, so the keyboard keeps working.
 
@@ -20,9 +23,12 @@ Usage:
     python tsw_joystick.py --axes       show live joystick axis values (debug)
 """
 
+import ctypes
 import json
+import math
 import os
 import sys
+import threading
 import time
 import urllib.error
 import urllib.parse
@@ -53,6 +59,13 @@ REVERSER_INVERT = False
 REVERSER_MAX_SPEED = 0.3         # m/s; the reverser is never moved faster than this (~1 km/h)
 
 AWS_BUTTON = 0                   # joystick button for AWS acknowledge (0 = trigger, labelled "1")
+
+USE_LOOK = True
+LOOK_AXIS = 2                    # stick twist (Z rotation): look left / right
+LOOK_INVERT = False
+LOOK_DEADZONE = 0.20             # twist inside this is "centred" and the view returns to straight ahead
+LOOK_MAX_ANGLE = 90.0            # degrees left / right at full twist
+LOOK_SMOOTHING = 0.25            # seconds for the view to ease most of the way to where the twist points
 
 # Primary detection: the game's own input identifier on each control (same across trains).
 THROTTLE_IDS = ["throttle", "mastercontroller", "combinedthrottle"]   # substring match
@@ -426,6 +439,310 @@ class ReverserSync:
         self.verify = (now + 0.7, zone)
 
 
+# ---------------------------------------------------------------- look left / right
+class _MOUSEINPUT(ctypes.Structure):
+    _fields_ = [("dx", ctypes.c_long), ("dy", ctypes.c_long), ("mouseData", ctypes.c_ulong),
+                ("dwFlags", ctypes.c_ulong), ("time", ctypes.c_ulong), ("dwExtraInfo", ctypes.c_size_t)]
+
+
+class _INPUT(ctypes.Structure):
+    _fields_ = [("type", ctypes.c_ulong), ("mi", _MOUSEINPUT)]
+
+
+def mouse_move(dx):
+    """Relative horizontal mouse movement, as if the mouse had been moved by dx counts."""
+    inp = _INPUT(type=0, mi=_MOUSEINPUT(dx=int(dx), dwFlags=0x0001))    # INPUT_MOUSE, MOUSEEVENTF_MOVE
+    ctypes.windll.user32.SendInput(1, ctypes.byref(inp), ctypes.sizeof(_INPUT))
+
+
+def game_has_focus():
+    """True when the foreground window belongs to Train Sim World."""
+    user32, kernel32 = ctypes.windll.user32, ctypes.windll.kernel32
+    pid = ctypes.c_ulong()
+    user32.GetWindowThreadProcessId(user32.GetForegroundWindow(), ctypes.byref(pid))
+    handle = kernel32.OpenProcess(0x1000, False, pid.value)       # PROCESS_QUERY_LIMITED_INFORMATION
+    if not handle:
+        return False
+    try:
+        buf = ctypes.create_unicode_buffer(520)
+        size = ctypes.c_ulong(len(buf))
+        if not kernel32.QueryFullProcessImageNameW(handle, 0, buf, ctypes.byref(size)):
+            return False
+        return "trainsimworld" in os.path.basename(buf.value).lower()
+    finally:
+        kernel32.CloseHandle(handle)
+
+
+def shape_axis(raw, deadzone):
+    """Apply a centre dead zone and rescale so the output still reaches +-1."""
+    if abs(raw) < deadzone:
+        return 0.0
+    return (1.0 if raw > 0 else -1.0) * (abs(raw) - deadzone) / (1.0 - deadzone)
+
+
+def wrap_angle(a):
+    return (a + 180.0) % 360.0 - 180.0
+
+
+class MousePump(threading.Thread):
+    """Sends queued mouse movement in small, evenly spaced pieces (~250 per second), like a real mouse
+    moving slowly, instead of one jump per update - so the view turns smoothly on every game frame."""
+
+    INTERVAL = 0.004     # seconds between pieces
+    SPREAD = 0.066       # each update is spread over two update intervals, so consecutive updates
+                         # overlap and the motion never pauses between them
+
+    def __init__(self):
+        super().__init__(daemon=True)
+        self.running = True
+        self._lock = threading.Lock()
+        self._pending = 0.0              # counts still to send
+        self._rate = 0.0                 # counts per second
+        self._carry = 0.0                # fraction of a count not sent yet
+
+    def add(self, counts):
+        with self._lock:
+            self._pending += counts
+            self._rate = abs(self._pending) / self.SPREAD
+
+    def clear(self):
+        with self._lock:
+            self._pending = self._rate = self._carry = 0.0
+
+    def tick(self, dt):
+        with self._lock:
+            if not self._pending:
+                return
+            step = min(abs(self._pending), self._rate * dt)
+            step = step if self._pending > 0 else -step
+            self._pending -= step
+            if abs(self._pending) < 1e-9:
+                self._pending = 0.0
+            self._carry += step
+            n = int(self._carry) if self._pending else int(round(self._carry))
+            self._carry -= n
+            if not self._pending:
+                self._carry = 0.0
+        if n:
+            mouse_move(n)
+
+    def run(self):
+        try:
+            ctypes.windll.winmm.timeBeginPeriod(1)    # 1 ms sleep resolution instead of ~16 ms
+        except Exception:
+            pass
+        last = time.perf_counter()
+        while self.running:
+            time.sleep(self.INTERVAL)
+            now = time.perf_counter()
+            self.tick(min(0.05, now - last))
+            last = now
+
+
+class LookController(threading.Thread):
+    """Turns the cab view to the angle the twist asks for, using emulated mouse movement and the
+    view direction the game reports (0 = straight ahead), so mouse sensitivity doesn't matter.
+    When the twist goes back to centre the view returns to straight ahead, then the mouse is left alone.
+
+    Moves are sent from a prediction of where the view is heading (instant response); sensitivity and
+    direction are only learned once the view has stopped moving, so game input lag can't fool them."""
+
+    MAX_STEP = 600       # mouse counts per step
+    TOLERANCE = 0.5      # degrees
+    HOLD_BAND = 1.0      # degrees: twist wobble smaller than this doesn't move the view
+    MAX_SPEED = 360.0    # degrees per second
+
+    def __init__(self, log):
+        super().__init__(daemon=True)
+        self.api = TSWApi()
+        self.log = log
+        self.pump = MousePump()
+        self.twist = None                 # -1..+1 after dead zone, from the joystick thread; None = off
+        self.max_angle = LOOK_MAX_ANGLE
+        self.smoothing = LOOK_SMOOTHING
+        self.enabled = True
+        self.running = True
+        self.counts_per_degree = 6.0      # mouse counts per degree of view, learned
+        self.learned = False
+        self.direction = 1                # -1 if the game's mouse look is inverted
+        self.steering = False             # True while we own the view (twisted, or returning)
+        self.yaw = None                   # last view yaw read from the game, for display
+        self.state = "idle"
+        self._next_check = 0.0
+        self._blocked = False
+        self._stuck_target = None
+        self._reset_tracking()
+
+    def _reset_tracking(self):
+        self._predicted = None            # where the view will end up once sent moves are applied
+        self._settled_yaw = None          # view yaw at the last moment it was standing still
+        self._sent = 0                    # counts sent since then
+        self._prev_yaw = None
+        self._still = 0                   # consecutive reads without the view moving
+        self._quiet = 0                   # steps since the last mouse move
+        self._held = None                 # twist target with small wobble filtered out
+        self._smooth = None               # eased target the view actually follows
+        self._smooth_done = True
+        self._last_time = None
+
+    def run(self):
+        self.pump.start()
+        while self.running:
+            time.sleep(1.0 / 30)
+            try:
+                self.step()
+            except Exception:
+                self.state = "no game"
+                self.pump.clear()
+                self._reset_tracking()
+                time.sleep(0.5)
+        self.pump.running = False
+
+    def _read_yaw(self):
+        v = self.api.get("Player.Function.GetControlRotation").get("Values") or {}
+        yaw = (v.get("ReturnValue") or {}).get("yaw")
+        return float(yaw) if isinstance(yaw, (int, float)) else None
+
+    def _settled(self, yaw, target):
+        """The view has stopped: learn from the moves since the last stop, then trust the real angle."""
+        if self._sent and self._settled_yaw is not None:
+            moved = yaw - self._settled_yaw
+            expected = self._sent / self.counts_per_degree
+            if abs(moved) > 2.0:
+                if moved * self._sent > 0:
+                    estimate = min(200.0, max(0.2, abs(self._sent / moved)))
+                    if not self.learned:
+                        self.counts_per_degree, self.learned = estimate, True
+                    elif abs(moved) >= 0.6 * abs(expected):
+                        # only refine from moves that fully landed; a move cut short by the
+                        # edge of the view would make the mouse look less sensitive than it is
+                        self.counts_per_degree = 0.7 * self.counts_per_degree + 0.3 * estimate
+                else:
+                    self.direction = -self.direction
+                    self.log("Look: mouse turns the view the other way - direction flipped")
+            elif abs(self._sent) > 3 * self.counts_per_degree:
+                self._stuck_target = target      # pushed but nothing moved: view is at its limit
+        self._sent = 0
+        self._settled_yaw = yaw
+        self._predicted = yaw
+
+    def _ease(self, target, yaw, now):
+        """Filter the twist target: ignore small wobble, then glide toward it at a limited speed."""
+        if target == 0.0 or self._held is None:
+            self._held = target
+        elif target > self._held + self.HOLD_BAND:     # trail the twist, ignoring wobble inside the band
+            self._held = target - self.HOLD_BAND
+        elif target < self._held - self.HOLD_BAND:
+            self._held = target + self.HOLD_BAND
+        if self._smooth is None:
+            self._smooth = yaw                 # start gliding from wherever the view is now
+        dt = min(0.1, now - self._last_time) if self._last_time else 1.0 / 30
+        self._last_time = now
+        change = self._held - self._smooth
+        if self.smoothing > 0:
+            change *= 1.0 - math.exp(-dt / self.smoothing)
+        limit = self.MAX_SPEED * dt
+        self._smooth += max(-limit, min(limit, change))
+        if abs(self._held - self._smooth) < 0.2:
+            self._smooth = self._held
+        self._smooth_done = self._smooth == self._held
+        return self._smooth
+
+    def step(self):
+        twist = self.twist
+        if twist is None or not self.enabled:
+            self.steering, self.state = False, "off"
+            self.pump.clear()
+            self._reset_tracking()
+            return
+        if twist:
+            target = twist * self.max_angle
+            self.steering = True
+        elif self.steering:
+            target = 0.0                   # twist centred: bring the view back to straight ahead
+        else:
+            self.state = "idle"            # centred and already back: the mouse is free
+            self._reset_tracking()
+            now = time.time()
+            if now >= self._next_check and (self.api.key or self.api.load_key()):
+                self._next_check = now + 0.5
+                yaw = self._read_yaw()     # display only
+                self.yaw = wrap_angle(yaw) if yaw is not None else None
+            return
+
+        if not self.api.key and not self.api.load_key():
+            self.state = "no game"
+            return
+        if not game_has_focus():
+            self.state = "game not focused"
+            self.pump.clear()
+            self._reset_tracking()
+            return
+        now = time.time()
+        if now >= self._next_check:        # don't fight a mouse cursor (menus, interacting with a control)
+            self._next_check = now + 0.25
+            cursor = self.api.get_value("Player.Function.IsControllingCursor")
+            ignored = self.api.get_value("Player.Function.IsLookInputIgnored")
+            self._blocked = bool(cursor) or bool(ignored)
+        if self._blocked:
+            self.state = "cursor active"
+            self.pump.clear()
+            self._reset_tracking()
+            return
+
+        yaw = self._read_yaw()
+        if yaw is None:
+            self.state = "no game"
+            return
+        yaw = wrap_angle(yaw)              # -180..180; the cab view can't turn all the way round,
+        self.yaw = yaw                     # so angles are never wrapped "the short way" below
+        if self._prev_yaw is not None and abs(wrap_angle(yaw - self._prev_yaw)) < 0.05:
+            self._still += 1
+        else:
+            self._still = 0
+        self._prev_yaw = yaw
+        self._quiet += 1
+        settled = self._quiet >= 3 and self._still >= 2
+        if settled or self._predicted is None:
+            self._settled(yaw, target)
+        elif self._still >= 5 and abs(self._sent) > 3 * self.counts_per_degree:
+            # being pushed but not moving for ~0.17 s (longer than game input lag): the view is at
+            # its edge. Re-sync with the real
+            # angle now, so moves the game discarded don't make the view overshoot later.
+            self._stuck_target = target
+            self._sent, self._settled_yaw = 0, yaw
+            self._predicted = self._smooth = yaw
+            self.pump.clear()
+
+        if self._stuck_target is not None:
+            if abs(target - self._stuck_target) < 1.0:
+                self._smooth = yaw         # glide away from where the view really is, not past the limit
+                self.state = "at view limit"
+                return
+            self._stuck_target = None
+
+        target = self._ease(target, yaw, now)
+        error = target - self._predicted
+        if abs(error) < self.TOLERANCE:
+            if settled and abs(target - yaw) < self.TOLERANCE and not twist and self._smooth_done:
+                self.steering = False      # back at centre: hand the view back to the mouse
+            self.state = "following" if twist else ("idle" if not self.steering else "returning to centre")
+            return
+        if not self.learned:
+            if self._sent:
+                return                     # first move sent: wait until the view settles to measure it
+            error = max(-20.0, min(20.0, error))   # small first move until sensitivity is measured
+        dx = max(-self.MAX_STEP, min(self.MAX_STEP, error * self.counts_per_degree))
+        dx = int(round(dx)) or (1 if error > 0 else -1)
+        if not self._sent:
+            self._still = 0                # a new push: only stillness from here on means "at the edge"
+        self.pump.add(dx * self.direction)
+        self._predicted += dx / self.counts_per_degree
+        self._sent += dx
+        self._quiet = 0
+        self.state = "following" if twist else "returning to centre"
+
+
 class TrainControls:
     def __init__(self, api):
         self.api = api
@@ -599,6 +916,8 @@ def run():
 
     rev_sync = ReverserSync(lambda msg: print(time.strftime("%H:%M:%S"), msg, flush=True))
     rev_zone = None
+    look = LookController(lambda msg: print(time.strftime("%H:%M:%S"), msg, flush=True))
+    look.start()
 
     print("TSW7 joystick bridge running. Ctrl+C to stop.")
     while True:
@@ -647,6 +966,12 @@ def run():
                 say("Waiting for TSW7 API on port 31270 (is the game running with -HTTPAPI?)...")
                 controls.train_id = None
                 continue
+
+        if USE_LOOK and LOOK_AXIS < stick.get_numaxes():
+            raw = stick.get_axis(LOOK_AXIS)
+            look.twist = shape_axis(-raw if LOOK_INVERT else raw, LOOK_DEADZONE)
+        else:
+            look.twist = None
 
         if controls.train_id is None:
             continue

@@ -35,7 +35,10 @@ SETTINGS_FILE = os.path.join(HERE, "settings.json")
 DEFAULTS = {"axis": core.Y_AXIS, "invert": core.INVERT_Y, "deadzone": core.DEADZONE,
             "toggle_button": None, "on_top": False, "joystick": "",
             "rev_enabled": core.USE_REVERSER, "rev_axis": core.REVERSER_AXIS,
-            "rev_invert": core.REVERSER_INVERT, "aws_button": core.AWS_BUTTON}
+            "rev_invert": core.REVERSER_INVERT, "aws_button": core.AWS_BUTTON,
+            "look_enabled": core.USE_LOOK, "look_axis": core.LOOK_AXIS, "look_invert": core.LOOK_INVERT,
+            "look_deadzone": core.LOOK_DEADZONE, "look_angle": core.LOOK_MAX_ANGLE,
+            "look_smoothing": core.LOOK_SMOOTHING}
 
 BG, PANEL, TRACK = "#16181d", "#1f232b", "#2b3039"
 FG, MUTED = "#e6e8ec", "#8a919e"
@@ -211,7 +214,8 @@ class Bridge(threading.Thread):
 
 # ---------------------------------------------------------------- window
 class App:
-    CW, CH = 560, 250    # gauge canvas size at 96 dpi
+    CW, CH = 560, 290    # canvas size at 96 dpi
+    GH = 250             # height of the gauge area; the look bar sits below it
 
     def __init__(self, root, start_paused=False):
         self.root = root
@@ -220,6 +224,8 @@ class App:
         self.last_log = None
         self.bridge = Bridge(self.log)
         self.bridge.enabled = not start_paused
+        self.look = core.LookController(self.log)
+        self.look_raw = 0.0           # twist position, +1 = full right
         self.stick = None
         self.next_stick_try = 0.0
         self.assigning = None         # settings key waiting for a joystick button press
@@ -239,6 +245,7 @@ class App:
         root.attributes("-topmost", bool(self.s["on_top"]))
         root.protocol("WM_DELETE_WINDOW", self.close)
         self.bridge.start()
+        self.look.start()
         self.log("Bridge started" + (" (paused)" if start_paused else ""))
         self.tick()
 
@@ -342,13 +349,22 @@ class App:
         ttk.Label(grid, text="Dead zone", style="Muted.TLabel").grid(row=2, column=0, sticky="w", pady=3, padx=(0, 14))
         dz_row = ttk.Frame(grid, style="Panel.TFrame")
         dz_row.grid(row=2, column=1, columnspan=3, sticky="w", pady=3)
-        self.dz_scale = ttk.Scale(dz_row, from_=0.0, to=0.3, length=round(220 * self.k),
+        ttk.Label(dz_row, text="Stick", style="Muted.TLabel").pack(side="left", padx=(0, 6))
+        self.dz_scale = ttk.Scale(dz_row, from_=0.0, to=0.3, length=round(130 * self.k),
                                   value=float(self.s["deadzone"]), command=self.on_deadzone)
         self.dz_scale.pack(side="left")
         self.dz_scale.bind("<ButtonRelease-1>", lambda e: save_settings(self.s))
         self.dz_label = ttk.Label(dz_row, text="", style="Panel.TLabel", width=5)
-        self.dz_label.pack(side="left", padx=(10, 0))
+        self.dz_label.pack(side="left", padx=(6, 12))
         self.on_deadzone(self.s["deadzone"])
+        ttk.Label(dz_row, text="Twist", style="Muted.TLabel").pack(side="left", padx=(0, 6))
+        self.look_dz_scale = ttk.Scale(dz_row, from_=0.0, to=0.5, length=round(130 * self.k),
+                                       value=float(self.s["look_deadzone"]), command=self.on_look_deadzone)
+        self.look_dz_scale.pack(side="left")
+        self.look_dz_scale.bind("<ButtonRelease-1>", lambda e: save_settings(self.s))
+        self.look_dz_label = ttk.Label(dz_row, text="", style="Panel.TLabel", width=5)
+        self.look_dz_label.pack(side="left", padx=(6, 0))
+        self.on_look_deadzone(self.s["look_deadzone"])
 
         ttk.Label(grid, text="Reverser", style="Muted.TLabel").grid(row=3, column=0, sticky="w", pady=3, padx=(0, 14))
         rev_row = ttk.Frame(grid, style="Panel.TFrame")
@@ -363,9 +379,43 @@ class App:
         ttk.Checkbutton(rev_row, text="Invert", variable=self.rev_invert_var, style="Panel.TCheckbutton",
                         command=self.on_rev_invert).pack(side="left", padx=(12, 0))
 
+        ttk.Label(grid, text="Look", style="Muted.TLabel").grid(row=4, column=0, sticky="w", pady=3, padx=(0, 14))
+        look_row = ttk.Frame(grid, style="Panel.TFrame")
+        look_row.grid(row=4, column=1, columnspan=3, sticky="w", pady=3)
+        self.look_var = tk.BooleanVar(value=bool(self.s["look_enabled"]))
+        ttk.Checkbutton(look_row, text="Use twist", variable=self.look_var, style="Panel.TCheckbutton",
+                        command=self.on_look_enabled).pack(side="left", padx=(0, 12))
+        self.look_axis_combo = ttk.Combobox(look_row, state="readonly", width=8)
+        self.look_axis_combo.pack(side="left")
+        self.look_axis_combo.bind("<<ComboboxSelected>>", self.on_look_axis)
+        self.look_invert_var = tk.BooleanVar(value=bool(self.s["look_invert"]))
+        ttk.Checkbutton(look_row, text="Invert", variable=self.look_invert_var, style="Panel.TCheckbutton",
+                        command=self.on_look_invert).pack(side="left", padx=(12, 12))
+        self.look_angle_scale = ttk.Scale(look_row, from_=30, to=150, length=round(100 * self.k),
+                                          value=float(self.s["look_angle"]), command=self.on_look_angle)
+        self.look_angle_scale.pack(side="left")
+        self.look_angle_scale.bind("<ButtonRelease-1>", lambda e: save_settings(self.s))
+        self.look_angle_label = ttk.Label(look_row, text="", style="Panel.TLabel", width=5)
+        self.look_angle_label.pack(side="left", padx=(6, 0))
+        self.on_look_angle(self.s["look_angle"])
+
+        ttk.Label(grid, text="Look smoothing", style="Muted.TLabel").grid(row=5, column=0, sticky="w",
+                                                                         pady=3, padx=(0, 14))
+        smooth_row = ttk.Frame(grid, style="Panel.TFrame")
+        smooth_row.grid(row=5, column=1, columnspan=3, sticky="w", pady=3)
+        ttk.Label(smooth_row, text="Quick", style="Muted.TLabel").pack(side="left", padx=(0, 6))
+        self.smooth_scale = ttk.Scale(smooth_row, from_=0.0, to=0.6, length=round(180 * self.k),
+                                      value=float(self.s["look_smoothing"]), command=self.on_look_smoothing)
+        self.smooth_scale.pack(side="left")
+        self.smooth_scale.bind("<ButtonRelease-1>", lambda e: save_settings(self.s))
+        ttk.Label(smooth_row, text="Smooth", style="Muted.TLabel").pack(side="left", padx=(6, 10))
+        self.smooth_label = ttk.Label(smooth_row, text="", style="Panel.TLabel", width=7)
+        self.smooth_label.pack(side="left")
+        self.on_look_smoothing(self.s["look_smoothing"])
+
         self.btn_labels = {}
         for row, (key, title) in enumerate((("aws_button", "AWS button"),
-                                            ("toggle_button", "Pause button")), start=4):
+                                            ("toggle_button", "Pause button")), start=6):
             ttk.Label(grid, text=title, style="Muted.TLabel").grid(row=row, column=0, sticky="w",
                                                                    pady=3, padx=(0, 14))
             btn_row = ttk.Frame(grid, style="Panel.TFrame")
@@ -386,7 +436,7 @@ class App:
 
         # log
         lp = self._panel(outer, "LOG")
-        self.logtext = tk.Text(lp, height=6, bg=PANEL, fg=MUTED, relief="flat", bd=0,
+        self.logtext = tk.Text(lp, height=4, bg=PANEL, fg=MUTED, relief="flat", bd=0,
                                font=("Consolas", 9), wrap="word", state="disabled",
                                highlightthickness=0)
         self.logtext.pack(fill="x")
@@ -456,6 +506,32 @@ class App:
         self.s["axis"] = self.axis_combo.current()
         save_settings(self.s)
 
+    def on_look_enabled(self):
+        self.s["look_enabled"] = bool(self.look_var.get())
+        save_settings(self.s)
+        self.log("Twist look " + ("on" if self.s["look_enabled"] else "off"))
+
+    def on_look_axis(self, _event=None):
+        self.s["look_axis"] = self.look_axis_combo.current()
+        save_settings(self.s)
+
+    def on_look_invert(self):
+        self.s["look_invert"] = bool(self.look_invert_var.get())
+        save_settings(self.s)
+
+    def on_look_angle(self, value):
+        self.s["look_angle"] = round(float(value))
+        self.look_angle_label.config(text=f"±{self.s['look_angle']}°")
+
+    def on_look_smoothing(self, value):
+        self.s["look_smoothing"] = round(float(value), 2)
+        self.smooth_label.config(text="off" if self.s["look_smoothing"] < 0.01
+                                 else f"{self.s['look_smoothing']:.2f} s")
+
+    def on_look_deadzone(self, value):
+        self.s["look_deadzone"] = round(float(value), 3)
+        self.look_dz_label.config(text=f"{self.s['look_deadzone'] * 100:.0f}%")
+
     def on_rev_enabled(self):
         self.s["rev_enabled"] = bool(self.rev_var.get())
         save_settings(self.s)
@@ -489,6 +565,7 @@ class App:
     def close(self):
         save_settings(self.s)
         self.bridge.running = False
+        self.look.running = False
         pygame.quit()
         self.root.destroy()
 
@@ -510,6 +587,9 @@ class App:
         self.axis_combo["values"] = [f"Axis {i}" for i in range(n)]
         if self.s["axis"] < n:
             self.axis_combo.current(self.s["axis"])
+        self.look_axis_combo["values"] = [f"Axis {i}" for i in range(n)]
+        if self.s["look_axis"] < n:
+            self.look_axis_combo.current(self.s["look_axis"])
         self.rev_axis_combo["values"] = [f"Axis {i}" for i in range(n)]
         if self.s["rev_axis"] < n:
             self.rev_axis_combo.current(self.s["rev_axis"])
@@ -544,6 +624,7 @@ class App:
         if self.stick is None:
             self.bridge.y = None
             self.bridge.rev_zone = self.rev_zone = None
+            self.look.twist = None
             return
 
         rev_axis = self.s["rev_axis"]
@@ -554,6 +635,17 @@ class App:
         else:
             self.rev_zone = None
         self.bridge.rev_zone = self.rev_zone
+
+        look_axis = self.s["look_axis"]
+        if self.s["look_enabled"] and look_axis < self.stick.get_numaxes():
+            raw = self.stick.get_axis(look_axis)
+            self.look_raw = -raw if self.s["look_invert"] else raw
+            self.look.twist = core.shape_axis(self.look_raw, float(self.s["look_deadzone"]))
+        else:
+            self.look.twist = None
+        self.look.max_angle = float(self.s["look_angle"])
+        self.look.smoothing = float(self.s["look_smoothing"])
+        self.look.enabled = self.bridge.enabled
 
         axis, invert, dz = self.s["axis"], bool(self.s["invert"]), float(self.s["deadzone"])
         raw = self.stick.get_axis(axis) if axis < self.stick.get_numaxes() else 0.0
@@ -630,7 +722,7 @@ class App:
         k, cv = self.k, self.canvas
         cv.delete("all")
         W, H = self.CW * k, self.CH * k
-        top, bot = 34 * k, (self.CH - 36) * k
+        top, bot = 34 * k, (self.GH - 36) * k
         small, smallb = (FONT, 8), (FONT, 8, "bold")
         c = self.bridge.controls
         live = (self.bridge.enabled and c is not None and self.stick is not None
@@ -686,6 +778,43 @@ class App:
             sub = "Preview - not connected"
         cv.create_text(rx, 88 * k, text=sub, anchor="e", fill=mark, font=(FONT, 9))
         self._draw_reverser(rx, 130 * k, live)
+        self._draw_look(W)
+
+    def _draw_look(self, W):
+        """Horizontal bar: white line = where the twist points, green marker = where the view is."""
+        k, cv, look = self.k, self.canvas, self.look
+        y = (self.GH + 4) * k
+        x0, x1 = 22 * k, W - 14 * k
+        span = max(30.0, float(self.s["look_angle"]))
+        px = lambda angle: x0 + (max(-span, min(span, angle)) + span) / (2 * span) * (x1 - x0)
+
+        cv.create_text(x0, y, text="LOOK", anchor="w", fill=MUTED, font=(FONT, 8, "bold"))
+        if not self.s["look_enabled"]:
+            status = "twist look off"
+        else:
+            status = look.state
+            if look.yaw is not None and look.state not in ("off", "no game"):
+                side = "straight ahead" if abs(look.yaw) < 1 else \
+                    f"{abs(look.yaw):.0f}° {'right' if look.yaw > 0 else 'left'}"
+                status = f"view {side}  ·  {look.state}"
+        warn = look.state in ("game not focused", "cursor active", "at view limit")
+        cv.create_text(x1, y, text=status, anchor="e", fill=WARN if warn else MUTED, font=(FONT, 8))
+
+        by = y + 10 * k
+        bh = 10 * k
+        cv.create_rectangle(x0, by, x1, by + bh, fill=TRACK, outline="")
+        cv.create_line(px(0), by - 2 * k, px(0), by + bh + 2 * k, fill=MUTED)
+        cv.create_text(x0, by + bh + 8 * k, text="Left", anchor="w", fill=MUTED, font=(FONT, 7))
+        cv.create_text(x1, by + bh + 8 * k, text="Right", anchor="e", fill=MUTED, font=(FONT, 7))
+        if self.stick and self.s["look_enabled"] and look.twist is not None:
+            tx = px(look.twist * span)
+            if look.twist:
+                cv.create_rectangle(min(px(0), tx), by, max(px(0), tx), by + bh, fill="#3d4a5c", outline="")
+            cv.create_line(tx, by - 3 * k, tx, by + bh + 3 * k, fill=FG, width=max(2, round(2 * k)))
+        if look.yaw is not None and look.state not in ("off", "no game"):
+            vx = px(look.yaw)
+            cv.create_polygon(vx - 6 * k, by - 7 * k, vx + 6 * k, by - 7 * k, vx, by,
+                              fill=GOOD if look.steering else MUTED, outline="")
 
     def _draw_reverser(self, rx, y, live):
         """R / N / F pills: filled = where the train's reverser is, outlined = where the slider is."""
