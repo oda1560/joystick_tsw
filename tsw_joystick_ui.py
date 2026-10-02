@@ -173,9 +173,9 @@ class Bridge(threading.Thread):
                 return
             self.set_game("ok", "Connected")
             if train != self.train or force:
-                controls = core.TrainControls(self.api)
-                controls.detect()
+                controls = core.TrainControls(self.api, log=self.log)
                 controls.train_id = train
+                controls.detect()
                 self.controls, self.train, self.last_sent = controls, train, None
                 self.rev_sync.reset()
                 self.log(f"Train: {pretty_train(train)} -> {controls.describe()}")

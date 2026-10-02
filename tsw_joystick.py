@@ -27,6 +27,7 @@ import ctypes
 import json
 import math
 import os
+import re
 import sys
 import threading
 import time
@@ -174,10 +175,35 @@ def is_brake_label(label):
     return "brake" in label or is_emergency(label) or label.strip().startswith("b")
 
 
+CALIBRATION_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "lever_calibration.json")
+_calibration = None
+
+
+def load_calibration():
+    """Off positions found on irregular levers, per train, so they're only searched for once."""
+    global _calibration
+    if _calibration is None:
+        try:
+            with open(CALIBRATION_FILE, encoding="utf-8") as f:
+                _calibration = json.load(f)
+        except (OSError, ValueError):
+            _calibration = {}
+    return _calibration
+
+
+def save_calibration(key, value):
+    load_calibration()[key] = round(value, 4)
+    try:
+        with open(CALIBRATION_FILE, "w", encoding="utf-8") as f:
+            json.dump(_calibration, f, indent=2)
+    except OSError:
+        pass
+
+
 class Lever:
     """One controllable lever, its safe input range and (for combined levers) neutral point."""
 
-    def __init__(self, api, name, ident=""):
+    def __init__(self, api, name, ident="", train=None):
         self.api = api
         self.name = name
         self.ident = ident or ""
@@ -192,8 +218,15 @@ class Lever:
         self.neutral = self.safe_lo
         self.power_end = self.safe_hi
         self.brake_end = None
+        self.neutral_verified = False     # Off position confirmed with the game (combined levers)
+        self._calibration_key = f"{train}|{name}" if train else None
         if self.combined:
             self._find_neutral()
+            learned = load_calibration().get(self._calibration_key) if self._calibration_key else None
+            if isinstance(learned, (int, float)) and self.safe_lo <= learned <= self.safe_hi:
+                self.neutral, self.neutral_verified = float(learned), True
+                self.note = re.sub(r"neutral [-\d.e]+ from [^,]*",
+                                   f"neutral {self.neutral:.3g} (learned earlier)", self.note)
         self.notches = self._notch_positions()
         self._notch = None                # index of the notch last sent
         self._last_sent = (None, 0.0)     # (value, time)
@@ -258,6 +291,7 @@ class Lever:
             return None
 
         zones = []
+        self._neutral_out_zone = None     # Off notch as the game reports it, in output units
         for nv in named:
             r = nv.get("valueRange") or {}
             source = nv.get("valueSource", "")
@@ -265,6 +299,9 @@ class Lever:
                 continue
             a, b = convert(float(r["min"]), source), convert(float(r["max"]), source)
             label = str(nv.get("displayName", "")).lower()
+            if source == "Output" and label.strip() in NEUTRAL_LABELS:
+                self._neutral_out_zone = (min(float(r["min"]), float(r["max"])),
+                                          max(float(r["min"]), float(r["max"])))
             if a is None or b is None:
                 zones.append((None, None, label, source))
             else:
@@ -354,6 +391,52 @@ class Lever:
         """Value frac (0..1) of the way from start to end, never outside the safe range."""
         frac = min(1.0, max(0.0, frac))
         return min(self.safe_hi, max(self.safe_lo, start + (end - start) * frac))
+
+    def settle_neutral(self):
+        """Put a combined power/brake lever on Off, checking with the game where Off really is.
+        Irregular levers (e.g. Class 802) aren't evenly spaced, so the estimate from the notch list can
+        land in a brake notch. The game is asked which notch the handle is in and the handle is nudged
+        toward Off - from the brake side toward less braking, never toward emergency. Done once per
+        train; where the estimate is already right this is a single check. Returns a log message."""
+        zone = self._neutral_out_zone
+        if self.neutral_verified or zone is None:
+            self.neutral_verified = True
+            self.set_value(self.neutral)
+            return None
+        target = 0.0 if zone[0] <= 0.0 <= zone[1] else (zone[0] + zone[1]) / 2
+        if self._out_range:
+            slope = (self._out_range[1] - self._out_range[0]) / (self.hi - self.lo)
+        else:
+            slope = max(1e-3, (zone[1] - zone[0]) / 0.1)
+        x, prev = self.neutral, None
+        for _ in range(25):
+            self.api.set(self.path, x)
+            time.sleep(0.05)
+            out = self._get("Function.GetCurrentOutputValue").get("ReturnValue")
+            if not isinstance(out, (int, float)):
+                self.neutral_verified = True          # the game can't tell us: keep the estimate
+                return None
+            inside = zone[0] <= out <= zone[1]
+            if inside and (abs(out - target) < 0.05 or (prev and prev[1] == out)):
+                moved = abs(x - self.neutral) > 1e-4
+                self.neutral, self.neutral_verified = x, True
+                self._last_sent = (x, time.time())
+                self.note = re.sub(r"neutral [-\d.e]+ from [^,]*", f"neutral {x:.3g} (checked with game)",
+                                   self.note)
+                if self._calibration_key:
+                    save_calibration(self._calibration_key, x)
+                return f"Off position found at {x:.3f} on {self.name}" if moved else None
+            if prev and abs(x - prev[0]) > 1e-6 and (out - prev[1]) / (x - prev[0]) > 0:
+                slope = (out - prev[1]) / (x - prev[0])
+            prev = (x, out)
+            step = (target - out) / slope * (1.0 if inside else 0.8)   # approach without overshooting
+            step = max(-0.1, min(0.1, step))
+            if abs(step) < 0.003:
+                step = math.copysign(0.003, target - out)
+            x = min(self.safe_hi, max(self.safe_lo, x + step))
+        self.neutral_verified = True                  # give up searching; keep the estimate
+        self.set_value(self.neutral)
+        return f"Couldn't confirm the Off position on {self.name}; using the estimate"
 
     def set_value(self, value):
         value = min(self.safe_hi, max(self.safe_lo, value))
@@ -799,8 +882,9 @@ class LookController(threading.Thread):
 
 
 class TrainControls:
-    def __init__(self, api):
+    def __init__(self, api, log=None):
         self.api = api
+        self.log = log
         self.train_id = None
         self.throttle = self.brake = self.reverser = self.aws = None
 
@@ -863,7 +947,7 @@ class TrainControls:
         if not b:
             b = next((n for n in pick_all(names, BRAKE_NAMES, EXCLUDE) if n != t and is_lever(n)), None)
         if t:
-            lever = Lever(self.api, t, id_of.get(t, ""))
+            lever = Lever(self.api, t, id_of.get(t, ""), train=self.train_id)
             self.throttle = lever if lever.works() else None
         if b:
             lever = Lever(self.api, b, id_of.get(b, ""))
@@ -887,7 +971,13 @@ class TrainControls:
 
     def apply(self, y):
         for lever, value in self.targets(y).items():
-            lever.set_value(value)
+            if (lever is self.throttle and lever.combined and not lever.neutral_verified
+                    and value == lever.neutral):
+                message = lever.settle_neutral()     # first time at Off: check where Off really is
+                if message and self.log:
+                    self.log(message)
+            else:
+                lever.set_value(value)
 
     def describe(self):
         parts = []
@@ -982,7 +1072,8 @@ def list_controls():
         print(f"API key not found at {KEY_FILE}. Launch TSW7 with -HTTPAPI first.")
         return
     controls = TrainControls(api)
-    print("Train:", api.get_value("CurrentDrivableActor.ObjectClass"))
+    controls.train_id = api.get_value("CurrentDrivableActor.ObjectClass")
+    print("Train:", controls.train_id)
     names, ids = controls.detect()
     print("Controls with a game input identifier:")
     for n, i in ids:
@@ -998,7 +1089,7 @@ def list_controls():
 def run():
     pygame.init()
     api = TSWApi()
-    controls = TrainControls(api)
+    controls = TrainControls(api, log=lambda msg: print(time.strftime("%H:%M:%S"), msg, flush=True))
     stick = None
     last_sent = None
     last_train_check = 0.0
