@@ -50,6 +50,8 @@ Y_AXIS = 1                       # axis index for the stick's forward/back
 INVERT_Y = False                 # set True if forward gives brake instead of throttle
 DEADZONE = 0.08                  # around centre, treated as neutral
 SEND_THRESHOLD = 0.01            # minimum change before sending to the game
+STICK_BAND = 0.015               # stick reversals smaller than this are ignored (sensor flicker)
+STICK_SMOOTHING = 0.05           # seconds of smoothing on the stick
 POLL_HZ = 30
 TRAIN_CHECK_SECONDS = 2.0        # how often to check whether you changed train
 
@@ -192,6 +194,42 @@ class Lever:
         self.brake_end = None
         if self.combined:
             self._find_neutral()
+        self.notches = self._notch_positions()
+        self._notch = None                # index of the notch last sent
+        self._last_sent = (None, 0.0)     # (value, time)
+
+    NOTCH_HYSTERESIS = 0.2    # past the halfway point by this fraction of a notch before moving to it
+
+    def _notch_positions(self):
+        """Input values of the lever's notches, when they can be worked out reliably: the lever maps
+        input to output linearly and has exactly one notch per whole output number (e.g. Class 375
+        power handle: Emergency, B3..B1, Off, P1..P4 = outputs -4..4, 9 notches). None otherwise
+        (e.g. levers with a smooth brake section) - those get sent smooth values instead."""
+        count = self._get("Function.GetNotchCount").get("ReturnValue")
+        if not isinstance(count, int) or count < 2 or self._out_range is None:
+            return None
+        out_lo, out_hi = self._out_range
+        outputs = list(range(math.ceil(out_lo - 1e-6), math.floor(out_hi + 1e-6) + 1))
+        if len(outputs) != count:
+            return None
+        span = self.hi - self.lo
+        positions = [self.lo + (o - out_lo) / (out_hi - out_lo) * span for o in outputs]
+        positions = [p for p in positions if self.safe_lo - 1e-6 <= p <= self.safe_hi + 1e-6]
+        return positions if len(positions) >= 2 else None
+
+    def _snap(self, value):
+        """Nearest notch, with hysteresis so a stick resting near a boundary can't flip between two."""
+        p = self.notches
+        k = self._notch
+        if k is None:
+            k = min(range(len(p)), key=lambda i: abs(p[i] - value))
+        else:
+            while k + 1 < len(p) and value > (p[k] + p[k + 1]) / 2 + self.NOTCH_HYSTERESIS * (p[k + 1] - p[k]):
+                k += 1
+            while k > 0 and value < (p[k - 1] + p[k]) / 2 - self.NOTCH_HYSTERESIS * (p[k] - p[k - 1]):
+                k -= 1
+        self._notch = k
+        return p[k]
 
     def _get(self, endpoint):
         try:
@@ -207,6 +245,7 @@ class Lever:
         custom = self._get("Property.bCustomOutputValueMapping").get("Value")
         out_ok = (isinstance(out_lo, (int, float)) and isinstance(out_hi, (int, float))
                   and out_hi > out_lo and not custom)
+        self._out_range = (float(out_lo), float(out_hi)) if out_ok else None
         span = self.hi - self.lo
 
         def convert(v, source):
@@ -317,7 +356,16 @@ class Lever:
         return min(self.safe_hi, max(self.safe_lo, start + (end - start) * frac))
 
     def set_value(self, value):
-        self.api.set(self.path, min(self.safe_hi, max(self.safe_lo, value)))
+        value = min(self.safe_hi, max(self.safe_lo, value))
+        if self.notches:
+            # only ever send exact notch positions: an in-between value makes the game draw the handle
+            # there and then snap it back to the notch, which looks like the handle jumping about
+            value = self._snap(value)
+            last_value, last_time = self._last_sent
+            if value == last_value and time.time() - last_time < 0.5:
+                return                     # already there (re-sent now and then in case keys moved it)
+        self.api.set(self.path, value)
+        self._last_sent = (value, time.time())
 
     def __repr__(self):
         text = f"{self.name} [{self.safe_lo:.3g}..{self.safe_hi:.3g}]"
@@ -868,6 +916,39 @@ def open_joystick():
     return sticks[0]
 
 
+class AxisFilter:
+    """Calms a stick axis: smooths sensor flicker and ignores tiny reversals (like the slack in a real
+    handle), so moving the stick slowly never makes a lever twitch back and forth. Centre (dead zone)
+    and the ends of travel still come through exactly."""
+
+    def __init__(self, band=STICK_BAND, smoothing=STICK_SMOOTHING):
+        self.band = band
+        self.smoothing = smoothing
+        self.value = None
+        self._smooth = 0.0
+        self._time = 0.0
+
+    def update(self, raw, now=None):
+        now = time.time() if now is None else now
+        if self.value is None or raw == 0.0:      # first reading, or stick in the dead zone: exact
+            self.value = self._smooth = raw
+            self._time = now
+            return raw
+        dt = min(0.1, max(0.0, now - self._time))
+        self._time = now
+        if self.smoothing > 0:
+            self._smooth += (raw - self._smooth) * (1.0 - math.exp(-dt / self.smoothing))
+        else:
+            self._smooth = raw
+        if self._smooth > self.value + self.band:
+            self.value = self._smooth - self.band
+        elif self._smooth < self.value - self.band:
+            self.value = self._smooth + self.band
+        if abs(self._smooth) > 1.0 - self.band:   # end of travel: full power / full brake exactly
+            self.value = math.copysign(1.0, self._smooth)
+        return self.value
+
+
 def read_y(stick, axis=None, invert=None, deadzone=None):
     axis = Y_AXIS if axis is None else axis
     invert = INVERT_Y if invert is None else invert
@@ -931,6 +1012,7 @@ def run():
 
     rev_sync = ReverserSync(lambda msg: print(time.strftime("%H:%M:%S"), msg, flush=True))
     rev_zone = None
+    y_filter = AxisFilter()
     look = LookController(lambda msg: print(time.strftime("%H:%M:%S"), msg, flush=True))
     look.start()
 
@@ -1001,7 +1083,7 @@ def run():
                 controls.train_id = None
                 continue
 
-        y = read_y(stick)
+        y = y_filter.update(read_y(stick))
         if last_sent is not None and abs(y - last_sent) < SEND_THRESHOLD:
             continue   # stick not moved: leave levers alone so keyboard still works
         if last_sent is None:

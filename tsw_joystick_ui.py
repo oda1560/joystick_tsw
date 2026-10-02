@@ -232,6 +232,7 @@ class App:
         self.aws_held = False
         self.raw_y = 0.0
         self.y = 0.0
+        self.y_filter = core.AxisFilter()
         self.rev_s = 0.0              # slider position, +1 = forward end
         self.rev_zone = None
         self.frame = 0
@@ -650,7 +651,7 @@ class App:
         axis, invert, dz = self.s["axis"], bool(self.s["invert"]), float(self.s["deadzone"])
         raw = self.stick.get_axis(axis) if axis < self.stick.get_numaxes() else 0.0
         self.raw_y = raw if invert else -raw
-        self.y = core.read_y(self.stick, axis, invert, dz)
+        self.y = self.y_filter.update(core.read_y(self.stick, axis, invert, dz))
         self.bridge.y = self.y
 
         if self.frame % 6 == 0:
