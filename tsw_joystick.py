@@ -246,6 +246,7 @@ class Lever:
         self.power_end = self.safe_hi
         self.brake_end = None
         self.neutral_verified = False     # Off position confirmed with the game (combined levers)
+        self.brake_end_verified = False   # full brake checked with the game (combined levers)
         self._calibration_key = f"{train}|{name}" if train else None
         if self.combined:
             self._find_neutral()
@@ -254,6 +255,10 @@ class Lever:
                 self.neutral, self.neutral_verified = float(learned), True
                 self.note = re.sub(r"neutral [-\d.e]+ from [^,]*",
                                    f"neutral {self.neutral:.3g} (learned earlier)", self.note)
+            end = (load_calibration().get(f"{self._calibration_key}|brake_end")
+                   if self._calibration_key else None)
+            if isinstance(end, (int, float)) and self.lo <= end <= self.hi:
+                self._set_brake_end(float(end))
         self.notches = self._notch_positions()
         self._notch = None                # index of the notch last sent
         self._last_sent = (None, 0.0)     # (value, time)
@@ -468,6 +473,78 @@ class Lever:
         self.neutral_verified = True                  # give up searching; keep the estimate
         self.set_value(self.neutral)
         return f"Couldn't confirm the Off position on {self.name}; using the estimate"
+
+    def _set_brake_end(self, end):
+        """Move full brake to end, if that is further than now (a place checked with the game)."""
+        self.brake_end_verified = True
+        if self.brake_end is None or self.brake_end == end:
+            return
+        if self.brake_end == self.safe_lo and end < self.safe_lo:
+            self.safe_lo = self.brake_end = end
+        elif self.brake_end == self.safe_hi and end > self.safe_hi:
+            self.safe_hi = self.brake_end = end
+
+    def extend_brake(self):
+        """On a smooth brake range the emergency margin, worked out from an estimate of where emergency
+        starts, can stop well short of full braking (Class 331: 86%). With the handle at full brake, check
+        with the game: read where the handle is, confirm the brake range responds smoothly, then move toward
+        the end of the named brake range in small steps, checking each one, and stop 3% short of it - never
+        into emergency. Done once per train and remembered. Returns a log message, or None."""
+        self.brake_end_verified = True
+        brake = emerg = None
+        for label, rng in self.out_named.items():
+            if is_emergency(label):
+                emerg = emerg or rng
+            elif is_brake_label(label):
+                brake = brake or rng
+        if self.notches or brake is None or emerg is None or self.brake_end is None:
+            return None                    # notched handles already stop on the last brake notch
+        b_lo, b_hi = brake
+        edge, inward = (b_lo, 1.0) if sum(emerg) < sum(brake) else (b_hi, -1.0)
+        target = edge + inward * 0.03 * (b_hi - b_lo)
+
+        def reading(x):
+            self.api.set(self.path, x)
+            time.sleep(0.05)
+            out = self._get("Function.GetCurrentOutputValue").get("ReturnValue")
+            return float(out) if isinstance(out, (int, float)) and b_lo <= out <= b_hi else None
+
+        # three readings stepping back toward Off (less braking, so always safe); the handle has to answer
+        # smoothly and in a straight line, otherwise it's left as it is
+        start = self.brake_end
+        step = (self.neutral - start) * 0.05
+        xs = [start, start + step, start + 2 * step]
+        outs = [reading(x) for x in xs]
+        slopes = [(o2 - o1) / (x2 - x1) for x1, x2, o1, o2 in zip(xs, xs[1:], outs, outs[1:])
+                  if None not in (o1, o2)]
+        if (len(slopes) < 2 or not slopes[0] or slopes[0] * slopes[1] <= 0
+                or abs(slopes[0] - slopes[1]) > 0.1 * abs(slopes[0])):
+            self.api.set(self.path, start)
+            return None
+        slope = sum(slopes) / 2
+        x, out = start, reading(start)
+        for _ in range(12):
+            if out is None or abs(target - out) <= 0.01 * (b_hi - b_lo):
+                break
+            # cover 40% of what's left, with the slope measured over the last step, so a handle that
+            # gets steeper toward the end still can't be pushed past the target in one go
+            nx = min(self.hi, max(self.lo, x + (target - out) / slope * 0.4))
+            nout = reading(nx)
+            if nout is None:               # outside the brake range: stay at the last good place
+                break
+            if abs(nx - x) > 1e-6 and nout != out and (nout - out) / (nx - x) * slope > 0:
+                slope = (nout - out) / (nx - x)
+            x, out = nx, nout
+        further = (x - start) * (start - self.neutral) > 1e-6     # more braking than before
+        best = x if further else start
+        self.api.set(self.path, best)
+        self._last_sent = (best, time.time())
+        if not further:
+            return None
+        self._set_brake_end(best)
+        if self._calibration_key:
+            save_calibration(f"{self._calibration_key}|brake_end", best)
+        return f"Full brake on {self.name} extended from {start:.3f} to {best:.3f} (checked with game)"
 
     def set_value(self, value):
         value = min(self.safe_hi, max(self.safe_lo, value))
@@ -1240,13 +1317,17 @@ class TrainControls:
 
     def apply(self, y):
         for lever, value in self.targets(y).items():
+            message = None
             if (lever is self.throttle and lever.combined and not lever.neutral_verified
                     and value == lever.neutral):
                 message = lever.settle_neutral()     # first time at Off: check where Off really is
-                if message and self.log:
-                    self.log(message)
             else:
                 lever.set_value(value)
+                if (lever is self.throttle and lever.combined and lever.neutral_verified
+                        and not lever.brake_end_verified and value == lever.brake_end):
+                    message = lever.extend_brake()   # first time at full brake: check how far it goes
+            if message and self.log:
+                self.log(message)
 
     def describe(self):
         parts = []
