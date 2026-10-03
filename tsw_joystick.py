@@ -113,6 +113,9 @@ REVERSER_IDS = ["reverser"]
 REVERSER_LABELS = {"forward": ["forward", "fwd", "fw", "f", "ahead"],
                    "neutral": ["neutral", "n", "mid", "centre", "center"],
                    "reverse": ["reverse", "rev", "r", "backward", "back"]}
+# used for Neutral on reversers that have none, in order of preference: positions with no traction, and the
+# engine kept running first (on BR diesels Off stops the engine, Engine Only is their neutral)
+NEUTRAL_STAND_INS = ["engine only", "on", "0", "off"]
 EXCLUDE = ["dynamic", "independent", "loco", "emergency", "park", "handbrake", "release",
            "bail", "reverser", "horn", "light", "wiper", "door", "sander", "pantograph",
            # circuit breakers, isolation switches, covers etc. are not the driving levers
@@ -618,6 +621,7 @@ class Reverser:
         self.out_ranges = {}              # the same notches in output units, where the game names them so
         self.backwards = False            # True when the output falls as the input rises
         self.learned = set()              # notches confirmed with the game somewhere other than estimated
+        self.neutral_label = None         # what the train calls the notch used as Neutral, if not Neutral
         lo, hi = self.lever.lo, self.lever.hi
         for prefix in (False, True):      # exact names first, then e.g. "Forward 1"
             for a, b, label, source in self.lever.zones:
@@ -626,6 +630,9 @@ class Reverser:
                     self.notches[pos] = min(hi, max(lo, (a + b) / 2))
                     if source == "Output" and label in self.lever.out_named:
                         self.out_ranges[pos] = self.lever.out_named[label]
+        if "neutral" not in self.notches and "forward" in self.notches and "reverse" in self.notches:
+            self._stand_in_neutral()
+        self._trim_overlaps()
         self.ok = all(p in self.notches for p in REVERSER_LABELS)
         self._calibration_key = f"{train}|{name}" if train else None
         if self._calibration_key:
@@ -637,6 +644,62 @@ class Reverser:
         if self.out_ranges and self.lever._out_range:
             x = self._input()
             self._learn_direction((x, None), (x, self._output()))
+
+    def _stand_in_neutral(self):
+        """For a reverser with no Neutral, the notch used instead: one with no traction (NEUTRAL_STAND_INS),
+        preferably between Reverse and Forward (BR diesels: Off, Reverse, Engine Only, Forward; Class 08:
+        Reverse, Off, Forward), else anywhere (Class 101: Off, Forward, Reverse). With none, the unnamed notch
+        between Reverse and Forward (BR 363)."""
+        f, r = self.notches["forward"], self.notches["reverse"]
+        lo, hi, middle = min(f, r), max(f, r), (f + r) / 2
+        best = None
+        for a, b, label, source in self.lever.zones:
+            name = label.strip().lower()
+            if a is None or name not in NEUTRAL_STAND_INS:
+                continue
+            if any(a < (za + zb) / 2 < b and zb - za < b - a
+                   for za, zb, zl, _ in self.lever.zones if za is not None and zl != label):
+                continue                   # a name for the rest of the handle (Class 52: Engine Only)
+            x = min(self.lever.hi, max(self.lever.lo, (a + b) / 2))
+            rank = (not lo < x < hi, NEUTRAL_STAND_INS.index(name), abs(x - middle))
+            if best is None or rank < best[0]:
+                best = (rank, x, label, source)
+        if best:
+            _, x, label, source = best
+            self.notches["neutral"] = x
+            self.neutral_label = label.strip().lower()
+            if source == "Output" and label in self.lever.out_named:
+                self.out_ranges["neutral"] = self.lever.out_named[label]
+            return
+        fo, ro = self.out_ranges.get("forward"), self.out_ranges.get("reverse")
+        if fo and ro and (fo[1] < ro[0] or ro[1] < fo[0]):
+            gap = (fo[1], ro[0]) if fo[1] < ro[0] else (ro[1], fo[0])
+            if not any(gap[0] < (a + b) / 2 < gap[1] for a, b in self.lever.out_named.values()):
+                self.notches["neutral"] = middle
+                self.out_ranges["neutral"] = gap
+
+    def _trim_overlaps(self):
+        """Keep each notch's output range off the other, narrower, named notches: the Class 323 names Reverse
+        from -1.5 to 0.5, over Neutral (-0.5 to 0.5), so Neutral was taken for Reverse. (A wider name is one
+        for the rest of the handle, e.g. Class 52 Engine Only.)"""
+        for pos, (a, b) in list(self.out_ranges.items()):
+            centre, trimmed = (a + b) / 2, (a, b)
+            for oa, ob in self.lever.out_named.values():
+                other = (oa + ob) / 2
+                if (oa, ob) != (a, b) and ob - oa < b - a and trimmed[0] < other < trimmed[1]:
+                    if other > centre:
+                        trimmed = (trimmed[0], min(trimmed[1], oa))
+                    else:
+                        trimmed = (max(trimmed[0], ob), trimmed[1])
+            if trimmed != (a, b):
+                self.out_ranges[pos] = trimmed
+                if self.lever._out_range:
+                    self.notches[pos] = self._estimate(pos)
+
+    def _name(self, label):
+        """'forward' / 'neutral' / 'reverse' for a notch name, or the name itself."""
+        s = label.strip()
+        return reverser_label(s) or ("neutral" if s.lower() == self.neutral_label else s)
 
     def _input(self):
         v = self.api.get_value(self.path)
@@ -690,14 +753,21 @@ class Reverser:
 
     def _move(self, x, position):
         """Send the handle to input x; returns the game's output once it reports the notch (or after a
-        short wait)."""
-        self.api.set(self.path, x)
-        out = None
-        for wait in (0.05, 0.1, 0.15):
-            time.sleep(wait)
-            out = self._output()
-            if out is None or self._at(position, out):
-                break
+        short wait). A gated notch on the way stops the handle short (HST: from Engine Off, Forward stops at
+        Neutral), so it is sent again while that gets it further."""
+        last = None
+        for _ in range(3):
+            self.api.set(self.path, x)
+            out = None
+            for wait in (0.05, 0.1, 0.15):
+                time.sleep(wait)
+                out = self._output()
+                if out is None or self._at(position, out):
+                    return out
+            now = self._input()
+            if now is None or abs(now - x) < 1e-3 or now == last:
+                return out                 # it's where it was sent (or settled in a notch nearby)
+            last = now
         return out
 
     def _remember(self, position):
@@ -713,6 +783,12 @@ class Reverser:
         rng = self.out_ranges.get(position)
         if rng is None or self.lever._out_range is None:
             self.lever.set_value(self.notches[position])   # notch given as an input value: exact
+            x = self.lever._last_sent[0]
+            for _ in range(2):                             # stopped short at a gated notch: send again
+                time.sleep(0.1)
+                if self.position() == position:
+                    return
+                self.api.set(self.path, x)
             return
         before = (self._input(), self._output())
         x = self.notches[position]
@@ -737,18 +813,22 @@ class Reverser:
         count = self.lever._get("Function.GetNotchCount").get("ReturnValue")
         count = count if isinstance(count, int) and count >= 2 else 4
         notch = (hi - lo) / (count - 1)
-        target, moved_since_change = sum(rng) / 2, 0.0
-        for _ in range(3 * count):
-            way = 1.0 if (target > out) != self.backwards else -1.0
+        target, moved_since_change, turned = sum(rng) / 2, 0.0, None
+        for _ in range(4 * count):
+            way = turned or (1.0 if (target > out) != self.backwards else -1.0)
             nx = min(hi, max(lo, x + way * notch / 3))
             if nx == x:
-                return                     # end of the handle's travel
+                if turned:
+                    return                 # end of the handle's travel both ways
+                # end of travel: the notch is the other way (Class 142: a second Off past Forward)
+                turned, moved_since_change = -way, 0.0
+                continue
             nout = self._move(nx, position)
             if nout is None:
                 return
             if nout != out:
                 self._learn_direction((x, out), (nx, nout))
-                moved_since_change = 0.0
+                moved_since_change, turned = 0.0, None
             else:
                 moved_since_change += abs(nx - x)
                 if moved_since_change > 1.5 * notch:
@@ -762,21 +842,29 @@ class Reverser:
         """Current notch: 'forward' / 'neutral' / 'reverse', another notch name (e.g. 'off'), or None."""
         if self.out_ranges and self.lever._out_range:
             out = self._output()           # as the game reports it
-            for label, (a, b) in self.lever.out_named.items():
-                if out is not None and a <= out <= b:
-                    return reverser_label(label) or label.strip()
+            if out is not None:
+                for pos, (a, b) in self.out_ranges.items():
+                    if a <= out <= b:
+                        return pos
+                for label, (a, b) in self.lever.out_named.items():
+                    if a <= out <= b:
+                        return self._name(label)
         v = self.lever.api.get_value(self.lever.path)
         zones = [z for z in self.lever.zones if z[0] is not None]
         if not isinstance(v, (int, float)) or not zones:
             return None
         lo, hi = self.lever.lo, self.lever.hi
         nearest = min(zones, key=lambda z: abs((max(z[0], lo) + min(z[1], hi)) / 2 - v))
-        return reverser_label(nearest[2]) or nearest[2].strip()
+        return self._name(nearest[2])
 
     def __repr__(self):
         if not self.ok:
             return f"{self.name} (Forward/Neutral/Reverse notches not recognised - not used)"
         text = ", ".join(f"{p} {v:.3g}" for p, v in self.notches.items())
+        if self.neutral_label:
+            text += f", Neutral is its '{self.neutral_label.title()}'"
+        elif "neutral" in self.notches and "neutral" not in [reverser_label(z[2]) for z in self.lever.zones]:
+            text += ", Neutral is its unnamed middle notch"
         return f"{self.name} ({text}{', runs backwards' if self.backwards else ''})"
 
 
@@ -1180,7 +1268,8 @@ class TrainControls:
             return None
 
     def _identifiers(self, names):
-        skip = [x for x in EXCLUDE if x != "reverser"]
+        # some reversers are called switches (Class 380 DirectionSwitch, Class 86 / 87 MasterSwitch)
+        skip = [x for x in EXCLUDE if x not in ("reverser", "switch")]
         candidates = [n for n in names if not any(x in n.lower() for x in skip)
                       or ("aws" in n.lower() and not any(x in n.lower() for x in AWS_NAME_SKIP))
                       or (any(w in n.lower() for w in ALERTER_NAMES)
