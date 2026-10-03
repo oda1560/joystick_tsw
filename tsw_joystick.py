@@ -474,11 +474,19 @@ class Lever:
         self.set_value(self.neutral)
         return f"Couldn't confirm the Off position on {self.name}; using the estimate"
 
+    def _brake_limit(self):
+        """The furthest full brake may ever go: 5% of the brake side's travel short of the end of the handle,
+        where emergency usually is (Class 331's emergency is right at the end, with normal braking up to it)."""
+        end = self.lo if self.brake_end <= self.neutral else self.hi
+        return end + 0.05 * (self.neutral - end)
+
     def _set_brake_end(self, end):
         """Move full brake to end, if that is further than now (a place checked with the game)."""
         self.brake_end_verified = True
         if self.brake_end is None or self.brake_end == end:
             return
+        limit = self._brake_limit()
+        end = max(end, limit) if self.brake_end <= self.neutral else min(end, limit)
         if self.brake_end == self.safe_lo and end < self.safe_lo:
             self.safe_lo = self.brake_end = end
         elif self.brake_end == self.safe_hi and end > self.safe_hi:
@@ -522,13 +530,17 @@ class Lever:
             self.api.set(self.path, start)
             return None
         slope = sum(slopes) / 2
+        limit = self._brake_limit()
         x, out = start, reading(start)
         for _ in range(12):
             if out is None or abs(target - out) <= 0.01 * (b_hi - b_lo):
                 break
             # cover 40% of what's left, with the slope measured over the last step, so a handle that
             # gets steeper toward the end still can't be pushed past the target in one go
-            nx = min(self.hi, max(self.lo, x + (target - out) / slope * 0.4))
+            nx = x + (target - out) / slope * 0.4
+            nx = max(limit, nx) if start <= self.neutral else min(limit, nx)
+            if abs(nx - x) < 1e-4:
+                break                      # at the limit: the named brake range ends beyond the handle
             nout = reading(nx)
             if nout is None:               # outside the brake range: stay at the last good place
                 break
