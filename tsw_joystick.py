@@ -205,6 +205,11 @@ def is_brake_label(label):
     return "brake" in label or is_emergency(label) or label.strip().startswith("b")
 
 
+def is_braking_label(label):
+    """A named place where the train brakes (not emergency), e.g. "B2", "Max Brake", "Full Service", "Apply"."""
+    return (is_brake_label(label) or "service" in label or "appl" in label) and not is_emergency(label)
+
+
 CALIBRATION_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "lever_calibration.json")
 _calibration = None
 
@@ -233,7 +238,7 @@ def save_calibration(key, value):
 class Lever:
     """One controllable lever, its safe input range and (for combined levers) neutral point."""
 
-    def __init__(self, api, name, ident="", train=None):
+    def __init__(self, api, name, ident="", train=None, brake=False):
         self.api = api
         self.name = name
         self.ident = ident or ""
@@ -249,7 +254,7 @@ class Lever:
         self.power_end = self.safe_hi
         self.brake_end = None
         self.neutral_verified = False     # Off position confirmed with the game (combined levers)
-        self.brake_end_verified = False   # full brake checked with the game (combined levers)
+        self.brake_end_verified = False   # full brake checked with the game (combined levers, train brakes)
         self._calibration_key = f"{train}|{name}" if train else None
         if self.combined:
             self._find_neutral()
@@ -258,11 +263,15 @@ class Lever:
                 self.neutral, self.neutral_verified = float(learned), True
                 self.note = re.sub(r"neutral [-\d.e]+ from [^,]*",
                                    f"neutral {self.neutral:.3g} (learned earlier)", self.note)
+        elif brake:
+            self.brake_end = self.safe_hi     # a separate train brake: released at its low end
+        if self.brake_end is not None:
             end = (load_calibration().get(f"{self._calibration_key}|brake_end")
                    if self._calibration_key else None)
             if isinstance(end, (int, float)) and self.lo <= end <= self.hi:
                 self._set_brake_end(float(end))
         self.notches = self._notch_positions()
+        self._notches_confirmed = set()   # notch positions the game has shown give their output
         self._notch = None                # index of the notch last sent
         self._last_sent = (None, 0.0)     # (value, time)
 
@@ -359,12 +368,19 @@ class Lever:
 
         safe_lo, safe_hi = self.lo, self.hi
         mid = (self.lo + self.hi) / 2
-        for a, b, _, _ in emerg:
+        for a, b, _, source in emerg:
             if a is None:
                 self.note = "emergency position unknown, trimmed 20% both ends"
                 span = self.hi - self.lo
                 return self.lo + 0.2 * span, self.hi - 0.2 * span
-            # stay half an emergency-notch width away from where the emergency zone starts
+            # stay half an emergency-notch width away from where the emergency zone starts. Where the game
+            # gives the zone on the handle itself, count only the part the handle can reach (German brake
+            # valves name Emergency 0.9..1.5 on a 0..1 handle); a zone given by output value is only an
+            # estimate on the handle, so all of it counts (M3a: the gap before its emergency notch)
+            if source == "Input":
+                a, b = max(a, self.lo), min(b, self.hi)
+                if a >= b:
+                    continue
             margin = 0.5 * (b - a)
             if (a + b) / 2 >= mid:
                 safe_hi = min(safe_hi, a - margin)
@@ -499,20 +515,38 @@ class Lever:
         """On a smooth brake range the emergency margin, worked out from an estimate of where emergency
         starts, can stop well short of full braking (Class 331: 86%). With the handle at full brake, check
         with the game: read where the handle is, confirm the brake range responds smoothly, then move toward
-        the end of the named brake range in small steps, checking each one, and stop 3% short of it - never
-        into emergency. Done once per train and remembered. Returns a log message, or None."""
+        the end of the named brake range in small steps, checking each one, and stop 3% short of it, or where
+        braking stops increasing (Class 802: at Max Brake, before the emergency notch) - never into
+        emergency. Done once per train and remembered. Also for a separate train brake (BR 143: its
+        emergency margin stops at step 7 of 7, short of Full Service). Returns a log message, or None."""
         self.brake_end_verified = True
         brake = emerg = None
-        for label, rng in self.out_named.items():
+        for label, (a, b) in self.out_named.items():
             if is_emergency(label):
-                emerg = emerg or rng
-            elif is_brake_label(label):
-                brake = brake or rng
+                emerg = emerg or (a, b)
+            elif is_braking_label(label):
+                # all the brake names together (Class 802: Min Brake, {BrakePercent} Brake, Max Brake)
+                brake = (min(a, brake[0]), max(b, brake[1])) if brake else (a, b)
         if self.notches or brake is None or emerg is None or self.brake_end is None:
             return None                    # notched handles already stop on the last brake notch
         b_lo, b_hi = brake
         edge, inward = (b_lo, 1.0) if sum(emerg) < sum(brake) else (b_hi, -1.0)
         target = edge + inward * 0.03 * (b_hi - b_lo)
+        # where a brake name of its own leads up to emergency (Class 802: Max Brake, right next to the emergency
+        # notch), full brake is getting into it - going further could land the handle in emergency
+        last = [(a, b) for label, (a, b) in self.out_named.items()
+                if is_braking_label(label) and (a, b) != brake
+                and (abs(a - emerg[1]) < 1e-3 or abs(b - emerg[0]) < 1e-3)]
+        if not last and not self.combined:
+            return None                    # a train brake whose braking runs up to emergency: no safe stop
+        if last:
+            a, b = last[0]
+            target = (b if inward > 0 else a) - inward * 0.03 * (b_hi - b_lo)
+
+        def arrived(out):
+            if last:
+                return last[0][0] <= out <= last[0][1]
+            return abs(target - out) <= 0.01 * (b_hi - b_lo)
 
         def reading(x):
             self.api.set(self.path, x)
@@ -520,36 +554,50 @@ class Lever:
             out = self._get("Function.GetCurrentOutputValue").get("ReturnValue")
             return float(out) if isinstance(out, (int, float)) and b_lo <= out <= b_hi else None
 
+        def place():
+            v = self._get("InputValue").get("InputValue")
+            return float(v) if isinstance(v, (int, float)) else None
+
         # three readings stepping back toward Off (less braking, so always safe); the handle has to answer
-        # smoothly and in a straight line, otherwise it's left as it is
+        # smoothly, about in a straight line, otherwise it's left as it is. (The Class 802 gives its braking in
+        # whole percent, so readings close together can't be expected to line up exactly.)
         start = self.brake_end
-        step = (self.neutral - start) * 0.05
+        step = (self.neutral - start) * 0.1
         xs = [start, start + step, start + 2 * step]
         outs = [reading(x) for x in xs]
         slopes = [(o2 - o1) / (x2 - x1) for x1, x2, o1, o2 in zip(xs, xs[1:], outs, outs[1:])
                   if None not in (o1, o2)]
         if (len(slopes) < 2 or not slopes[0] or slopes[0] * slopes[1] <= 0
-                or abs(slopes[0] - slopes[1]) > 0.1 * abs(slopes[0])):
+                or max(abs(s) for s in slopes) > 1.5 * min(abs(s) for s in slopes)):
             self.api.set(self.path, start)
             return None
         slope = sum(slopes) / 2
         limit = self._brake_limit()
-        x, out = start, reading(start)
-        for _ in range(12):
-            if out is None or abs(target - out) <= 0.01 * (b_hi - b_lo):
+        toward = -1.0 if start <= self.neutral else 1.0        # the way to more braking
+        # steps of at least 1% of the brake side's travel: smaller ones may not change a whole-percent output
+        min_step = 0.01 * abs(self.neutral - (self.lo if toward < 0 else self.hi))
+        x, out, at = start, reading(start), place()
+        for _ in range(16):
+            if out is None or arrived(out):
                 break
             # cover 40% of what's left, with the slope measured over the last step, so a handle that
             # gets steeper toward the end still can't be pushed past the target in one go
             nx = x + (target - out) / slope * 0.4
+            if abs(nx - x) < min_step:
+                nx = x + (math.copysign(min_step, nx - x) if nx != x else toward * min_step)
             nx = max(limit, nx) if start <= self.neutral else min(limit, nx)
             if abs(nx - x) < 1e-4:
                 break                      # at the limit: the named brake range ends beyond the handle
             nout = reading(nx)
             if nout is None:               # outside the brake range: stay at the last good place
                 break
+            nat = place()
+            if abs(nout - out) < 1e-6 and None not in (at, nat) and abs(nat - at) > 1e-4:
+                break                      # it moved but braked no more: the strongest is where it was
+            # (a handle pulled back into the notch it was in hasn't moved: keep going, BR 143 notches)
             if abs(nx - x) > 1e-6 and nout != out and (nout - out) / (nx - x) * slope > 0:
                 slope = (nout - out) / (nx - x)
-            x, out = nx, nout
+            x, out, at = nx, nout, nat
         further = (x - start) * (start - self.neutral) > 1e-6     # more braking than before
         best = x if further else start
         self.api.set(self.path, best)
@@ -562,6 +610,7 @@ class Lever:
         return f"Full brake on {self.name} extended from {start:.3f} to {best:.3f} (checked with game)"
 
     def set_value(self, value):
+        """Send the lever toward value. Returns a log message, or None."""
         value = min(self.safe_hi, max(self.safe_lo, value))
         if self.notches:
             # only ever send exact notch positions: an in-between value makes the game draw the handle
@@ -569,9 +618,31 @@ class Lever:
             value = self._snap(value)
             last_value, last_time = self._last_sent
             if value == last_value and time.time() - last_time < 0.5:
-                return                     # already there (re-sent now and then in case keys moved it)
+                return None                # already there (re-sent now and then in case keys moved it)
         self.api.set(self.path, value)
         self._last_sent = (value, time.time())
+        if self.notches and len(self._notches_confirmed) < 3 and round(value, 4) not in self._notches_confirmed:
+            return self._check_notch(value)
+        return None
+
+    def _check_notch(self, value):
+        """The notch positions are worked out assuming the notches are evenly spaced, which only shows in the
+        game: the first few times a notch is sent, check that the game gives its whole-number output there.
+        Where it doesn't (RhB ABe 8/12, M7, BR 442: some notches evenly spaced, others not, or a smooth
+        stretch), stop using notch positions and send smooth values. A handle stopped short by a gated notch,
+        or pulled into another one, says nothing either way. Returns a log message, or None."""
+        time.sleep(0.05)
+        x = self._get("InputValue").get("InputValue")
+        out = self._get("Function.GetCurrentOutputValue").get("ReturnValue")
+        if not isinstance(x, (int, float)) or not isinstance(out, (int, float)) or abs(x - value) > 1e-3:
+            return None
+        out_lo, out_hi = self._out_range
+        expected = round(out_lo + (value - self.lo) / (self.hi - self.lo) * (out_hi - out_lo))
+        if abs(out - expected) < 0.01:
+            self._notches_confirmed.add(round(value, 4))
+            return None
+        self.notches, self._notch = None, None
+        return f"{self.name}: its notches aren't evenly spaced, so it's moved smoothly instead"
 
     def __repr__(self):
         text = f"{self.name} [{self.safe_lo:.3g}..{self.safe_hi:.3g}]"
@@ -1384,7 +1455,7 @@ class TrainControls:
             lever = Lever(self.api, t, id_of.get(t, ""), train=self.train_id)
             self.throttle = lever if lever.works() else None
         if b:
-            lever = Lever(self.api, b, id_of.get(b, ""))
+            lever = Lever(self.api, b, id_of.get(b, ""), train=self.train_id, brake=True)
             self.brake = lever if lever.works() else None
         return names, ids
 
@@ -1423,10 +1494,12 @@ class TrainControls:
                     and value == lever.neutral):
                 message = lever.settle_neutral()     # first time at Off: check where Off really is
             else:
-                lever.set_value(value)
-                if (lever is self.throttle and lever.combined and lever.neutral_verified
-                        and not lever.brake_end_verified and value == lever.brake_end):
-                    message = lever.extend_brake()   # first time at full brake: check how far it goes
+                message = lever.set_value(value)
+                at_full_brake = (lever.brake_end is not None and value == lever.brake_end
+                                 and not lever.brake_end_verified)
+                if at_full_brake and (lever is self.brake or (lever.combined and lever.neutral_verified)):
+                    extended = lever.extend_brake()  # first time at full brake: check how far it goes
+                    message = f"{message}; {extended}" if message and extended else message or extended
             if message and self.log:
                 self.log(message)
 

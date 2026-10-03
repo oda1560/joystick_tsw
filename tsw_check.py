@@ -471,10 +471,10 @@ def check_train(train, package, files):
             else:
                 continue
             break
-        if not b and t.brake_end is not None:
+        if not b and t.brake_end is not None and "capped" not in t.note:
             check_brake(result, tm, t.neutral, tm.lo if t.brake_end < t.neutral else tm.hi,
                         on(tm, "full brake"))
-    if bm:
+    if bm and "capped" not in b.note:     # capped: no named places, kept short of the end on purpose
         check_brake(result, bm, b.safe_lo, bm.hi, on(bm, "full brake"))
         for name in ("centre", "centre again", "centre at the end"):
             x = on(bm, name)
