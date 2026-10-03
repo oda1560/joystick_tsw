@@ -317,6 +317,7 @@ class Lever:
 
         zones = []
         self._neutral_out_zone = None     # Off notch as the game reports it, in output units
+        self.out_named = {}               # label -> (min, max) for notches the game names by output value
         for nv in named:
             r = nv.get("valueRange") or {}
             source = nv.get("valueSource", "")
@@ -324,6 +325,9 @@ class Lever:
                 continue
             a, b = convert(float(r["min"]), source), convert(float(r["max"]), source)
             label = str(nv.get("displayName", "")).lower()
+            if source == "Output":
+                self.out_named.setdefault(label, (min(float(r["min"]), float(r["max"])),
+                                                  max(float(r["min"]), float(r["max"]))))
             if source == "Output" and label.strip() in NEUTRAL_LABELS:
                 self._neutral_out_zone = (min(float(r["min"]), float(r["max"])),
                                           max(float(r["min"]), float(r["max"])))
@@ -507,25 +511,169 @@ def reverser_zone(s, previous=None, hysteresis=0.06):
 
 
 class Reverser:
-    """The train's reverser, driven to its Forward / Neutral / Reverse notches only."""
+    """The train's reverser, driven to its Forward / Neutral / Reverse notches only.
 
-    def __init__(self, api, name, ident=""):
+    Where the game names the notches by output value, their place on the handle is only an estimate, and
+    on some trains the output runs the other way to the input (Class 350: Reverse at input 0, Off at 1).
+    So the game is asked which way round the handle is, every move is checked with the game, and a notch
+    found somewhere other than estimated is remembered per train."""
+
+    def __init__(self, api, name, ident="", train=None):
         self.lever = Lever(api, name, ident)
+        self.api = api
         self.name = name
+        self.path = self.lever.path
         self.notches = {}                 # 'forward' / 'neutral' / 'reverse' -> input value
+        self.out_ranges = {}              # the same notches in output units, where the game names them so
+        self.backwards = False            # True when the output falls as the input rises
+        self.learned = set()              # notches confirmed with the game somewhere other than estimated
         lo, hi = self.lever.lo, self.lever.hi
         for prefix in (False, True):      # exact names first, then e.g. "Forward 1"
-            for a, b, label, _ in self.lever.zones:
+            for a, b, label, source in self.lever.zones:
                 pos = reverser_label(label, prefix)
                 if a is not None and pos and pos not in self.notches:
                     self.notches[pos] = min(hi, max(lo, (a + b) / 2))
+                    if source == "Output" and label in self.lever.out_named:
+                        self.out_ranges[pos] = self.lever.out_named[label]
         self.ok = all(p in self.notches for p in REVERSER_LABELS)
+        self._calibration_key = f"{train}|{name}" if train else None
+        if self._calibration_key:
+            for pos in self.out_ranges:
+                learned = load_calibration().get(f"{self._calibration_key}|{pos}")
+                if isinstance(learned, (int, float)) and lo <= learned <= hi:
+                    self.notches[pos] = float(learned)
+                    self.learned.add(pos)
+        if self.out_ranges and self.lever._out_range:
+            x = self._input()
+            self._learn_direction((x, None), (x, self._output()))
+
+    def _input(self):
+        v = self.api.get_value(self.path)
+        return float(v) if isinstance(v, (int, float)) else None
+
+    def _output(self):
+        v = self.lever._get("Function.GetCurrentOutputValue").get("ReturnValue")
+        return float(v) if isinstance(v, (int, float)) else None
+
+    def _at(self, position, out):
+        a, b = self.out_ranges[position]
+        return out is not None and a <= out <= b
+
+    def _estimate(self, position):
+        o_lo, o_hi = self.lever._out_range
+        frac = (sum(self.out_ranges[position]) / 2 - o_lo) / (o_hi - o_lo)
+        if self.backwards:
+            frac = 1.0 - frac
+        lo, hi = self.lever.lo, self.lever.hi
+        return min(hi, max(lo, lo + frac * (hi - lo)))
+
+    def _learn_direction(self, before, after):
+        """Work out which way round the output runs, from two (input, output) readings. With no output in
+        the first reading, the handle's one position is compared with both possible ways round. Returns
+        True if the estimates changed."""
+        (x1, o1), (x2, o2) = before, after
+        if x2 is None or o2 is None or self.lever._out_range is None:
+            return False
+        if o1 is None:
+            o_lo, o_hi = self.lever._out_range
+            lo, hi = self.lever.lo, self.lever.hi
+            frac = (x2 - lo) / (hi - lo)
+            rising, falling = o_lo + frac * (o_hi - o_lo), o_hi - frac * (o_hi - o_lo)
+            if abs(o2 - rising) < abs(o2 - falling) - 0.25:
+                backwards = False
+            elif abs(o2 - falling) < abs(o2 - rising) - 0.25:
+                backwards = True
+            else:
+                return False               # e.g. a 3-notch handle sitting in the middle: can't tell
+        elif x1 is None or x1 == x2 or o1 == o2:
+            return False
+        else:
+            backwards = (o2 - o1) * (x2 - x1) < 0
+        if backwards == self.backwards:
+            return False
+        self.backwards = backwards
+        for pos in self.out_ranges:
+            if pos not in self.learned:
+                self.notches[pos] = self._estimate(pos)
+        return True
+
+    def _move(self, x, position):
+        """Send the handle to input x; returns the game's output once it reports the notch (or after a
+        short wait)."""
+        self.api.set(self.path, x)
+        out = None
+        for wait in (0.05, 0.1, 0.15):
+            time.sleep(wait)
+            out = self._output()
+            if out is None or self._at(position, out):
+                break
+        return out
+
+    def _remember(self, position):
+        x = self._input()
+        if x is None:
+            return
+        self.notches[position] = x
+        self.learned.add(position)
+        if self._calibration_key:
+            save_calibration(f"{self._calibration_key}|{position}", x)
 
     def set(self, position):
-        self.lever.set_value(self.notches[position])
+        rng = self.out_ranges.get(position)
+        if rng is None or self.lever._out_range is None:
+            self.lever.set_value(self.notches[position])   # notch given as an input value: exact
+            return
+        before = (self._input(), self._output())
+        x = self.notches[position]
+        out = self._move(x, position)
+        if out is None or self._at(position, out):
+            return
+        changed = self._learn_direction(before, (x, out))  # it went the other way round
+        if position in self.learned:                       # remembered place no longer right (game update)
+            self.learned.discard(position)
+            self.notches[position] = self._estimate(position)
+            changed = True
+        if changed and self.notches[position] != x:        # try the new estimate
+            x = self.notches[position]
+            out = self._move(x, position)
+            if out is None:
+                return
+            if self._at(position, out):
+                self._remember(position)
+                return
+        # walk the handle toward the notch a step at a time, as a driver would, until the game reports it
+        lo, hi = self.lever.lo, self.lever.hi
+        count = self.lever._get("Function.GetNotchCount").get("ReturnValue")
+        count = count if isinstance(count, int) and count >= 2 else 4
+        notch = (hi - lo) / (count - 1)
+        target, moved_since_change = sum(rng) / 2, 0.0
+        for _ in range(3 * count):
+            way = 1.0 if (target > out) != self.backwards else -1.0
+            nx = min(hi, max(lo, x + way * notch / 3))
+            if nx == x:
+                return                     # end of the handle's travel
+            nout = self._move(nx, position)
+            if nout is None:
+                return
+            if nout != out:
+                self._learn_direction((x, out), (nx, nout))
+                moved_since_change = 0.0
+            else:
+                moved_since_change += abs(nx - x)
+                if moved_since_change > 1.5 * notch:
+                    return                 # the handle isn't responding (e.g. master key out)
+            x, out = nx, nout
+            if self._at(position, out):
+                self._remember(position)
+                return
 
     def position(self):
         """Current notch: 'forward' / 'neutral' / 'reverse', another notch name (e.g. 'off'), or None."""
+        if self.out_ranges and self.lever._out_range:
+            out = self._output()           # as the game reports it
+            for label, (a, b) in self.lever.out_named.items():
+                if out is not None and a <= out <= b:
+                    return reverser_label(label) or label.strip()
         v = self.lever.api.get_value(self.lever.path)
         zones = [z for z in self.lever.zones if z[0] is not None]
         if not isinstance(v, (int, float)) or not zones:
@@ -537,7 +685,8 @@ class Reverser:
     def __repr__(self):
         if not self.ok:
             return f"{self.name} (Forward/Neutral/Reverse notches not recognised - not used)"
-        return f"{self.name} (" + ", ".join(f"{p} {v:.3g}" for p, v in self.notches.items()) + ")"
+        text = ", ".join(f"{p} {v:.3g}" for p, v in self.notches.items())
+        return f"{self.name} ({text}{', runs backwards' if self.backwards else ''})"
 
 
 class PushButton:
@@ -1028,7 +1177,7 @@ class TrainControls:
         r = (next((n for n, i in ids if any(k in i.lower() for k in REVERSER_IDS)), None)
              or pick(names, ["reverser"], [x for x in EXCLUDE if x != "reverser"]))
         if r:
-            rev = Reverser(self.api, r, dict(ids).get(r, ""))
+            rev = Reverser(self.api, r, dict(ids).get(r, ""), train=self.train_id)
             self.reverser = rev if rev.lever.works() else None
 
         def is_lever(n):
