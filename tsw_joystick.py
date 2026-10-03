@@ -117,6 +117,8 @@ EXCLUDE = ["dynamic", "independent", "loco", "emergency", "park", "handbrake", "
            "bail", "reverser", "horn", "light", "wiper", "door", "sander", "pantograph",
            # circuit breakers, isolation switches, covers etc. are not the driving levers
            "mcb", "isolat", "cutout", "cover", "button", "switch", "cock", "hose", "lock"]
+# game identifiers of brakes that are never the train brake
+OTHER_BRAKE_IDS = ["dynamic", "independent", "loco", "emergency", "park", "handbrake"]
 
 
 # ---------------------------------------------------------------- API
@@ -1196,7 +1198,10 @@ class TrainControls:
             t = next((n for n in pick_all(names, COMBINED_NAMES, EXCLUDE)
                       + pick_all(names, THROTTLE_NAMES, EXCLUDE + ["brake"]) if is_lever(n)), None)
         if not b:
-            b = next((n for n in pick_all(names, BRAKE_NAMES, EXCLUDE) if n != t and is_lever(n)), None)
+            # by name, but never a lever the game itself calls another kind of brake (Class 323
+            # "RegenBrakes" is the regenerative brake on/off switch, identifier DynamicBrake)
+            b = next((n for n in pick_all(names, BRAKE_NAMES, EXCLUDE) if n != t and is_lever(n)
+                      and not any(x in id_of.get(n, "").lower() for x in OTHER_BRAKE_IDS)), None)
         if t:
             lever = Lever(self.api, t, id_of.get(t, ""), train=self.train_id)
             self.throttle = lever if lever.works() else None
