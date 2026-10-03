@@ -15,35 +15,30 @@ set up and ready to drive.
 Usage:
     python tsw_check.py              check every train; writes train_check_report.txt
     python tsw_check.py 331 802      only trains whose name contains one of these
+    python tsw_check.py --no-files   as the bridge works when it can't read the game files (estimating)
     python tsw_check.py --live       compare the model with the game for the train you're in (read-only)
 """
 
-import math
 import os
 import re
 import sys
 import time as real_time
 from collections import defaultdict
 
+import tsw_handles
 import tsw_joystick as tj
+from tsw_handles import enum
 from tsw_paks import GameFiles
 
 REPORT_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "train_check_report.txt")
 
 # a vehicle is checked if one of its controls has one of these game input identifiers
 DRIVING_IDS = {"throttle", "automaticbrake", "reverser"}
-VHID_BASES = {"IrregularLeverComponent", "SimpleLeverComponent", "PushButtonComponent", "LeverBaseComponent",
-              "CouplerLockComponent", "VirtualHIDComponent"}
-LEVER_KEYS = ("ValueMap", "Notches", "NumberOfNotches", "InputIdentifier", "DisplayInfo")
 ERROR = {"Result": "Error", "Message": "Node failed to return valid data."}
 
 STICK_MOVE_SECONDS = 0.8         # how long the simulated hand takes to move the stick to a new place
 STICK_HOLD_SECONDS = 0.7         # and how long it then holds it there
 SHORT_OF_FULL = 0.97             # full power / full brake reaching less than this of the handle's is flagged
-
-
-def enum(value, default):
-    return str(value).split("::")[-1] if value else default
 
 
 IDLE_WORDS = ("off", "coast", "idl", "neutral", "closed")      # no power, no brake
@@ -60,172 +55,8 @@ def is_neutral(label):
 
 
 # ---------------------------------------------------------------- model of a train's controls
-class Control:
-    """One cab control as the game would behave, worked out from its settings in the game files."""
-
-    def __init__(self, comp):
-        p = comp.props
-        self.name, self.cls, self.base, self.props = comp.name, comp.cls, comp.base, p
-        self.vhid = comp.base in VHID_BASES or any(k in p for k in LEVER_KEYS)
-        ident = p.get("InputIdentifier")
-        self.ident = str(ident.get("Identifier") or "None") if isinstance(ident, dict) else "None"
-        env = p.get("InteractionEnvironmentComponent")
-        self.env = str(env.get("ComponentName") or "None") if isinstance(env, dict) else "None"
-        self.enabled = p.get("bInputEnabled", True) is not False
-        self.custom = bool(p.get("bCustomOutputValueMapping"))
-        self.interlocked = "BlockedMinInputValue" in p or "BlockedMaxInputValue" in p
-        self.lever = self.base not in ("PushButtonComponent", "CouplerLockComponent")
-        self.notches = []                # (lowest input, highest input, gated), lowest first
-        self.notch_count = 0
-        if "ValueMap" in p or self.base == "IrregularLeverComponent":
-            points = [(float(m.get("InputValue", 0.0)), float(m.get("OutputValue", 0.0)),
-                       float(m.get("LinearOutputValueInterval", 0.0)))
-                      for m in p.get("ValueMap") or [] if isinstance(m, dict)]
-            self.points = sorted(points, key=lambda m: m[0]) or [(0.0, 0.0, 0.0), (1.0, 1.0, 0.0)]
-            # a notch set beyond the end of the handle's travel (some BR 363s: -3 and 3 on a 0..1 handle)
-            # is taken to be at the end
-            lo, hi = self.points[0][0], self.points[-1][0]
-            clamp = lambda v: min(hi, max(lo, float(v))) if hi > lo else float(v)
-            self.notches = sorted((clamp(n.get("MinimumInputValue", 0.0)), clamp(n.get("MaximumInputValue", 0.0)),
-                                   bool(n.get("bBlocker"))) for n in p.get("Notches") or [] if isinstance(n, dict))
-            self.notch_count = len(self.notches)
-        elif self.base == "SimpleLeverComponent":
-            lo, hi = float(p.get("MinimumInputValue", 0.0)), float(p.get("MaximumInputValue", 1.0))
-            step = float(p.get("LinearOutputValueInterval", 0.0))
-            self.points = [(lo, float(p.get("MinimumOutputValue", 0.0)), step),
-                           (hi, float(p.get("MaximumOutputValue", 1.0)), step)]
-            self.notch_count = int(p.get("NumberOfNotches", 0) or 0)
-            if self.notch_count >= 2 and hi > lo:
-                n = self.notch_count
-                self.notches = [(lo + i * (hi - lo) / (n - 1),) * 2 + (False,) for i in range(n)]
-        else:
-            self.points = [(0.0, 0.0, 0.0), (1.0, 1.0, 0.0)]
-        self.lo, self.hi = self.points[0][0], self.points[-1][0]
-        if self.hi <= self.lo:
-            self.hi = self.lo + 1.0
-            self.points = [(self.lo, self.points[0][1], 0.0), (self.hi, self.points[-1][1], 0.0)]
-        outs = [pt[1] for pt in self.points]
-        self.out_lo, self.out_hi = min(outs), max(outs)
-        # how far a notch pulls the handle in from, as a share of the gap to the next notch (or the end of the
-        # handle): 0.1 x the lever's snap setting (the game's default is 5), at most half. Inferred from the
-        # game: the Class 331 reverser (10) lands in its nearest notch from anywhere, the 331 power handle (5)
-        # from halfway, while the Class 802 power handle (0.5) stayed between notches 0.1 into a 0.25 gap
-        self.snap_pull = min(0.5, 0.1 * float(p.get("NotchSnapSensitivity", 5.0)))
-        self.table_known = "ValueMap" in p or self.base != "IrregularLeverComponent"
-        # the DSD pedal button counts backwards in the game (rests at 1, pressed at 0); the train sets that up
-        # when it starts, so it isn't in the files
-        self.reversed_button = self.cls == "ReversiblePushButton_C"
-        self.value = self.snap(float(p.get("DefaultInputValue", 0.0)))
-
-    # -------- how the game turns the handle's position into its output
-    def output(self, x):
-        pts = self.points
-        x = min(self.hi, max(self.lo, x))
-        for px, py, _ in pts:
-            if abs(px - x) < 1e-6:
-                return py                # exactly at a point of the table (e.g. Class 802 Off at 0)
-        for (x0, y0, step), (x1, y1, _) in zip(pts, pts[1:]):
-            if x <= x1:
-                v = y1 if x1 == x0 else y0 + (x - x0) / (x1 - x0) * (y1 - y0)
-                if step > 0:
-                    # the section gives its output in steps of this size, counted from its start
-                    # (seen in the files; the rounding direction is assumed)
-                    q = (v - y0) / step
-                    v = y0 + math.copysign(math.floor(abs(q) + 0.5), q) * step
-                    v = min(max(y0, y1), max(min(y0, y1), v))
-                return v
-        return pts[-1][1]
-
-    def normalised_output(self, x):
-        return (self.output(x) - self.out_lo) / (self.out_hi - self.out_lo) if self.out_hi > self.out_lo else 0.0
-
-    # -------- how the handle moves
-    def snap(self, x, way=0):
-        """Where the handle settles when sent to x (moving that way: +1 / -1): where it is if that's inside a
-        notch, else pulled into the nearest notch when close enough to it (see snap_pull). Exactly
-        halfway between two, it goes on to the one ahead (seen on the Class 331)."""
-        x = min(self.hi, max(self.lo, x))
-        if not self.notches:
-            return x
-        below = [b for a, b, _ in self.notches if b <= x + 1e-6]
-        above = [a for a, b, _ in self.notches if a >= x - 1e-6]
-        for a, b, _ in self.notches:
-            if a - 1e-6 <= x <= b + 1e-6:
-                return x
-        lo, hi = (max(below) if below else None), (min(above) if above else None)
-        nearest = min((e for e in (lo, hi) if e is not None), key=lambda e: (round(abs(e - x), 9), -way * e))
-        gap = (hi if hi is not None else self.hi) - (lo if lo is not None else self.lo)
-        return nearest if abs(nearest - x) <= self.snap_pull * gap + 1e-9 else x
-
-    def notch_index(self, x):
-        for i, (a, b, _) in enumerate(self.notches):
-            if a - 1e-6 <= x <= b + 1e-6:
-                return i
-        return min(range(len(self.notches)), key=lambda i: min(abs(self.notches[i][0] - x),
-                                                               abs(self.notches[i][1] - x)))
-
-    def move(self, target):
-        """Send the handle toward target. As in the game (seen on the Class 331), a gated notch stops it: the
-        handle goes into one that is the first notch it meets and stops there, and stops at the end of the
-        notch before one further on."""
-        p = self.value
-        x = self.snap(target, 1 if target > p else -1)
-        if abs(x - p) < 1e-9:
-            return
-        way = 1 if x > p else -1
-        met = [n for n in (self.notches if way > 0 else reversed(self.notches))
-               if not n[0] - 1e-6 <= p <= n[1] + 1e-6
-               and (p < n[0] <= x + 1e-6 if way > 0 else x - 1e-6 <= n[1] < p)]
-        for k, (a, b, gated) in enumerate(met):
-            if gated:
-                if k == 0:
-                    self.value = min(b, max(a, x))
-                else:
-                    pa, pb, _ = met[k - 1]
-                    self.value = pb if way > 0 else pa
-                return
-        self.value = x
-
-    # -------- the game's names for places on the handle
-    def zone(self, x):
-        """(label, is emergency) for the handle at x, from the game's named places, or (None, False)."""
-        out = self.output(x)
-        values = {"Input": x, "InputNormalised": (x - self.lo) / (self.hi - self.lo),
-                  "Output": out, "OutputNormalised": self.normalised_output(x)}
-        for nv in (self.props.get("DisplayInfo") or {}).get("NamedValues") or []:
-            r = nv.get("ValueRange") or {}
-            v = values.get(enum(nv.get("ValueSource"), "Output"))
-            if v is not None and r.get("Min", 0.0) - 1e-6 <= v <= r.get("Max", 0.0) + 1e-6:
-                label = str(nv.get("DisplayName") or "")
-                return self._format(label, values) if nv.get("bDisplayNameIsFormatString") else label, \
-                    tj.is_emergency(label.lower())
-        return None, False
-
-    def _format(self, label, values):
-        def convert(m):
-            vc = next((c for c in self.props.get("ValueConverters") or []
-                       if isinstance(c, dict) and str(c.get("ID")) == m.group(1)), None)
-            if vc is None:
-                return "?"
-            v = values.get(enum(vc.get("ValueSource"), "Output"), values["Output"])
-            fr, to = vc.get("RemapFromRange"), vc.get("RemapToRange")
-            if isinstance(fr, dict) and isinstance(to, dict) and fr.get("Max", 0.0) != fr.get("Min", 0.0):
-                a, b = fr.get("Min", 0.0), fr.get("Max", 0.0)
-                if vc.get("bUseOutOfRangeValue") and not min(a, b) <= v <= max(a, b):
-                    v = vc.get("OutOfRangeValue", 0.0)
-                else:
-                    f = min(1.0, max(0.0, (v - a) / (b - a)))
-                    v = to.get("Min", 0.0) + f * (to.get("Max", 0.0) - to.get("Min", 0.0))
-            if enum(vc.get("Mode"), "None") == "Percentage":
-                return f"{v * 100:.0f}%"
-            return f"{v:.2f}".rstrip("0").rstrip(".")
-        return re.sub(r"\{(\w+)\}", convert, label).strip()
-
-    def describe(self, x=None):
-        x = self.value if x is None else x
-        label, _ = self.zone(x)
-        out = f"output {self.output(x):.3g}"
-        return f"{label} ({out})" if label else out
+class Control(tsw_handles.Control):
+    """A cab control as the game would behave (see tsw_handles), answering the game's API."""
 
     # -------- the game's API
     def answer(self, endpoint):
@@ -367,14 +198,6 @@ def bridge_patched():
     return clock
 
 
-def reachable(control, a, b, steps=400):
-    """Inputs the handle can rest at between a and b (both included)."""
-    xs = {control.snap(a + (b - a) * i / steps) for i in range(steps + 1)}
-    for lo, hi, _ in control.notches:
-        xs.update(x for x in (lo, hi) if min(a, b) - 1e-9 <= x <= max(a, b) + 1e-9)
-    return sorted(xs)
-
-
 class Result:
     def __init__(self, train, pack):
         self.train, self.pack = train, pack
@@ -417,6 +240,9 @@ def check_train(train, package, files):
     driver = Driver(controls, clock)
     driver.tick()
     snapshots = {}
+    # a handle that starts beyond emergency (1972 Stock: Shutdown) has to pass through it, as a driver would
+    beyond = {c.name for c in (tm, bm) if c and any(w in (c.zone(c.value)[0] or "").lower()
+                                                    for w in ("shutdown", "shut down"))}
     for name, y in (("full power", 1.0), ("centre", 0.0), ("full brake", -1.0), ("centre again", 0.0),
                     ("half power", 0.5), ("half brake", -0.5), ("centre at the end", 0.0)):
         start = len(api.moves)
@@ -424,8 +250,12 @@ def check_train(train, package, files):
         snapshots[name] = {c.name: c.value for c in (tm, bm) if c}
         for c, x in api.moves[start:]:
             if c in (tm, bm) and c.zone(x)[1]:
-                result.problems.append(f"{c.name} went into emergency ({c.describe(x)}) "
-                                       f"while moving the stick to {name}")
+                text = f"{c.name} went into emergency ({c.describe(x)}) while moving the stick to {name}"
+                if name == "full power" and c.name in beyond:
+                    result.doubts.append(f"{text}, on its way from where the train starts it "
+                                         f"({c.zone(c.value)[0]} is past Emergency)")
+                else:
+                    result.problems.append(text)
                 break
 
     def on(c, name):
@@ -443,15 +273,15 @@ def check_train(train, package, files):
     if tm:
         power_end = t.power_end
         far = tm.hi if power_end >= t.neutral else tm.lo
-        xs = reachable(tm, t.neutral, far)
+        xs = tm.reachable(t.neutral, far)
         best = max(xs, key=lambda x: abs(tm.output(x) - tm.output(t.neutral)))
         got = on(tm, "full power")
         span = tm.output(best) - tm.output(t.neutral)
         if span and (tm.output(got) - tm.output(t.neutral)) / span < SHORT_OF_FULL:
-            result.problems.append(f"full power only reaches {tm.describe(got)}; the handle goes to "
-                                   f"{tm.describe(best)}")
+            result.problems.append(f"full power on {t.name} only reaches {tm.describe(got)}; the handle goes "
+                                   f"to {tm.describe(best)}")
         combined = t.brake_end is not None and not b
-        lowest = [x for x in reachable(tm, tm.lo, tm.hi)
+        lowest = [x for x in tm.reachable(tm.lo, tm.hi)
                   if not any(w in (tm.zone(x)[0] or "").lower() for w in ENGINE_STOP_WORDS)]
         idle_out = max(0.0, min(tm.output(x) for x in lowest)) if lowest else 0.0
         for name in ("centre", "centre again", "centre at the end"):
@@ -507,7 +337,7 @@ def check_brake(result, m, release, end, got):
     """Full stick should give the strongest braking the handle has short of emergency: looking from the
     released position toward the end of the handle, up to the first emergency place, or one past full
     service (e.g. Handle Off, Suppression, Shutdown)."""
-    xs = reachable(m, release, end)
+    xs = m.reachable(release, end)
     if end < release:
         xs.reverse()
     base, best = m.output(release), None
@@ -555,7 +385,8 @@ def check_buttons(result, controls, model):
     for name, label in (("aws", "AWS"), ("alerter", "alerter")):
         button = getattr(controls, name)
         found.append(f"{label} {button}" if button else f"no {label}")
-    doors = [f"{a} {s}" for a in ("open", "close") for s in ("left", "right") if getattr(controls, f"door_{a}_{s}")]
+    doors = [f"{a} {s}" for a in ("open", "close") for s in ("left", "right")
+             if getattr(controls, f"door_{a}_{s}")]
     found.append(f"doors {', '.join(doors)}" if doors else "no door buttons")
     result.lines.append("buttons: " + "; ".join(found))
 
@@ -655,10 +486,14 @@ def write_report(results, files, seconds):
         f.write("\n".join(out) + "\n")
 
 
-def check_all(filters):
+def check_all(filters, use_files=True):
     start = real_time.time()
     print("Reading the game files...", flush=True)
     files = GameFiles()
+    if use_files:
+        tj.use_game_files(files)         # the bridge looks each train up in them, as in the cab
+    else:
+        tj.USE_GAME_FILES = False
     for name, err in files.errors:
         print(f"  couldn't read {name}: {err}")
     trains = files.vehicle_classes()
@@ -721,6 +556,7 @@ def compare_live():
     train = live.get_value("CurrentDrivableActor.ObjectClass")
     print("Train:", train)
     files = GameFiles()
+    tj.use_game_files(files)
     trains = files.vehicle_classes()
     if train not in trains:
         print("This train isn't in the game files (or isn't a rail vehicle blueprint).")
@@ -793,4 +629,4 @@ if __name__ == "__main__":
     if "--live" in sys.argv[1:]:
         compare_live()
     else:
-        check_all([a for a in sys.argv[1:] if not a.startswith("-")])
+        check_all([a for a in sys.argv[1:] if not a.startswith("-")], use_files="--no-files" not in sys.argv)

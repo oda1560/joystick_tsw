@@ -435,6 +435,7 @@ class GameFiles:
             if m:
                 self.roots.setdefault(m.group(2), m.group(1))
         self._packages = {}
+        self._components = {}
 
     def file_of(self, package):
         """'/Game/Core/X' -> 'TS2Prototype/Content/Core/X' (without extension), or None."""
@@ -522,6 +523,8 @@ class GameFiles:
         """{name: Component} for a vehicle class, in the order the game creates them (and lists them):
         components made in C++, then those added in each blueprint from the base one down. Each one's
         settings are as overridden by the most derived blueprint."""
+        if (cls, package) in self._components:
+            return self._components[(cls, package)]
         chain = list(reversed(self.class_chain(cls, package)))
         if not chain:
             return {}
@@ -557,6 +560,7 @@ class GameFiles:
         for name, (tp, ti) in templates.items():
             tp, ti = overrides.get(name, (tp, ti))
             found.setdefault(name, self.component(name, tp, ti))
+        self._components[(cls, package)] = found
         return found
 
     def pack_of(self, package):

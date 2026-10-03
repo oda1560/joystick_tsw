@@ -116,6 +116,7 @@ class Bridge(threading.Thread):
         super().__init__(daemon=True)
         self.api = core.TSWApi()
         self.log = log
+        core.load_game_files()        # read the game's file index in the background, for exact handle places
         self.controls = None          # TrainControls, replaced as a whole on train change
         self.train = None
         self.game_status = ("idle", "Starting...")

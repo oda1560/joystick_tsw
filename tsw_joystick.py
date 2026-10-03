@@ -19,6 +19,8 @@ Twist (Z rotation)   -> look left / right; centre the twist and the view returns
 
 Talks to TSW's External Interface API (launch the game with -HTTPAPI).
 The stick only sends values when you move it, so the keyboard keeps working.
+Each train's handles are looked up in the game's own files (found through Steam) for where Off, full power,
+full brake and the notches really are; if they can't be read, those places are estimated instead.
 
 Usage:
     python tsw_joystick.py              run the bridge
@@ -37,11 +39,14 @@ import time
 import urllib.error
 import urllib.parse
 import urllib.request
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import Future, ThreadPoolExecutor
 
 os.environ.setdefault("PYGAME_HIDE_SUPPORT_PROMPT", "1")
 os.environ.setdefault("SDL_JOYSTICK_ALLOW_BACKGROUND_EVENTS", "1")  # read stick while the game has focus
 import pygame
+
+import tsw_handles
+from tsw_handles import is_emergency
 
 # ---------------------------------------------------------------- settings
 API_URL = "http://127.0.0.1:31270"
@@ -71,6 +76,8 @@ DOOR_OPEN_RIGHT_BUTTON = 7
 DOOR_CLOSE_LEFT_BUTTON = 8       # base buttons labelled 9 / 10: close the left / right doors
 DOOR_CLOSE_RIGHT_BUTTON = 9
 DOOR_MAX_SPEED = 0.3             # m/s; doors are never opened faster than this (~1 km/h)
+
+USE_GAME_FILES = True            # look each train's controls up in the game's files (exact places, no guessing)
 
 USE_LOOK = True
 LOOK_AXIS = 2                    # stick twist (Z rotation): look left / right
@@ -116,7 +123,7 @@ REVERSER_LABELS = {"forward": ["forward", "fwd", "fw", "f", "ahead"],
 # used for Neutral on reversers that have none, in order of preference: positions with no traction, and the
 # engine kept running first (on BR diesels Off stops the engine, Engine Only is their neutral)
 NEUTRAL_STAND_INS = ["engine only", "on", "0", "off"]
-EXCLUDE = ["dynamic", "independent", "loco", "emergency", "park", "handbrake", "release",
+EXCLUDE = ["dynamic", "independent", "loco", "emergency", "park", "handbrake", "release", "snow",
            "bail", "reverser", "horn", "light", "wiper", "door", "sander", "pantograph",
            # circuit breakers, isolation switches, covers etc. are not the driving levers
            "mcb", "isolat", "cutout", "cover", "button", "switch", "cock", "hose", "lock"]
@@ -197,12 +204,21 @@ def pick(names, wanted, exclude):
     return found[0] if found else None
 
 
-def is_emergency(label):
-    return "emerg" in label or label.strip() in ("eb", "e")
-
-
 def is_brake_label(label):
     return "brake" in label or is_emergency(label) or label.strip().startswith("b")
+
+
+# words in the names of places on a handle (lower case)
+ENGINE_STOP_WORDS = ("stop", "shutdown", "shut down")
+RUNNING_WORDS = [("running", "driving", "drive", "run"), ("release",), ("charge",)]   # preferred first
+PAST_SERVICE_WORDS = ("shutdown", "shut down", "cut", "isol", "suppress", "handle off", "neutral")
+
+
+def is_idle_label(label):
+    """A place with no power and no braking: Off, Coasting, Idle, Neutral, Closed, Off And Release..."""
+    s = label.strip()
+    return (s in NEUTRAL_LABELS or s.startswith(("off", "coast", "idl", "neutral", "closed"))) and \
+        not any(w in s for w in ("brake", "power", "%"))
 
 
 def is_braking_label(label):
@@ -235,16 +251,60 @@ def save_calibration(key, value):
         pass
 
 
+_game_files = None   # Future of (tsw_paks.GameFiles, {train class: package}), read in the background
+
+
+def load_game_files():
+    """Start reading the game's file index in the background (a few seconds, once a run), so each train's
+    controls can be looked up there when you get in a cab. Returns the Future, or None when not used."""
+    global _game_files
+    if _game_files is None and USE_GAME_FILES:
+        _game_files = ThreadPoolExecutor(max_workers=1).submit(_open_game_files)
+    return _game_files
+
+
+def _open_game_files():
+    import tsw_paks
+    files = tsw_paks.GameFiles()
+    return files, files.vehicle_classes()
+
+
+def use_game_files(files):
+    """Use game files that have already been read (the offline check reads them itself)."""
+    global _game_files
+    _game_files = Future()
+    _game_files.set_result((files, files.vehicle_classes()))
+
+
+def train_handles(train, wait=30.0):
+    """{component name: tsw_handles.Control} for a train, from the game files; {} when they can't be read
+    (game not found, files still loading after `wait` seconds, or the train isn't in them)."""
+    future = load_game_files()
+    if future is None or not train:
+        return {}
+    try:
+        files, classes = future.result(timeout=wait)
+        package = classes.get(train)
+        if package is None:
+            return {}
+        return {name: tsw_handles.Control(c) for name, c in files.components(train, package).items()}
+    except Exception:
+        return {}
+
+
 class Lever:
     """One controllable lever, its safe input range and (for combined levers) neutral point."""
 
-    def __init__(self, api, name, ident="", train=None, brake=False):
+    def __init__(self, api, name, ident="", train=None, role="throttle", model=None):
+        """role: "throttle" (incl. a combined power/brake handle), "brake" (a separate train brake) or
+        "reverser". model: the handle's settings from the game files (tsw_handles.Control), if read."""
         self.api = api
         self.name = name
         self.ident = ident or ""
         self.path = f"CurrentDrivableActor/{name}.InputValue"
         self.lo, self.hi = self._range()
         self.note = ""
+        brake = role == "brake"
         self.zones = self._zones(brake)
         self.safe_lo, self.safe_hi = self._exclude_emergency()
         self.combined = ("brake" in name.lower() or "brake" in self.ident.lower()
@@ -275,6 +335,115 @@ class Lever:
         self._uneven = False              # notched, but not evenly spaced as worked out (seen in the game)
         self._notch = None                # index of the notch last sent
         self._last_sent = (None, 0.0)     # (value, time)
+        self.model = None                 # the handle's settings from the game files, when read
+        self.exact_places = False         # its named places located from them (self.zones)
+        self.from_files = False           # its places (Off, full power / brake) taken from them
+        self._exact_notches = False       # notch positions read from the game files
+        if model is not None and model.lever and model.table_known and not model.custom:
+            self._from_game_files(model, role)
+
+    def _from_game_files(self, model, role):
+        """Use the handle's settings from the game files instead of estimating: every named place where it
+        really is on the handle, and Off, full power and full brake at places the handle stays at by itself
+        (in a notch), so a notch never pulls it somewhere else. Nothing then needs checking with the game.
+        Places the files can't settle (no names) keep their estimates."""
+        self.model = model
+        resting = model.resting()
+        # each named place where it really is: one zone per stretch of the handle (Class 142 has Off at
+        # both ends), in the order the game lists the names
+        stretches = []
+        for x in resting:
+            label = model.name_at(x)
+            if label and stretches and stretches[-1][2] == label.lower():
+                stretches[-1][1] = x
+            elif label:
+                stretches.append([x, x, label.lower()])
+        if not stretches:
+            return
+        order = {n.lower(): i for i, n in enumerate(model.places())}
+        self.zones = [(a, b, label, "Input") for a, b, label in sorted(stretches, key=lambda z: order[z[2]])]
+        self.exact_places = True
+        if role == "reverser":
+            return
+        # full power / brake can also be where the stick holds the handle without a notch pulling it away
+        # (Bnrdzf: Run Up, at the end of the travel past the last notch)
+        holdable = sorted(set(resting) | set(model.reachable(model.lo, model.hi)))
+        name = lambda x: (model.name_at(x) or "").lower()
+        emergency = [x for x in resting if is_emergency(name(x))]
+        if role == "brake":
+            # released: the train's running position (Running, Driving) rather than one that overcharges the
+            # brake pipe (German valves: Quick Release), furthest from emergency
+            usable = [x for x in resting if not is_emergency(name(x))
+                      and not any(w in name(x) for w in PAST_SERVICE_WORDS + ENGINE_STOP_WORDS)]
+            for words in RUNNING_WORDS:
+                release = [x for x in usable if any(w in name(x) for w in words)]
+                if release:
+                    break
+            else:
+                return
+            far = lambda x: min((abs(x - e) for e in emergency), default=abs(x - self.lo))
+            start = max(release, key=far)
+            way = (1.0 if sum(emergency) / len(emergency) > start else -1.0) if emergency else 1.0
+            end = self._strongest(model, start, way, holdable)
+            if end is None:
+                return
+            self.neutral, self.brake_end = start, end
+            self.note = f"from game files: released {start:.3g}, full brake {end:.3g}"
+        elif self.combined:
+            idle = [x for x in resting if is_idle_label(name(x))]
+            braking = [x for x in resting if is_braking_label(name(x))] or emergency
+            if not idle or not braking:
+                return
+            start = min(idle, key=lambda x: abs(model.output(x)))
+            way = -1.0 if sum(braking) / len(braking) < start else 1.0
+            end = self._strongest(model, start, way, holdable)
+            power = self._strongest(model, start, -way, holdable)
+            if end is None or power is None:
+                return
+            self.neutral, self.brake_end, self.power_end = start, end, power
+            self.note = f"from game files: Off {start:.3g}, full power {power:.3g}, full brake {end:.3g}"
+        else:
+            # a throttle on its own: idle where it gives no power (Class 40: On, not Off; SD40: Idle, not Stop)
+            usable = [x for x in resting if not is_emergency(name(x))
+                      and not any(w in name(x) for w in ENGINE_STOP_WORDS)]
+            if not usable:
+                return
+            start = min(usable, key=lambda x: (abs(model.output(x)) > 1e-6, not is_idle_label(name(x)),
+                                               model.output(x)))
+            power = max((x for x in holdable if not is_emergency(name(x))), key=model.output)
+            if model.output(power) <= model.output(start):
+                return
+            self.neutral, self.power_end = start, power
+            self.note = f"from game files: idle {start:.3g}, full power {power:.3g}"
+        ends = [v for v in (self.neutral, self.power_end if role != "brake" else None, self.brake_end)
+                if v is not None]
+        self.safe_lo, self.safe_hi = min(ends), max(ends)
+        self.neutral_verified = self.brake_end_verified = self.from_files = True
+        detents = sorted({a for a, _, _ in model.notches})
+        if len(detents) >= 2 and all(b - a < 1e-9 for a, b, _ in model.notches):   # no smooth stretch
+            ends = {v for v in (self.neutral, self.power_end, self.brake_end) if v is not None}
+            self.notches = sorted({x for x in detents if self.safe_lo - 1e-9 <= x <= self.safe_hi + 1e-9}
+                                  | ends) or None
+            self._exact_notches = True
+        else:
+            self.notches = None
+
+    @staticmethod
+    def _strongest(model, start, way, places):
+        """From start, the way given, the place with the most power or braking before emergency or a place
+        past full service (Suppression, Handle Off, Shutdown...); None if there's none. A notch is preferred
+        to a place the stick has to hold the handle at, unless that's stronger (Bnrdzf: Run Up)."""
+        base, first = model.output(start), (model.name_at(start) or "").lower()
+        resting = set(model.resting())
+        best = None
+        for x in sorted((x for x in places if (x - start) * way > 1e-9), key=lambda x: abs(x - start)):
+            name = (model.name_at(x) or "").lower()
+            if name != first and (is_emergency(name) or any(w in name for w in PAST_SERVICE_WORDS)):
+                break
+            gain = abs(model.output(x) - base) - (abs(model.output(best) - base) if best is not None else -1)
+            if gain > 1e-9 or (abs(gain) <= 1e-9 and x in resting and best not in resting):
+                best = x
+        return best
 
     NOTCH_HYSTERESIS = 0.2    # past the halfway point by this fraction of a notch before moving to it
 
@@ -658,9 +827,19 @@ class Lever:
             last_value, last_time = self._last_sent
             if value == last_value and time.time() - last_time < 0.5:
                 return None                # already there (re-sent now and then in case keys moved it)
+        previous = self._last_sent[0]
         self.api.set(self.path, value)
         self._last_sent = (value, time.time())
-        if self.notches and len(self._notches_confirmed) < 3 and round(value, 4) not in self._notches_confirmed:
+        if self.model is not None and previous is not None and self.model.gated_between(previous, value):
+            # a gated notch on the way stops the handle short (M3a: P1 on the way to P4): send it again
+            for _ in range(3):
+                time.sleep(0.02)
+                x = self._get("InputValue").get("InputValue")
+                if not isinstance(x, (int, float)) or abs(x - value) < 1e-3:
+                    break
+                self.api.set(self.path, value)
+        if (self.notches and not self._exact_notches and len(self._notches_confirmed) < 3
+                and round(value, 4) not in self._notches_confirmed):
             return self._check_notch(value)
         return None
 
@@ -722,8 +901,8 @@ class Reverser:
     So the game is asked which way round the handle is, every move is checked with the game, and a notch
     found somewhere other than estimated is remembered per train."""
 
-    def __init__(self, api, name, ident="", train=None):
-        self.lever = Lever(api, name, ident)
+    def __init__(self, api, name, ident="", train=None, model=None):
+        self.lever = Lever(api, name, ident, role="reverser", model=model)
         self.api = api
         self.name = name
         self.path = self.lever.path
@@ -745,7 +924,9 @@ class Reverser:
         self._trim_overlaps()
         self.ok = all(p in self.notches for p in REVERSER_LABELS)
         self._calibration_key = f"{train}|{name}" if train else None
-        if self._calibration_key:
+        if self.lever.exact_places:
+            self.learned = set(self.notches)   # places read from the game files: nothing to learn
+        elif self._calibration_key:
             for pos in self.out_ranges:
                 learned = load_calibration().get(f"{self._calibration_key}|{pos}")
                 if isinstance(learned, (int, float)) and lo <= learned <= hi:
@@ -781,11 +962,16 @@ class Reverser:
             if source == "Output" and label in self.lever.out_named:
                 self.out_ranges["neutral"] = self.lever.out_named[label]
             return
+        model = self.lever.model
+        if model is not None:            # the game files show where that unnamed notch is
+            unnamed = [x for x in model.resting() if lo < x < hi and model.name_at(x) is None]
+            if unnamed:
+                self.notches["neutral"] = min(unnamed, key=lambda x: abs(x - middle))
         fo, ro = self.out_ranges.get("forward"), self.out_ranges.get("reverse")
         if fo and ro and (fo[1] < ro[0] or ro[1] < fo[0]):
             gap = (fo[1], ro[0]) if fo[1] < ro[0] else (ro[1], fo[0])
             if not any(gap[0] < (a + b) / 2 < gap[1] for a, b in self.lever.out_named.values()):
-                self.notches["neutral"] = middle
+                self.notches.setdefault("neutral", middle)
                 self.out_ranges["neutral"] = gap
 
     def _trim_overlaps(self):
@@ -950,6 +1136,16 @@ class Reverser:
 
     def position(self):
         """Current notch: 'forward' / 'neutral' / 'reverse', another notch name (e.g. 'off'), or None."""
+        model = self.lever.model
+        if self.lever.exact_places:
+            x = self._input()              # the game files say what's where on the handle
+            if x is None:
+                return None
+            label = model.name_at(x)
+            if label:
+                return self._name(label)
+            n = self.notches.get("neutral")
+            return "neutral" if n is not None and abs(x - n) < 1e-3 else None
         if self.out_ranges and self.lever._out_range:
             out = self._output()           # as the game reports it
             if out is not None:
@@ -1368,6 +1564,7 @@ class TrainControls:
         self.train_id = None
         self.throttle = self.brake = self.reverser = self.aws = self.alerter = None
         self.door_open_left = self.door_open_right = self.door_close_left = self.door_close_right = None
+        self.from_files = False           # the train's controls were found in the game files
 
     def speed(self):
         """Train speed in m/s, or None if the game doesn't report it."""
@@ -1443,6 +1640,8 @@ class TrainControls:
                             buttons[0] if len(buttons) == 1 else ButtonGroup(buttons))
 
     def detect(self):
+        handles = train_handles(self.train_id)
+        self.from_files = bool(handles)
         names = node_names(self.api.list("CurrentDrivableActor"))
         self.throttle = self.brake = self.reverser = self.aws = self.alerter = None
         self.door_open_left = self.door_open_right = self.door_close_left = self.door_close_right = None
@@ -1467,7 +1666,7 @@ class TrainControls:
         r = (next((n for n, i in ids if any(k in i.lower() for k in REVERSER_IDS)), None)
              or pick(names, ["reverser"], [x for x in EXCLUDE if x != "reverser"]))
         if r:
-            rev = Reverser(self.api, r, dict(ids).get(r, ""), train=self.train_id)
+            rev = Reverser(self.api, r, dict(ids).get(r, ""), train=self.train_id, model=handles.get(r))
             self.reverser = rev if rev.lever.works() else None
 
         def is_lever(n):
@@ -1487,14 +1686,17 @@ class TrainControls:
                       + pick_all(names, THROTTLE_NAMES, EXCLUDE + ["brake"]) if is_lever(n)), None)
         if not b:
             # by name, but never a lever the game itself calls another kind of brake (Class 323
-            # "RegenBrakes" is the regenerative brake on/off switch, identifier DynamicBrake)
+            # "RegenBrakes" is the regenerative brake on/off switch, identifier DynamicBrake) or a throttle
+            # (CD 843: "ThrottleAndBrakeCab_2", the other cab's power/brake handle)
+            not_brakes = OTHER_BRAKE_IDS + THROTTLE_IDS
             b = next((n for n in pick_all(names, BRAKE_NAMES, EXCLUDE) if n != t and is_lever(n)
-                      and not any(x in id_of.get(n, "").lower() for x in OTHER_BRAKE_IDS)), None)
+                      and not any(x in id_of.get(n, "").lower() for x in not_brakes)), None)
         if t:
-            lever = Lever(self.api, t, id_of.get(t, ""), train=self.train_id)
+            lever = Lever(self.api, t, id_of.get(t, ""), train=self.train_id, model=handles.get(t))
             self.throttle = lever if lever.works() else None
         if b:
-            lever = Lever(self.api, b, id_of.get(b, ""), train=self.train_id, brake=True)
+            lever = Lever(self.api, b, id_of.get(b, ""), train=self.train_id, role="brake",
+                          model=handles.get(b))
             self.brake = lever if lever.works() else None
         return names, ids
 
@@ -1523,7 +1725,9 @@ class TrainControls:
             else:
                 out[t] = t.value_between(t.neutral, t.brake_end, -y)   # combined lever brake side
         if b:
-            out[b] = b.value_between(b.safe_lo, b.safe_hi, max(0.0, -y))
+            # released .. full brake: from the game files these can run either way round on the handle
+            start, end = (b.neutral, b.brake_end) if b.from_files else (b.safe_lo, b.safe_hi)
+            out[b] = b.value_between(start, end, max(0.0, -y))
         return out
 
     def apply(self, y):
@@ -1557,6 +1761,8 @@ class TrainControls:
         doors = [f"{action} {side} {b}" for action in ("open", "close") for side in ("left", "right")
                  for b in [getattr(self, f"door_{action}_{side}")] if b]
         parts.append("doors: " + ", ".join(doors) if doors else "no door buttons found")
+        if not self.from_files and USE_GAME_FILES:
+            parts.append("handle places estimated (the game files couldn't be read, or don't have this train)")
         return ", ".join(parts)
 
 
@@ -1640,6 +1846,7 @@ def list_controls():
         return
     controls = TrainControls(api)
     controls.train_id = api.get_value("CurrentDrivableActor.ObjectClass")
+    print("Reading the game files...")
     print("Train:", controls.train_id)
     names, ids = controls.detect()
     print("Controls with a game input identifier:")
@@ -1654,6 +1861,7 @@ def list_controls():
 
 
 def run():
+    load_game_files()
     pygame.init()
     api = TSWApi()
     controls = TrainControls(api, log=lambda msg: print(time.strftime("%H:%M:%S"), msg, flush=True))
