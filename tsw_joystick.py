@@ -88,7 +88,7 @@ COMBINED_NAMES = ["throttlebrake", "throttleandbrake", "mastercontroller", "comb
                   "powerbrake", "power_brake", "tbc", "controller(lever)"]
 THROTTLE_NAMES = ["throttle", "powerhandle", "power"]
 BRAKE_NAMES = ["trainbrake", "train_brake", "automaticbrake", "brakehandle", "stepbrake", "brake"]
-NEUTRAL_LABELS = ["off", "neutral", "coast", "idle", "n", "0"]
+NEUTRAL_LABELS = ["off", "neutral", "coast", "coasting", "idle", "n", "0"]
 
 AWS_IDS = ["awsreset", "awsacknowledge"]      # compared with "_" removed, lower case
 AWS_NAME_SKIP = ["isolat", "cover", "cutout", "fault", "sunflower", "mcb", "service", "test"]
