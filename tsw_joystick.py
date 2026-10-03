@@ -11,6 +11,8 @@ Base slider (Z axis) -> reverser: + end Forward, middle Neutral, - end Reverse
 
 Button 1 (trigger)   -> AWS acknowledge (held for as long as you hold the trigger)
 Button 2             -> alerter / DSD / SIFA acknowledge (held for as long as you hold the button)
+Buttons 7 / 8        -> open the left / right doors (never while the train is moving)
+Buttons 9 / 10       -> close the left / right doors
 
 Twist (Z rotation)   -> look left / right; centre the twist and the view returns to straight ahead
     (emulated mouse movement, only while Train Sim World is the active window)
@@ -64,6 +66,11 @@ REVERSER_MAX_SPEED = 0.3         # m/s; the reverser is never moved faster than 
 
 AWS_BUTTON = 0                   # joystick button for AWS acknowledge (0 = trigger, labelled "1")
 ALERTER_BUTTON = 1               # joystick button for alerter / DSD / SIFA acknowledge (labelled "2")
+DOOR_OPEN_LEFT_BUTTON = 6        # base buttons labelled 7 / 8: open the left / right doors
+DOOR_OPEN_RIGHT_BUTTON = 7
+DOOR_CLOSE_LEFT_BUTTON = 8       # base buttons labelled 9 / 10: close the left / right doors
+DOOR_CLOSE_RIGHT_BUTTON = 9
+DOOR_MAX_SPEED = 0.3             # m/s; doors are never opened faster than this (~1 km/h)
 
 USE_LOOK = True
 LOOK_AXIS = 2                    # stick twist (Z rotation): look left / right
@@ -92,6 +99,15 @@ ALERTER_IDS = ["alerter", "alerterreset", "vigilance", "vigilancereset", "dsd", 
 ALERTER_NAMES = ["alerter", "vigilance", "dsd", "sifa", "deadman"]
 ALERTER_NAME_SKIP = ["isolat", "cover", "cutout", "fault", "mcb", "_cb", "service", "test", "device",
                      "light", "lamp"]
+
+# Door buttons are found by name (Class 350's have no input identifier). Words in the name starting with
+# these are other doors' buttons (guard's panel, the buttons on each door, the cab door...) or not buttons.
+DOOR_SKIP = ["guard", "ext", "int", "inner", "local", "gangway", "nose", "vestibule", "isolat", "cover",
+             "light", "lamp", "indicat", "fault", "test", "emerg", "egress", "toilet", "luggage", "lock"]
+
+PRESS_MESSAGES = {"aws": "AWS acknowledged", "alerter": "Alerter acknowledged",
+                  "door_open_left": "Opening the left doors", "door_open_right": "Opening the right doors",
+                  "door_close_left": "Closing the left doors", "door_close_right": "Closing the right doors"}
 
 REVERSER_IDS = ["reverser"]
 REVERSER_LABELS = {"forward": ["forward", "fwd", "fw", "f", "ahead"],
@@ -550,6 +566,21 @@ class PushButton:
         return self.name
 
 
+class ButtonGroup:
+    """Several cab buttons worked together by one joystick button."""
+
+    def __init__(self, buttons):
+        self.buttons = buttons
+        self.name = " + ".join(b.name for b in buttons)
+
+    def set(self, down):
+        for b in self.buttons:
+            b.set(down)
+
+    def __repr__(self):
+        return self.name
+
+
 class ReverserSync:
     """Moves the reverser when the slider enters a different zone; never while the train is moving."""
 
@@ -898,6 +929,7 @@ class TrainControls:
         self.log = log
         self.train_id = None
         self.throttle = self.brake = self.reverser = self.aws = self.alerter = None
+        self.door_open_left = self.door_open_right = self.door_close_left = self.door_close_right = None
 
     def speed(self):
         """Train speed in m/s, or None if the game doesn't report it."""
@@ -924,9 +956,57 @@ class TrainControls:
         with ThreadPoolExecutor(max_workers=16) as pool:
             return [(n, i) for n, i in pool.map(ident, candidates) if i and i != "None"]
 
+    def _enabled(self, n):
+        # some trains carry a spare copy of a control that the game has switched off
+        try:
+            return self.api.get_value(f"CurrentDrivableActor/{n}.Property.bInputEnabled") is not False
+        except Exception:
+            return True
+
+    def _detect_doors(self, names):
+        """Door open / close buttons for each side. Some trains carry two sets of desk buttons, only one of
+        them wired to the driver's position (Class 350); the wired set is used."""
+        found = []                                   # (action, side, name); side None = both sides
+        for n in names:
+            words = [w.lower() for w in re.findall(r"[A-Z]+(?![a-z])|[A-Z]?[a-z]+|\d+", n)]
+            opens, closes = bool({"open", "release"} & set(words)), "close" in words
+            if (not any(w.startswith("door") for w in words) or "cabdoor" in "".join(words)
+                    or any(w.startswith(x) for w in words for x in DOOR_SKIP) or opens == closes):
+                continue
+            side = "left" if {"l", "left"} & set(words) else "right" if {"r", "right"} & set(words) else None
+            if opens and side is None:
+                continue                             # never open both sides at once
+            found.append(("open" if opens else "close", side, n))
+
+        def rank(n):
+            # 0 = driver's position, 1 = somewhere else in the cab, 2 = not wired up; None = not a button
+            path = f"CurrentDrivableActor/{n}"
+            try:
+                if "button" not in str(self.api.get_value(path + ".ObjectClass") or "").lower():
+                    return None                      # e.g. the doors themselves
+                env = self.api.get(path + ".Property.InteractionEnvironmentComponent").get("Values") or {}
+            except Exception:
+                return None
+            if not self._enabled(n):
+                return None
+            env = str(env.get("componentName") or "None").lower()
+            return 0 if "driver" in env else 2 if env == "none" else 1
+
+        ranks = {n: rank(n) for _, _, n in found}
+        for action in ("open", "close"):
+            for side in ("left", "right"):
+                group = [(ranks[n], n) for a, s, n in found if a == action and s in (side, None)
+                         and ranks[n] is not None]
+                best = [n for r, n in group if r == min(r for r, _ in group)]
+                if best:
+                    buttons = [PushButton(self.api, n) for n in best]
+                    setattr(self, f"door_{action}_{side}",
+                            buttons[0] if len(buttons) == 1 else ButtonGroup(buttons))
+
     def detect(self):
         names = node_names(self.api.list("CurrentDrivableActor"))
         self.throttle = self.brake = self.reverser = self.aws = self.alerter = None
+        self.door_open_left = self.door_open_right = self.door_close_left = self.door_close_right = None
         ids = self._identifiers(names)
 
         a = (next((n for n, i in ids if i.lower().replace("_", "") in AWS_IDS), None)
@@ -936,20 +1016,14 @@ class TrainControls:
         if a:
             self.aws = PushButton(self.api, a)
 
-        def enabled(n):
-            # some trains carry a spare copy of a control that the game has switched off
-            try:
-                return self.api.get_value(f"CurrentDrivableActor/{n}.Property.bInputEnabled") is not False
-            except Exception:
-                return True
-
-        alerters = ([n for n, i in ids if i.lower().replace("_", "") in ALERTER_IDS and enabled(n)]
+        alerters = ([n for n, i in ids if i.lower().replace("_", "") in ALERTER_IDS and self._enabled(n)]
                     or [n for n in names if any(w in n.lower() for w in ALERTER_NAMES)
-                        and not any(x in n.lower() for x in ALERTER_NAME_SKIP) and enabled(n)])
+                        and not any(x in n.lower() for x in ALERTER_NAME_SKIP) and self._enabled(n)])
         if alerters:
             # where a train has both, use a push button rather than a pedal the game holds down
             self.alerter = min((PushButton(self.api, n) for n in alerters),
                                key=lambda b: b.pressed < b.released)
+        self._detect_doors(names)
 
         r = (next((n for n, i in ids if any(k in i.lower() for k in REVERSER_IDS)), None)
              or pick(names, ["reverser"], [x for x in EXCLUDE if x != "reverser"]))
@@ -981,6 +1055,19 @@ class TrainControls:
             lever = Lever(self.api, b, id_of.get(b, ""))
             self.brake = lever if lever.works() else None
         return names, ids
+
+    def press(self, name, down):
+        """Press (down=True) or release a cab button worked by a joystick button: "aws", "alerter",
+        "door_open_left" etc. Returns a message for the log, or None."""
+        button = getattr(self, name)
+        if button is None:
+            return None
+        if down and name.startswith("door_open"):
+            speed = self.speed()
+            if speed is not None and abs(speed) > DOOR_MAX_SPEED:
+                return f"Doors NOT opened: train is moving ({abs(speed) * 3.6:.0f} km/h)"
+        button.set(down)
+        return PRESS_MESSAGES[name] if down else None
 
     def targets(self, y):
         """Lever values for stick position y: -1 full brake .. 0 neutral .. +1 full power."""
@@ -1019,6 +1106,9 @@ class TrainControls:
         parts.append(f"reverser {self.reverser}" if self.reverser else "no reverser found")
         parts.append(f"AWS {self.aws}" if self.aws else "no AWS button found")
         parts.append(f"alerter {self.alerter}" if self.alerter else "no alerter / DSD / SIFA found")
+        doors = [f"{action} {side} {b}" for action in ("open", "close") for side in ("left", "right")
+                 for b in [getattr(self, f"door_{action}_{side}")] if b]
+        parts.append("doors: " + ", ".join(doors) if doors else "no door buttons found")
         return ", ".join(parts)
 
 
@@ -1135,6 +1225,9 @@ def run():
     y_filter = AxisFilter()
     look = LookController(lambda msg: print(time.strftime("%H:%M:%S"), msg, flush=True))
     look.start()
+    cab_buttons = {AWS_BUTTON: "aws", ALERTER_BUTTON: "alerter",
+                   DOOR_OPEN_LEFT_BUTTON: "door_open_left", DOOR_OPEN_RIGHT_BUTTON: "door_open_right",
+                   DOOR_CLOSE_LEFT_BUTTON: "door_close_left", DOOR_CLOSE_RIGHT_BUTTON: "door_close_right"}
 
     print("TSW7 joystick bridge running. Ctrl+C to stop.")
     while True:
@@ -1142,14 +1235,14 @@ def run():
         for event in pygame.event.get():
             if event.type == pygame.JOYDEVICEREMOVED:
                 stick = None
-            elif event.type in (pygame.JOYBUTTONDOWN, pygame.JOYBUTTONUP) and controls.train_id is not None:
-                for button, cab_button, name in ((AWS_BUTTON, controls.aws, "AWS"),
-                                                 (ALERTER_BUTTON, controls.alerter, "Alerter")):
-                    if event.button == button and cab_button:
-                        try:
-                            cab_button.set(event.type == pygame.JOYBUTTONDOWN)
-                        except Exception as e:
-                            say(f"{name} button failed: {e}")
+            elif (event.type in (pygame.JOYBUTTONDOWN, pygame.JOYBUTTONUP) and event.button in cab_buttons
+                  and controls.train_id is not None):
+                try:
+                    message = controls.press(cab_buttons[event.button], event.type == pygame.JOYBUTTONDOWN)
+                    if message:
+                        controls.log(message)
+                except Exception as e:
+                    say(f"Button {event.button + 1} failed: {e}")
 
         if stick is None:
             stick = open_joystick()

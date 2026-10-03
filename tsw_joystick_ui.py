@@ -37,6 +37,10 @@ DEFAULTS = {"axis": core.Y_AXIS, "invert": core.INVERT_Y, "deadzone": core.DEADZ
             "rev_enabled": core.USE_REVERSER, "rev_axis": core.REVERSER_AXIS,
             "rev_invert": core.REVERSER_INVERT, "aws_button": core.AWS_BUTTON,
             "alerter_button": core.ALERTER_BUTTON,
+            "door_open_left_button": core.DOOR_OPEN_LEFT_BUTTON,
+            "door_open_right_button": core.DOOR_OPEN_RIGHT_BUTTON,
+            "door_close_left_button": core.DOOR_CLOSE_LEFT_BUTTON,
+            "door_close_right_button": core.DOOR_CLOSE_RIGHT_BUTTON,
             "look_enabled": core.USE_LOOK, "look_axis": core.LOOK_AXIS, "look_invert": core.LOOK_INVERT,
             "look_deadzone": core.LOOK_DEADZONE, "look_angle": core.LOOK_MAX_ANGLE,
             "look_smoothing": core.LOOK_SMOOTHING}
@@ -48,12 +52,19 @@ POWER, BRAKE = "#4c9be8", "#e08a3c"
 FONT = "Segoe UI"
 DOT = {"ok": GOOD, "warn": WARN, "bad": BAD, "idle": MUTED}
 
-# joystick button settings and what they do; one joystick button can't do two of these
-BUTTON_ACTIONS = {"aws_button": "acknowledges AWS", "alerter_button": "acknowledges alerter / DSD / SIFA",
-                  "toggle_button": "pauses / resumes"}
+# joystick button settings: (title, what the button does); one joystick button can't do two of these
+BUTTON_ACTIONS = {"aws_button": ("AWS button", "acknowledges AWS"),
+                  "alerter_button": ("Alerter button", "acknowledges alerter / DSD / SIFA"),
+                  "door_open_left_button": ("Open left doors", "opens the left doors"),
+                  "door_open_right_button": ("Open right doors", "opens the right doors"),
+                  "door_close_left_button": ("Close left doors", "closes the left doors"),
+                  "door_close_right_button": ("Close right doors", "closes the right doors"),
+                  "toggle_button": ("Pause button", "pauses / resumes")}
 # cab buttons held down for as long as their joystick button is held: setting -> TrainControls attribute
-CAB_BUTTONS = {"aws_button": "aws", "alerter_button": "alerter"}
-CAB_BUTTON_NAMES = {"aws": "AWS", "alerter": "Alerter"}
+CAB_BUTTONS = {"aws_button": "aws", "alerter_button": "alerter",
+               "door_open_left_button": "door_open_left", "door_open_right_button": "door_open_right",
+               "door_close_left_button": "door_close_left", "door_close_right_button": "door_close_right"}
+LIGHTS = {"aws_button": "AWS", "alerter_button": "Alerter"}    # shown in the live view while held
 
 
 def load_settings():
@@ -119,7 +130,7 @@ class Bridge(threading.Thread):
         self.rev_actual = None        # train's current reverser notch, for display
         self.speed = None             # m/s, for display
         self.last_poll = 0.0
-        self.button_queue = queue.Queue()   # (cab button "aws" / "alerter", pressed) from the UI thread
+        self.button_queue = queue.Queue()   # (cab button "aws" / "door_open_left" etc., pressed) from the UI
 
     def set_game(self, level, text):
         if (level, text) != self.game_status:
@@ -139,14 +150,13 @@ class Bridge(threading.Thread):
                 name, down = self.button_queue.get_nowait()
             except queue.Empty:
                 return
-            button = getattr(controls, name) if controls else None
-            if button is None:
+            if controls is None:
                 continue
             if down and not self.enabled:
                 continue              # paused: ignore presses, but always pass releases through
-            button.set(down)
-            if down:
-                self.log(f"{CAB_BUTTON_NAMES[name]} acknowledged")
+            message = controls.press(name, down)
+            if message:
+                self.log(message)
 
     def run(self):
         while self.running:
@@ -428,8 +438,7 @@ class App:
         self.on_look_smoothing(self.s["look_smoothing"])
 
         self.btn_labels = {}
-        for row, (key, title) in enumerate((("aws_button", "AWS button"), ("alerter_button", "Alerter button"),
-                                            ("toggle_button", "Pause button")), start=6):
+        for row, (key, (title, _)) in enumerate(BUTTON_ACTIONS.items(), start=6):
             ttk.Label(grid, text=title, style="Muted.TLabel").grid(row=row, column=0, sticky="w",
                                                                    pady=3, padx=(0, 14))
             btn_row = ttk.Frame(grid, style="Panel.TFrame")
@@ -485,7 +494,7 @@ class App:
             elif self.s[key] is None:
                 text = "Not set"
             else:
-                text = f"Button {self.s[key] + 1} {BUTTON_ACTIONS[key]}"
+                text = f"Button {self.s[key] + 1} {BUTTON_ACTIONS[key][1]}"
             label.config(text=text)
 
     def on_assign(self, key):
@@ -508,7 +517,7 @@ class App:
         self.s[key] = button
         save_settings(self.s)
         self._refresh_button_label()
-        self.log(f"Button {button + 1} now {BUTTON_ACTIONS[key]}")
+        self.log(f"Button {button + 1} now {BUTTON_ACTIONS[key][1]}")
 
     def on_joystick(self, _event=None):
         self.s["joystick"] = self.joy_combo.get()
@@ -709,6 +718,10 @@ class App:
             parts.append(f"AWS: {pretty_lever(c.aws.name)}" if c.aws else "AWS button not found")
             parts.append(f"Alerter: {pretty_lever(c.alerter.name)}" if c.alerter
                          else "alerter / DSD / SIFA not found")
+            doors = [f"{action} {side}" for action in ("open", "close") for side in ("left", "right")
+                     if getattr(c, f"door_{action}_{side}")]
+            parts.append("Doors: open / close both sides" if len(doors) == 4
+                         else f"Doors: {', '.join(doors)} only" if doors else "door buttons not found")
             desc = "  ·  ".join(parts)
         elif c:
             self._set_status("train", "warn", f"{pretty_train(self.bridge.train)} - no throttle/brake found")
@@ -880,8 +893,8 @@ class App:
         # AWS and alerter: light up while their joystick button is held
         y += 14 * k
         width, bh = 170 * k, 22 * k
-        for key, name in CAB_BUTTONS.items():
-            title = CAB_BUTTON_NAMES[name].upper()
+        for key, title in LIGHTS.items():
+            name, title = CAB_BUTTONS[key], title.upper()
             found = c is not None and getattr(c, name) is not None
             button = self.s[key]
             if button is None:
