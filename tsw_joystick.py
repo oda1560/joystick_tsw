@@ -245,7 +245,7 @@ class Lever:
         self.path = f"CurrentDrivableActor/{name}.InputValue"
         self.lo, self.hi = self._range()
         self.note = ""
-        self.zones = self._zones()
+        self.zones = self._zones(brake)
         self.safe_lo, self.safe_hi = self._exclude_emergency()
         self.combined = ("brake" in name.lower() or "brake" in self.ident.lower()
                          or any(is_brake_label(z[2]) for z in self.zones)) \
@@ -272,6 +272,7 @@ class Lever:
                 self._set_brake_end(float(end))
         self.notches = self._notch_positions()
         self._notches_confirmed = set()   # notch positions the game has shown give their output
+        self._uneven = False              # notched, but not evenly spaced as worked out (seen in the game)
         self._notch = None                # index of the notch last sent
         self._last_sent = (None, 0.0)     # (value, time)
 
@@ -289,10 +290,22 @@ class Lever:
         outputs = list(range(math.ceil(out_lo - 1e-6), math.floor(out_hi + 1e-6) + 1))
         if len(outputs) != count:
             return None
-        span = self.hi - self.lo
-        positions = [self.lo + (o - out_lo) / (out_hi - out_lo) * span for o in outputs]
+        positions = sorted(self._input_at(o) for o in outputs)
         positions = [p for p in positions if self.safe_lo - 1e-6 <= p <= self.safe_hi + 1e-6]
         return positions if len(positions) >= 2 else None
+
+    def _input_at(self, out):
+        """Where on the handle an output value would be if the handle were linear (which way round it runs
+        taken into account)."""
+        out_lo, out_hi = self._out_range
+        f = (out - out_lo) / (out_hi - out_lo)
+        return self.lo + ((1.0 - f) if self.out_backwards else f) * (self.hi - self.lo)
+
+    def _output_at(self, x):
+        """The output at input x if the handle were linear: the inverse of _input_at."""
+        out_lo, out_hi = self._out_range
+        f = (x - self.lo) / (self.hi - self.lo)
+        return out_lo + ((1.0 - f) if self.out_backwards else f) * (out_hi - out_lo)
 
     def _snap(self, value):
         """Nearest notch, with hysteresis so a stick resting near a boundary can't flip between two."""
@@ -314,7 +327,7 @@ class Lever:
         except Exception:
             return {}
 
-    def _zones(self):
+    def _zones(self, brake=False):
         """Named notches/zones as (start, end, label, source) in this lever's input units."""
         named = self._get("Property.DisplayInfo").get("namedValues") or []
         out_lo = self._get("Function.GetMinimumOutputValue").get("ReturnValue")
@@ -324,14 +337,28 @@ class Lever:
                   and out_hi > out_lo and not custom)
         self._out_range = (float(out_lo), float(out_hi)) if out_ok else None
         span = self.hi - self.lo
+        # on some train brakes the output falls as the input rises (Isle of Wight: Release at input 0, output 4;
+        # Emergency at input 1, output 0): seen from Emergency having a lower output than Release. (Not from
+        # where the handle is: the OBB 1020's brake starts at Shutdown, its highest output.)
+        self.out_backwards = False
+        if out_ok and brake:
+            centres = lambda words: [(float(nv["valueRange"]["min"]) + float(nv["valueRange"]["max"])) / 2
+                                     for nv in named if nv.get("valueSource") == "Output"
+                                     and "min" in (nv.get("valueRange") or {}) and "max" in nv["valueRange"]
+                                     and any(w in str(nv.get("displayName", "")).lower() for w in words)]
+            release, emergency = centres(("release", "running")), centres(("emerg",))
+            self.out_backwards = bool(release and emergency) and max(emergency) < min(release)
 
         def convert(v, source):
             if source == "Input":
                 return v
-            if source in ("InputNormalised", "OutputNormalised"):
+            if source == "InputNormalised":
                 return self.lo + v * span
+            if source == "OutputNormalised":
+                return self.lo + ((1.0 - v) if self.out_backwards else v) * span
             if source == "Output" and out_ok:
-                return self.lo + (v - out_lo) / (out_hi - out_lo) * span   # linear estimate
+                f = (v - out_lo) / (out_hi - out_lo)                    # linear estimate
+                return self.lo + ((1.0 - f) if self.out_backwards else f) * span
             return None
 
         zones = []
@@ -373,15 +400,23 @@ class Lever:
                 self.note = "emergency position unknown, trimmed 20% both ends"
                 span = self.hi - self.lo
                 return self.lo + 0.2 * span, self.hi - 0.2 * span
-            # stay half an emergency-notch width away from where the emergency zone starts. Where the game
-            # gives the zone on the handle itself, count only the part the handle can reach (German brake
-            # valves name Emergency 0.9..1.5 on a 0..1 handle); a zone given by output value is only an
-            # estimate on the handle, so all of it counts (M3a: the gap before its emergency notch)
-            if source == "Input":
-                a, b = max(a, self.lo), min(b, self.hi)
-                if a >= b:
-                    continue
-            margin = 0.5 * (b - a)
+            if b - a < 1e-6:
+                # named as a single point (Isle of Wight brake, Class 165): go no further than the nearest
+                # other named place - halfway can still be in emergency where the estimate is off (Class 165:
+                # Full Service at -0.75, estimated -0.82)
+                gaps = [abs((za + zb) / 2 - a) for za, zb, zl, _ in self.zones
+                        if za is not None and not is_emergency(zl) and abs((za + zb) / 2 - a) > 1e-6]
+                margin = min(gaps) if gaps else 0.1 * (self.hi - self.lo)
+            else:
+                # stay half an emergency-notch width away from where the emergency zone starts. Where the
+                # game gives the zone on the handle itself, count only the part the handle can reach (German
+                # brake valves name Emergency 0.9..1.5 on a 0..1 handle); a zone given by output value is only
+                # an estimate on the handle, so all of it counts (M3a: the gap before its emergency notch)
+                if source == "Input":
+                    a, b = max(a, self.lo), min(b, self.hi)
+                    if a >= b:
+                        continue
+                margin = 0.5 * (b - a)
             if (a + b) / 2 >= mid:
                 safe_hi = min(safe_hi, a - margin)
             else:
@@ -463,6 +498,8 @@ class Lever:
             slope = (self._out_range[1] - self._out_range[0]) / (self.hi - self.lo)
         else:
             slope = max(1e-3, (zone[1] - zone[0]) / 0.1)
+        if self.out_backwards:
+            slope = -slope
         x, prev = self.neutral, None
         for _ in range(25):
             self.api.set(self.path, x)
@@ -481,7 +518,7 @@ class Lever:
                 if self._calibration_key:
                     save_calibration(self._calibration_key, x)
                 return f"Off position found at {x:.3f} on {self.name}" if moved else None
-            if prev and abs(x - prev[0]) > 1e-6 and (out - prev[1]) / (x - prev[0]) > 0:
+            if prev and abs(x - prev[0]) > 1e-6 and (out - prev[1]) / (x - prev[0]) * slope > 0:
                 slope = (out - prev[1]) / (x - prev[0])
             prev = (x, out)
             step = (target - out) / slope * (1.0 if inside else 0.8)   # approach without overshooting
@@ -535,10 +572,12 @@ class Lever:
         # where a brake name of its own leads up to emergency (Class 802: Max Brake, right next to the emergency
         # notch), full brake is getting into it - going further could land the handle in emergency
         last = [(a, b) for label, (a, b) in self.out_named.items()
-                if is_braking_label(label) and (a, b) != brake
+                if is_braking_label(label) and b - a <= 0.5 * (b_hi - b_lo)
                 and (abs(a - emerg[1]) < 1e-3 or abs(b - emerg[0]) < 1e-3)]
-        if not last and not self.combined:
-            return None                    # a train brake whose braking runs up to emergency: no safe stop
+        if not last and (not self.combined or self._uneven):
+            # braking runs straight up to emergency, on a train brake (BR 442) or an unevenly notched handle
+            # (Class 170 in Regional Railways: emergency is the notch next to B3): no safe place to stop
+            return None
         if last:
             a, b = last[0]
             target = (b if inward > 0 else a) - inward * 0.03 * (b_hi - b_lo)
@@ -636,17 +675,17 @@ class Lever:
         out = self._get("Function.GetCurrentOutputValue").get("ReturnValue")
         if not isinstance(x, (int, float)) or not isinstance(out, (int, float)) or abs(x - value) > 1e-3:
             return None
-        out_lo, out_hi = self._out_range
-        expected = round(out_lo + (value - self.lo) / (self.hi - self.lo) * (out_hi - out_lo))
+        expected = round(self._output_at(value))
         if abs(out - expected) < 0.01:
             self._notches_confirmed.add(round(value, 4))
             return None
-        self.notches, self._notch = None, None
+        self.notches, self._notch, self._uneven = None, None, True
         return f"{self.name}: its notches aren't evenly spaced, so it's moved smoothly instead"
 
     def __repr__(self):
         text = f"{self.name} [{self.safe_lo:.3g}..{self.safe_hi:.3g}]"
-        return f"{text} ({self.note})" if self.note else text
+        note = ", ".join(n for n in (self.note, "runs backwards" if self.out_backwards else "") if n)
+        return f"{text} ({note})" if note else text
 
 
 def reverser_label(label, prefix=True):
