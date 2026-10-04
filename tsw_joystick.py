@@ -108,8 +108,8 @@ AWS_NAME_SKIP = ["isolat", "cover", "cutout", "fault", "sunflower", "mcb", "serv
 ALERTER_IDS = ["alerter", "alerterreset", "vigilance", "vigilancereset", "dsd", "sifa", "sifareset",
                "deadman"]                     # compared with "_" removed, lower case
 ALERTER_NAMES = ["alerter", "vigilance", "dsd", "sifa", "deadman"]
-ALERTER_NAME_SKIP = ["isolat", "cover", "cutout", "fault", "mcb", "_cb", "service", "test", "device",
-                     "light", "lamp"]
+ALERTER_NAME_SKIP = ["isolat", "cover", "cutout", "cut-out", "fault", "mcb", "_cb", "service", "test", "device",
+                     "light", "lamp"]   # LIRR M7 "Alerter_Cut-out" switch
 
 # Door buttons are found by name (Class 350's have no input identifier). Words in the name starting with
 # these are other doors' buttons (guard's panel, the buttons on each door, the cab door...) or not buttons.
@@ -1278,21 +1278,50 @@ class PushButton:
     def __init__(self, api, name):
         self.api = api
         self.name = name
-        self.path = f"CurrentDrivableActor/{name}.InputValue"
+        self.node = f"CurrentDrivableActor/{name}"
+        self.path = f"{self.node}.InputValue"
+        self.held = False                 # held in the game as a hand would hold it (its Interacting flag)
         try:
-            lo = api.get_value(f"CurrentDrivableActor/{name}.Function.GetMinimumInputValue")
-            hi = api.get_value(f"CurrentDrivableActor/{name}.Function.GetMaximumInputValue")
+            lo = api.get_value(f"{self.node}.Function.GetMinimumInputValue")
+            hi = api.get_value(f"{self.node}.Function.GetMaximumInputValue")
+            rest = api.get_value(f"{self.node}.Function.GetDefaultInputValue")
         except Exception:
-            lo = hi = None
-        if isinstance(lo, (int, float)) and isinstance(hi, (int, float)) and hi != lo:
-            # the minimum is where the button rests; a pedal the game holds down by default (Class 350
-            # DSD) counts backwards, resting at 1 and pressed at 0
-            self.released, self.pressed = float(lo), float(hi)
+            lo = hi = rest = None
+        # False for something found by name that isn't a cab control (LIRR M7 "M7_AlerterV2": the alerter)
+        self.is_control = isinstance(lo, (int, float)) and isinstance(hi, (int, float)) and hi != lo
+        if self.is_control:
+            # the minimum is where the button rests; a pedal the game holds down by default rests at the
+            # other end and is let up when pressed: Class 142 DSD rests at its maximum, Class 350 DSD counts
+            # backwards, resting at 1 and pressed at 0
+            if hi > lo and rest == hi:
+                self.released, self.pressed = float(hi), float(lo)
+            else:
+                self.released, self.pressed = float(lo), float(hi)
         else:
             self.released, self.pressed = 0.0, 1.0
 
     def set(self, down):
+        """Pressed, the button is held in place as a hand would hold it (the game's Interacting flag). Sent
+        without that, the game shows the value but never counts the button as pushed, so it didn't go all the
+        way in (seen on the Class 142 door, DSD and AWS buttons)."""
+        if down and not self.held:
+            self._interact(True)
         self.api.set(self.path, self.pressed if down else self.released)
+        if not down and self.held:
+            self._interact(False)
+
+    def _interact(self, on):
+        self.held = on
+        self.api.set(f"{self.node}.Interacting", 1.0 if on else 0.0)
+
+    def let_go(self):
+        """Back to where the button rests and stop holding it, if it's held (see TrainControls.let_go)."""
+        if not self.held:
+            return
+        try:
+            self.set(False)
+        except Exception:
+            self.held = False
 
     def __repr__(self):
         return self.name
@@ -1308,6 +1337,10 @@ class ButtonGroup:
     def set(self, down):
         for b in self.buttons:
             b.set(down)
+
+    def let_go(self):
+        for b in self.buttons:
+            b.let_go()
 
     def __repr__(self):
         return self.name
@@ -1706,10 +1739,19 @@ class TrainControls:
     def _identifiers(self, names):
         # some reversers are called switches (Class 380 DirectionSwitch, Class 86 / 87 MasterSwitch)
         skip = [x for x in EXCLUDE if x not in ("reverser", "switch")]
+
+        def resets(n):
+            # vigilance reset buttons go by many names (Class 142 / 47 "DVDReset_F (PushButton)", ACS-64
+            # "Acknowledge_F"): without them the bridge used a DSD pedal the game holds down
+            words = [w.lower() for w in re.findall(r"[A-Z]+(?![a-z])|[A-Z]?[a-z]+|\d+", n)]
+            return (any(w.startswith(("reset", "ack")) for w in words)
+                    and not any(x in n.lower() for x in ALERTER_NAME_SKIP))
+
         candidates = [n for n in names if not any(x in n.lower() for x in skip)
                       or ("aws" in n.lower() and not any(x in n.lower() for x in AWS_NAME_SKIP))
                       or (any(w in n.lower() for w in ALERTER_NAMES)
-                          and not any(x in n.lower() for x in ALERTER_NAME_SKIP))]
+                          and not any(x in n.lower() for x in ALERTER_NAME_SKIP))
+                      or resets(n)]
 
         def ident(n):
             try:
@@ -1787,9 +1829,10 @@ class TrainControls:
                     or [n for n in names if any(w in n.lower() for w in ALERTER_NAMES)
                         and not any(x in n.lower() for x in ALERTER_NAME_SKIP) and self._enabled(n)])
         if alerters:
-            # where a train has both, use a push button rather than a pedal the game holds down
+            # where a train has both, use a push button rather than a pedal the game holds down, and a cab
+            # control before anything else found by name
             self.alerter = min((PushButton(self.api, n) for n in alerters),
-                               key=lambda b: b.pressed < b.released)
+                               key=lambda b: (not b.is_control, b.pressed < b.released))
         self._detect_doors(names)
 
         r = (next((n for n, i in ids if any(k in i.lower() for k in REVERSER_IDS)), None)
@@ -1829,11 +1872,16 @@ class TrainControls:
             self.brake = lever if lever.works() else None
         return names, ids
 
+    def buttons(self):
+        """The cab buttons worked by joystick buttons, {"aws" / "alerter" / "door_open_left"...: button}."""
+        names = ["aws", "alerter"] + [f"door_{a}_{s}" for a in ("open", "close") for s in ("left", "right")]
+        return {n: getattr(self, n) for n in names if getattr(self, n)}
+
     def let_go(self):
-        """Let go of any handle the bridge is holding in place (see Lever.let_go)."""
-        for lever in (self.throttle, self.brake):
-            if lever:
-                lever.let_go()
+        """Let go of any handle or button the bridge is holding in place (see Lever.let_go, PushButton)."""
+        for control in [self.throttle, self.brake] + list(self.buttons().values()):
+            if control:
+                control.let_go()
 
     def press(self, name, down):
         """Press (down=True) or release a cab button worked by a joystick button: "aws", "alerter",

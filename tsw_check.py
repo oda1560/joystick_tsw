@@ -60,6 +60,19 @@ class Control(tsw_handles.Control):
 
     interacting = False                  # held in place, as by a hand (the game's Interacting flag)
 
+    def __init__(self, comp, side=None):
+        super().__init__(comp, side)
+        if self.base == "PushButtonComponent":
+            self.value = self.rest()
+
+    def rest(self):
+        """Where a button rests: the game holds some down (DSD pedals; Class 142 at its maximum, the Class 350
+        one counting backwards, at 1)."""
+        return 1.0 if self.reversed_button else self.hi if self.props.get("bDefaultToPressed") else self.lo
+
+    def rests_down(self):
+        return self.reversed_button or bool(self.props.get("bDefaultToPressed"))
+
     # -------- the game's API
     def answer(self, endpoint):
         if endpoint == "ObjectClass":
@@ -85,6 +98,8 @@ class Control(tsw_handles.Control):
                                 for nv in di.get("NamedValues") or [] if isinstance(nv, dict)]},
             "Function.GetMinimumInputValue": lambda: {"ReturnValue": lo},
             "Function.GetMaximumInputValue": lambda: {"ReturnValue": hi},
+            "Function.GetDefaultInputValue": lambda: {"ReturnValue": self.rest() if not self.lever
+                                                      else float(self.props.get("DefaultInputValue", 0.0))},
             "Function.GetMinimumOutputValue": lambda: {"ReturnValue": self.out_lo},
             "Function.GetMaximumOutputValue": lambda: {"ReturnValue": self.out_hi},
             "Function.GetNotchCount": lambda: {"ReturnValue": self.notch_count},
@@ -436,6 +451,33 @@ def check_buttons(result, controls, model):
         result.problems.append("the train has an AWS acknowledge button but the bridge didn't find it")
     if controls.alerter is None and ids & set(tj.ALERTER_IDS):
         result.problems.append("the train has an alerter / DSD / SIFA but the bridge didn't find it")
+    a = controls.alerter
+    if a and model[a.name].rests_down():
+        # a DSD pedal the game holds down, where the train has a button to acknowledge with (Class 142, 47)
+        resets = [c.name for c in model.values() if c.enabled and c.base == "PushButtonComponent"
+                  and not c.rests_down() and c.ident.lower().replace("_", "") in tj.ALERTER_IDS
+                  and (controls.cab is None or c.side in (None, controls.cab))]
+        if resets:
+            result.problems.append(f"alerter: the bridge works {a.name}, which the game holds down, rather "
+                                   f"than the button {resets[0]}")
+
+    # the game springs a button straight back unless it's held, as by a hand
+    for name, button in controls.buttons().items():
+        parts = [model[b.name] for b in getattr(button, "buttons", [button])]
+        if not all(m.vhid for m in parts):
+            result.problems.append(f"{name}: {button} isn't a control in the cab ({parts[0].cls}), so the "
+                                   f"joystick button does nothing")
+            continue
+        controls.press(name, True)
+        if any(not m.interacting or abs(m.value - m.rest()) < 0.5 for m in parts):
+            result.problems.append(f"{name}: {button} isn't held down while the joystick button is")
+        controls.press(name, False)
+        if any(m.interacting or abs(m.value - m.rest()) > 1e-6 for m in parts):
+            result.problems.append(f"{name}: {button} isn't back where it rests after the joystick button")
+        controls.press(name, True)
+        controls.let_go()
+        if any(m.interacting or abs(m.value - m.rest()) > 1e-6 for m in parts):
+            result.problems.append(f"{name}: {button} is still pressed after the bridge lets go")
 
 
 # ---------------------------------------------------------------- report
@@ -453,6 +495,10 @@ CAUSES = [   # (what the problem is, pattern in the problem text), most specific
     ("Full stick forward gives less than full power", r"full power only reaches"),
     ("Stick does nothing / can't brake", r"does nothing: no|can't brake"),
     ("AWS / alerter button not found", r"didn't find"),
+    ("Alerter worked through a DSD pedal the game holds down, not the train's reset button",
+     r"which the game holds down"),
+    ("Cab button not held while pressed, or left held", r"held down while|where it rests|still pressed after"),
+    ("Joystick button works something that isn't a cab control", r"isn't a control in the cab"),
 ]
 
 
