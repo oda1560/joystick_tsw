@@ -5,7 +5,7 @@ Each rail vehicle's cab controls are read from Train Sim World's .pak files (tsw
 controls stands in for the game's API and the bridge's own code (tsw_joystick.py) is run against it, just as
 in the cab: it finds the controls, then the stick is pushed to full power, centred, pulled to full brake and
 centred again, and the reverser slider is tried. What each one did is reported, with anything doubtful
-flagged.
+flagged. Locos with a cab at each end are checked from each cab.
 
 The model comes from each control's settings in the game files: its notches, its input -> output table and
 its gated notches (ones a handle has to be moved into on its own, e.g. Class 331 Coasting). It can't know
@@ -97,11 +97,14 @@ class Control(tsw_handles.Control):
 class ModelApi(tj.TSWApi):
     """Stands in for the game's API, answering from the model of one train's controls."""
 
-    def __init__(self, train, components):
+    def __init__(self, train, components, cab=None):
+        """cab: the cab in use on a train with one at each end, "Front" / "Back" (None = neither)."""
         super().__init__()
         self.key = "model"
         self.train = train
-        self.controls = {name: Control(c) for name, c in components.items()}
+        self.cab = cab
+        sides = tsw_handles.cab_sides(components)
+        self.controls = {name: Control(c, sides.get(name)) for name, c in components.items()}
         self.moves = []                  # (control, input) after every move, in order
 
     def _req(self, method, path, params=None):
@@ -116,6 +119,8 @@ class ModelApi(tj.TSWApi):
                 return {"Result": "Success", "Values": {"ObjectClass": self.train}}
             if endpoint == "Function.HUD_GetSpeed":
                 return {"Result": "Success", "Values": {"ReturnValue": 0.0}}
+            if endpoint == "Function.GetActiveCabSide":
+                return {"Result": "Success", "Values": {"Front": self.cab == "Front", "Back": self.cab == "Back"}}
             return dict(ERROR)
         c = self.controls.get(node[len("CurrentDrivableActor/"):]) if node.startswith("CurrentDrivableActor/") \
             else None
@@ -199,8 +204,8 @@ def bridge_patched():
 
 
 class Result:
-    def __init__(self, train, pack):
-        self.train, self.pack = train, pack
+    def __init__(self, train, pack, cab=None):
+        self.train, self.pack, self.cab = train, pack, cab
         self.lines = []                  # what each control did
         self.problems = []               # the bridge does something wrong on this train
         self.doubts = []                 # couldn't be checked properly, or the model may be off
@@ -209,16 +214,23 @@ class Result:
     def verdict(self):
         return "PROBLEM" if self.problems else "CHECK" if self.doubts else "OK"
 
+    @property
+    def name(self):
+        return short(self.train) + (f" ({self.cab.lower()} cab)" if self.cab else "")
 
-def check_train(train, package, files):
-    result = Result(train, files.pack_of(package))
+
+def check_train(train, package, files, cab=None):
+    """cab: on a train with a cab at each end, the one it's driven from ("Front" / "Back")."""
+    result = Result(train, files.pack_of(package), cab)
     clock = bridge_patched()
-    api = ModelApi(train, files.components(train, package))
+    api = ModelApi(train, files.components(train, package), cab)
     messages = []
     controls = tj.TrainControls(api, log=messages.append)
     controls.train_id = train
     controls.detect()
     model = api.controls
+    if cab:
+        check_cab(result, controls, model, cab)
     t, b = controls.throttle, controls.brake
     tm, bm = (model[t.name] if t else None), (model[b.name] if b else None)
 
@@ -333,6 +345,18 @@ def check_train(train, package, files):
     return result
 
 
+def check_cab(result, controls, model, cab):
+    """Everything the bridge works has to be in the cab the train is driven from: the other cab's handles do
+    nothing."""
+    used = [controls.throttle, controls.brake, controls.reverser, controls.aws, controls.alerter] + \
+           [getattr(controls, f"door_{a}_{s}") for a in ("open", "close") for s in ("left", "right")]
+    names = [b.name for x in used if x for b in getattr(x, "buttons", [x])]
+    away = [n for n in names if model[n].side not in (None, cab)]
+    if away:
+        result.problems.append(f"driving from the {cab.lower()} cab, the bridge works the other cab's "
+                               f"{', '.join(away)}")
+
+
 def check_brake(result, m, release, end, got):
     """Full stick should give the strongest braking the handle has short of emergency: looking from the
     released position toward the end of the handle, up to the first emergency place, or one past full
@@ -399,6 +423,7 @@ def check_buttons(result, controls, model):
 
 # ---------------------------------------------------------------- report
 CAUSES = [   # (what the problem is, pattern in the problem text), most specific first
+    ("Works the other cab's controls (train with a cab at each end)", r"the other cab's"),
     ("Reverser slider does nothing: no position the bridge reads as Forward / Neutral / Reverse",
      r"slider does nothing"),
     ("Reverser not found by the bridge", r"reverser .* not found"),
@@ -434,6 +459,14 @@ def is_driven(files, train, package):
     return bool(ids & DRIVING_IDS)
 
 
+def cabs(files, train, package):
+    """The cabs to check a train from: on one with a cab at each end both, "Front" and "Back"; else [None]."""
+    comps = files.components(train, package)
+    sides = tsw_handles.cab_sides(comps)
+    found = tj.driving_cabs({n: tsw_handles.Control(c, sides.get(n)) for n, c in comps.items()})
+    return ["Front", "Back"] if len(found) > 1 else [None]
+
+
 def short(train):
     return re.sub(r"^RVM_|_C$", "", train)
 
@@ -443,10 +476,12 @@ def write_report(results, files, seconds):
     for r in results:
         by_pack[r.pack].append(r)
     counts = {v: sum(r.verdict == v for r in results) for v in ("OK", "CHECK", "PROBLEM")}
+    vehicles, two_cabs = len({r.train for r in results}), len({r.train for r in results if r.cab})
     out = ["Joystick bridge check against the installed trains",
-           f"{real_time.strftime('%Y-%m-%d %H:%M')}, {len(results)} drivable vehicles in {len(by_pack)} packs, "
+           f"{real_time.strftime('%Y-%m-%d %H:%M')}, {vehicles} drivable vehicles in {len(by_pack)} packs, "
            f"{seconds:.0f} s",
-           f"OK {counts['OK']}   CHECK {counts['CHECK']}   PROBLEM {counts['PROBLEM']}",
+           f"OK {counts['OK']}   CHECK {counts['CHECK']}   PROBLEM {counts['PROBLEM']}"
+           + (f"   ({two_cabs} vehicles with a cab at each end are checked from each cab)" if two_cabs else ""),
            "",
            "PROBLEM: the bridge would do something wrong on this train (per the model of its controls).",
            "CHECK:   it looks right, but something couldn't be checked properly - worth a try in the game.",
@@ -476,9 +511,9 @@ def write_report(results, files, seconds):
             if not groups:
                 continue
             out.append(f"\n## {pack}")
-            for key in sorted(groups, key=lambda k: (order[k[0]], short(groups[k][0].train))):
+            for key in sorted(groups, key=lambda k: (order[k[0]], groups[k][0].name)):
                 verdict, problems, doubts, lines = key
-                names = ", ".join(short(r.train) for r in groups[key])
+                names = ", ".join(r.name for r in groups[key])
                 out.append(f"\n[{verdict}] {names}")
                 out += [f"  ! {p}" for p in problems] + [f"  ? {d}" for d in doubts]
                 out += [f"  {line}" for line in lines]
@@ -505,16 +540,24 @@ def check_all(filters, use_files=True):
         try:
             if not is_driven(files, train, package):
                 continue
-            results.append(check_train(train, package, files))
+            ends = cabs(files, train, package)
         except Exception as e:
             r = Result(train, files.pack_of(package))
             r.doubts.append(f"couldn't be checked: {type(e).__name__}: {e}")
             results.append(r)
+            continue
+        for cab in ends:
+            try:
+                results.append(check_train(train, package, files, cab))
+            except Exception as e:
+                r = Result(train, files.pack_of(package), cab)
+                r.doubts.append(f"couldn't be checked: {type(e).__name__}: {e}")
+                results.append(r)
     print("\r" + " " * 80 + "\r", end="")
     write_report(results, files, real_time.time() - start)
     counts = {v: sum(r.verdict == v for r in results) for v in ("OK", "CHECK", "PROBLEM")}
-    print(f"{len(results)} drivable vehicles: OK {counts['OK']}, CHECK {counts['CHECK']}, "
-          f"PROBLEM {counts['PROBLEM']}")
+    print(f"{len({r.train for r in results})} drivable vehicles, {len(results)} cabs: OK {counts['OK']}, "
+          f"CHECK {counts['CHECK']}, PROBLEM {counts['PROBLEM']}")
     print(f"Report: {REPORT_FILE}")
 
 
@@ -563,7 +606,10 @@ def compare_live():
         return
     tj._calibration = {}
     tj.save_calibration = lambda key, value: None
-    model = ModelApi(train, files.components(train, trains[train]))
+    cab = tj.TrainControls(live).active_cab()
+    if cab:
+        print("Cab in use:", cab.lower())
+    model = ModelApi(train, files.components(train, trains[train]), cab)
 
     live_names = tj.node_names(live.list("CurrentDrivableActor"))
     model_names = list(model.controls)

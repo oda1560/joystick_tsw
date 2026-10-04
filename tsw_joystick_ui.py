@@ -196,7 +196,7 @@ class Bridge(threading.Thread):
                 self.drop_train()
                 return
             self.set_game("ok", "Connected")
-            if train != self.train or force:
+            if train != self.train or force or (self.controls is not None and self.controls.cab_changed()):
                 controls = core.TrainControls(self.api, log=self.log)
                 controls.train_id = train
                 controls.detect()

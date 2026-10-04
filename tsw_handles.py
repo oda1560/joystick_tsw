@@ -25,12 +25,41 @@ def is_emergency(label):
     return "emerg" in label or label.strip() in ("eb", "e")
 
 
+def cab_sides(components):
+    """{component name: "Front" / "Back"}: which end of the vehicle each control's cab is at, from the cab
+    (interaction environment) it's in. Locos with a cab at each end have one per cab (Class 66 Driver_F /
+    Driver_B, the back one set to the Back side). Each cab can share another environment, which can share
+    another in turn; one shared from both ends (Class 66 LocoIntEnviro, Class 20 OverallLoco with the
+    throttle in it) belongs to both cabs. Controls in both cabs, or in none, are left out."""
+    envs = {n: c for n, c in components.items() if c.base == "InteractionEnvironmentComponent"}
+
+    def shared(c):
+        ref = c.props.get("SharedInteractionEnvironment")
+        return str(ref.get("ComponentName")) if isinstance(ref, dict) else None
+
+    reached = {n: set() for n in envs}          # the ends an environment can be used from
+    for name, c in envs.items():
+        side, at = enum(c.props.get("VehicleSide"), "Front"), name
+        while at in envs and side not in reached[at]:
+            reached[at].add(side)
+            at = shared(envs[at])
+    sides = {}
+    for name, c in components.items():
+        env = c.props.get("InteractionEnvironmentComponent")
+        ends = reached.get(str(env.get("ComponentName"))) if isinstance(env, dict) else None
+        if ends and len(ends) == 1:
+            sides[name] = next(iter(ends))
+    return sides
+
+
 class Control:
     """One cab control as the game would behave, worked out from its settings in the game files."""
 
-    def __init__(self, comp):
+    def __init__(self, comp, side=None):
+        """side: the end of the vehicle whose cab the control is in ("Front" / "Back", see cab_sides)."""
         p = comp.props
         self.name, self.cls, self.base, self.props = comp.name, comp.cls, comp.base, p
+        self.side = side
         self.vhid = comp.base in VHID_BASES or any(k in p for k in LEVER_KEYS)
         ident = p.get("InputIdentifier")
         self.ident = str(ident.get("Identifier") or "None") if isinstance(ident, dict) else "None"

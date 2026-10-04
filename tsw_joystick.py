@@ -21,6 +21,8 @@ Talks to TSW's External Interface API (launch the game with -HTTPAPI).
 The stick only sends values when you move it, so the keyboard keeps working.
 Each train's handles are looked up in the game's own files (found through Steam) for where Off, full power,
 full brake and the notches really are; if they can't be read, those places are estimated instead.
+On locos with a cab at each end (Class 66, 47, BR 101...) the cab in use is the one worked; change ends and
+the bridge follows within a couple of seconds.
 
 Usage:
     python tsw_joystick.py              run the bridge
@@ -287,9 +289,18 @@ def train_handles(train, wait=30.0):
         package = classes.get(train)
         if package is None:
             return {}
-        return {name: tsw_handles.Control(c) for name, c in files.components(train, package).items()}
+        comps = files.components(train, package)
+        sides = tsw_handles.cab_sides(comps)
+        return {name: tsw_handles.Control(c, sides.get(name)) for name, c in comps.items()}
     except Exception:
         return {}
+
+
+def driving_cabs(handles):
+    """The ends of a train that have a cab with driving controls in it, from train_handles(): {"Front"}, or
+    {"Front", "Back"} on a train with a cab at each end. Empty when the game files weren't read."""
+    return {m.side for m in handles.values()
+            if m.side and any(k in m.ident.lower() for k in THROTTLE_IDS + BRAKE_IDS + REVERSER_IDS)}
 
 
 class Lever:
@@ -1565,6 +1576,8 @@ class TrainControls:
         self.throttle = self.brake = self.reverser = self.aws = self.alerter = None
         self.door_open_left = self.door_open_right = self.door_close_left = self.door_close_right = None
         self.from_files = False           # the train's controls were found in the game files
+        self.cab = None                   # on a train with a cab at each end: the one used, "Front" / "Back"
+        self.cab_known = False            # and the game said it's in use (else the front one is assumed)
 
     def speed(self):
         """Train speed in m/s, or None if the game doesn't report it."""
@@ -1573,6 +1586,35 @@ class TrainControls:
             return float(v) if isinstance(v, (int, float)) else None
         except Exception:
             return None
+
+    def active_cab(self):
+        """The end of the train whose cab is in use, "Front" or "Back", or None if the game doesn't say
+        (no cab in use yet)."""
+        try:
+            v = self.api.get("CurrentDrivableActor.Function.GetActiveCabSide").get("Values") or {}
+        except Exception:
+            return None
+        sides = [s for s in ("Front", "Back") if v.get(s) is True]
+        return sides[0] if len(sides) == 1 else None
+
+    def cab_changed(self):
+        """True when a train with a cab at each end is now driven from the other one, so its controls have to
+        be found again."""
+        if self.cab is None:
+            return False
+        cab = self.active_cab()
+        return cab is not None and cab != self.cab
+
+    def _this_cab(self, names, handles):
+        """On a train with a cab at each end (Class 66, 47, 86, BR 101, Vectron, Class 153...) only the cab in
+        use drives it, so the other cab's controls are left out. Which cab each control is in comes from the
+        game files."""
+        self.cab, self.cab_known = None, False
+        if len(driving_cabs(handles)) < 2:
+            return names
+        active = self.active_cab()
+        self.cab, self.cab_known = active or "Front", active is not None
+        return [n for n in names if getattr(handles.get(n), "side", None) in (None, self.cab)]
 
     def _identifiers(self, names):
         # some reversers are called switches (Class 380 DirectionSwitch, Class 86 / 87 MasterSwitch)
@@ -1642,7 +1684,7 @@ class TrainControls:
     def detect(self):
         handles = train_handles(self.train_id)
         self.from_files = bool(handles)
-        names = node_names(self.api.list("CurrentDrivableActor"))
+        names = self._this_cab(node_names(self.api.list("CurrentDrivableActor")), handles)
         self.throttle = self.brake = self.reverser = self.aws = self.alerter = None
         self.door_open_left = self.door_open_right = self.door_close_left = self.door_close_right = None
         ids = self._identifiers(names)
@@ -1748,6 +1790,8 @@ class TrainControls:
 
     def describe(self):
         parts = []
+        if self.cab:
+            parts.append(f"{self.cab.lower()} cab" + ("" if self.cab_known else " (no cab in use yet)"))
         if self.throttle:
             kind = "power+brake lever" if self.throttle.brake_end is not None and not self.brake else "throttle"
             parts.append(f"{kind} {self.throttle}")
@@ -1918,7 +1962,7 @@ def run():
             last_train_check = now
             try:
                 train = api.get_value("CurrentDrivableActor.ObjectClass")
-                if train != controls.train_id:
+                if train != controls.train_id or controls.cab_changed():
                     controls.train_id = train
                     controls.detect()
                     last_sent = None
