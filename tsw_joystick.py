@@ -4,7 +4,7 @@ Train Sim World 7 - joystick throttle/brake bridge.
 Joystick Y axis:
     push forward  -> throttle (power)
     centre        -> neutral (throttle 0, brake released)
-    pull back     -> train brake
+    pull back     -> train brake (a Release / Hold / Apply valve, Class 66: a third of the travel each)
 
 Base slider (Z axis) -> reverser: + end Forward, middle Neutral, - end Reverse
     (only moved when the train is stopped, never to Off)
@@ -350,6 +350,8 @@ class Lever:
         self.exact_places = False         # its named places located from them (self.zones)
         self.from_files = False           # its places (Off, full power / brake) taken from them
         self._exact_notches = False       # notch positions read from the game files
+        self.positions = None             # a Release / Hold / Apply valve's three positions (see _valve)
+        self._position = None             # index of the one last sent
         if model is not None and model.lever and model.table_known and not model.custom:
             self._from_game_files(model, role)
 
@@ -359,6 +361,8 @@ class Lever:
         (in a notch), so a notch never pulls it somewhere else. Nothing then needs checking with the game.
         Places the files can't settle (no names) keep their estimates."""
         self.model = model
+        if role == "brake" and self._valve(model):
+            return
         resting = model.resting()
         # each named place where it really is: one zone per stretch of the handle (Class 142 has Off at
         # both ends), in the order the game lists the names
@@ -438,6 +442,55 @@ class Lever:
             self._exact_notches = True
         else:
             self.notches = None
+
+    def _valve(self, model):
+        """A brake valve with just Release, Hold and Apply on it (Class 66): the brakes go on for as long as
+        the handle is in Apply, come off in Release and stay as they are in Hold. The stick picks one of the
+        three, a third of its travel back each: the handle goes right into Release or Apply, and into Hold's
+        notch, rather than sliding through them. Returns False for any other brake (an Apply with an amount
+        is a graduated brake: BR 442, Talent 2)."""
+        stretches = []                             # [label, positions], along the handle
+        for x in model.reachable(model.lo, model.hi):
+            label = (model.name_at(x) or "").lower()
+            if stretches and stretches[-1][0] == label:
+                stretches[-1][1].append(x)
+            else:
+                stretches.append([label, [x]])
+        if len(stretches) != 3:
+            return False
+        if "appl" in stretches[0][0]:
+            stretches.reverse()                    # the handle runs Apply .. Release
+        (release, rx), (hold, hx), (apply, ax) = stretches
+        if not ("release" in release and any(w in hold.split() for w in ("hold", "lap"))
+                and "appl" in apply and "{" not in apply and not is_emergency(apply)):
+            return False
+        notch = [x for x in model.resting() if x in hx]
+        held = min(notch or hx, key=lambda x: abs(x - (hx[0] + hx[-1]) / 2))
+        self.positions = [max(rx, key=lambda x: abs(x - held)), held, max(ax, key=lambda x: abs(x - held))]
+        self.zones = [(min(xs), max(xs), label, "Input") for label, xs in stretches]
+        self.exact_places = True
+        self.neutral, self.brake_end = self.positions[0], self.positions[-1]
+        self.safe_lo, self.safe_hi = min(self.positions), max(self.positions)
+        self.notches, self._exact_notches = sorted(self.positions), True
+        self.neutral_verified = self.brake_end_verified = self.from_files = True
+        self.note = "from game files: Release {:.3g} / Hold {:.3g} / Apply {:.3g}, a third each".format(
+            *self.positions)
+        return True
+
+    def valve_position(self, frac):
+        """Where a Release / Hold / Apply valve goes for frac (0..1) of the stick's travel back: a third each,
+        with a margin so a stick resting on a boundary can't flip between two."""
+        n, k = len(self.positions), self._position
+        if k is None:
+            k = min(n - 1, int(frac * n))
+        while k + 1 < n and frac > (k + 1) / n + self.VALVE_HYSTERESIS:
+            k += 1
+        while k > 0 and frac < k / n - self.VALVE_HYSTERESIS:
+            k -= 1
+        self._position = k
+        return self.positions[k]
+
+    VALVE_HYSTERESIS = 0.03   # of the stick's travel back, past a boundary before moving to the next position
 
     @staticmethod
     def _strongest(model, start, way, places):
@@ -1766,7 +1819,9 @@ class TrainControls:
                 out[t] = t.neutral                       # separate brake handle does the braking
             else:
                 out[t] = t.value_between(t.neutral, t.brake_end, -y)   # combined lever brake side
-        if b:
+        if b and b.positions:
+            out[b] = b.valve_position(max(0.0, -y))     # Release / Hold / Apply, a third of the travel each
+        elif b:
             # released .. full brake: from the game files these can run either way round on the handle
             start, end = (b.neutral, b.brake_end) if b.from_files else (b.safe_lo, b.safe_hi)
             out[b] = b.value_between(start, end, max(0.0, -y))

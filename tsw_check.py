@@ -275,7 +275,9 @@ def check_train(train, package, files, cab=None):
 
     if t:
         kind = "power+brake lever" if t.brake_end is not None and not b else "throttle"
-        result.lines.append(f"stick: {kind} {t.name}" + (f", brake {b.name}" if b else ""))
+        result.lines.append(f"stick: {kind} {t.name}" + (f", brake {b.name}" if b else "")
+                            + (" (Release / Hold / Apply, a third of the travel back each)" if b and b.positions
+                               else ""))
     elif b:
         result.lines.append(f"stick: brake {b.name} (no throttle)")
     for name in snapshots:
