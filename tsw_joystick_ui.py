@@ -5,8 +5,9 @@ Shows joystick / game / train status, live stick and lever gauges, and settings.
 The bridge itself (game API, lever detection, emergency exclusion) lives in tsw_joystick.py.
 
 Usage:
-    pythonw tsw_joystick_ui.py            (or double-click Start TSW Joystick.bat)
-    pythonw tsw_joystick_ui.py --paused   start with the bridge paused
+    pythonw tsw_joystick_ui.py               (or double-click Start TSW Joystick.bat)
+    pythonw tsw_joystick_ui.py --paused      start with the bridge paused
+    pythonw tsw_joystick_ui.py --with-game   close the window once the game exits (how tsw_autostart.py opens it)
 """
 
 import ctypes
@@ -22,6 +23,7 @@ import urllib.error
 import tkinter as tk
 from tkinter import ttk
 
+import tsw_autostart as autostart
 import tsw_joystick as core   # sets SDL env vars before pygame is imported
 import pygame
 
@@ -251,7 +253,7 @@ class App:
     CW, CH = 560, 290    # canvas size at 96 dpi
     GH = 250             # height of the gauge area; the look bar sits below it
 
-    def __init__(self, root, start_paused=False):
+    def __init__(self, root, start_paused=False, with_game=False):
         self.root = root
         self.s = load_settings()
         self.logq = queue.Queue()
@@ -283,6 +285,10 @@ class App:
         self.look.start()
         self.log("Bridge started" + (" (paused)" if start_paused else ""))
         self.tick()
+        if with_game:
+            self.log("Opened with the game - closes when the game exits")
+            self.game_seen = time.monotonic()
+            self._close_with_game()
 
     # ---- layout
     def _style(self):
@@ -595,6 +601,15 @@ class App:
     def on_redetect(self):
         self.bridge.force_detect = True
         self.log("Re-detecting train controls...")
+
+    def _close_with_game(self):
+        now = time.monotonic()
+        if autostart.game_running():
+            self.game_seen = now
+        elif now - self.game_seen > autostart.GONE_SECONDS:
+            self.close()
+            return
+        self.root.after(autostart.CHECK_SECONDS * 1000, self._close_with_game)
 
     def close(self):
         save_settings(self.s)
@@ -999,9 +1014,9 @@ def main():
     except Exception:
         pass
     root = tk.Tk()
-    root.title("TSW7 Joystick Bridge")
+    root.title(autostart.BRIDGE_TITLE)
     root.resizable(False, False)
-    App(root, start_paused="--paused" in sys.argv)
+    App(root, start_paused="--paused" in sys.argv, with_game="--with-game" in sys.argv)
     root.mainloop()
 
 

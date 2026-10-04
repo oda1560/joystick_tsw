@@ -3,3 +3,4 @@ settings.json
 error.log
 lever_calibration.json
 train_check_report.txt
+autostart_error.log
