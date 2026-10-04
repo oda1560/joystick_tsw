@@ -123,6 +123,7 @@ class ModelApi(tj.TSWApi):
         sides = tsw_handles.cab_sides(components)
         self.controls = {name: Control(c, sides.get(name)) for name, c in components.items()}
         self.moves = []                  # (control, input) after every move, in order
+        self.sent = []                   # (control, input sent) for every move, before any notch pulls it in
 
     def _req(self, method, path, params=None):
         kind, _, rest = path.partition("/")
@@ -149,7 +150,8 @@ class ModelApi(tj.TSWApi):
         if kind == "set":
             if endpoint != "InputValue" or not c.vhid:
                 return dict(ERROR)
-            c.move(float(params["Value"]))
+            self.sent.append((c, float(params["Value"])))
+            c.move(self.sent[-1][1])
             self.moves.append((c, c.value))
             return {"Result": "Success"}
         values = c.answer(endpoint)
@@ -425,11 +427,21 @@ def check_reverser(result, controls, model):
         result.problems.append(f"the slider does nothing: reverser {rev.name} has no position the bridge "
                                f"takes for {' / '.join(missing)} (its positions: {names})")
         return
-    got = []
+    got, between = [], {}
+    m, sent = model[rev.name], controls.api.sent
     for position in ("forward", "neutral", "reverse", "neutral", "forward"):
+        start = len(sent)
         rev.set(position)
         got.append((position, rev.position()))
+        # left between notches, the game may not pull it into one: the Class 150 reverser stayed at 0.875,
+        # between its two Forward notches. (The end of the handle's travel holds it too, and values are
+        # sent to 4 decimals, so 2/3 goes as 0.6667.)
+        last = [x for c, x in sent[start:] if c is m][-1:]
+        rests = [(a, b) for a, b, _ in m.notches] + [(m.lo, m.lo), (m.hi, m.hi)]
+        if last and m.notches and not any(a - 1e-4 <= last[0] <= b + 1e-4 for a, b in rests):
+            between.setdefault(position, last[0])
     wrong = [f"{want} gave {have}" for want, have in got if want != have]
+    wrong += [f"{want} sent to {x:.3g}, between notches" for want, x in between.items()]
     result.lines.append(f"slider: reverser {rev.name}: " + ("Forward / Neutral / Reverse all right"
                                                             if not wrong else "; ".join(wrong)))
     if wrong:
@@ -487,6 +499,7 @@ CAUSES = [   # (what the problem is, pattern in the problem text), most specific
      r"slider does nothing"),
     ("Reverser not found by the bridge", r"reverser .* not found"),
     ("Reverser lands in the wrong position", r"reverser .* gave"),
+    ("Reverser left between notches", r"reverser .* between notches"),
     ("Handle goes into emergency", r"went into emergency"),
     ("Stick centred stops the engine", r"stops the engine"),
     ("Stick centred doesn't give Off (power or brake applied)", r"gives power|not Off|stick at .*: .* is at"),

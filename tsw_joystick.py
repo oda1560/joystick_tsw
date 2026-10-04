@@ -382,6 +382,9 @@ class Lever:
         self.zones = [(a, b, label, "Input") for a, b, label in sorted(stretches, key=lambda z: order[z[2]])]
         self.exact_places = True
         if role == "reverser":
+            # its notches as the files place them, not evenly spaced (TfW Class 150: 0.333 / 0.667, not 1/3)
+            self.notches = sorted((a + b) / 2 for a, b, _ in model.notches) or None
+            self._exact_notches = True
             return
         # full power / brake can also be where the stick holds the handle without a notch pulling it away
         # (Bnrdzf: Run Up, at the end of the travel past the last notch)
@@ -1020,6 +1023,8 @@ class Reverser:
         if "neutral" not in self.notches and "forward" in self.notches and "reverse" in self.notches:
             self._stand_in_neutral()
         self._trim_overlaps()
+        if self.lever.exact_places:
+            self._into_notches()
         self.ok = all(p in self.notches for p in REVERSER_LABELS)
         self._calibration_key = f"{train}|{name}" if train else None
         if self.lever.exact_places:
@@ -1071,6 +1076,26 @@ class Reverser:
             if not any(gap[0] < (a + b) / 2 < gap[1] for a, b in self.lever.out_named.values()):
                 self.notches.setdefault("neutral", middle)
                 self.out_ranges["neutral"] = gap
+
+    def _into_notches(self):
+        """Send each position right into a notch, as the game files place them. Where several notches have
+        the same name (Class 150 / 153: Forward at 0.75 and at the end of the handle, 1.0), the middle of
+        them is no notch at all, and the game left the handle there rather than pull it into one; the end
+        notch even puts that reverser back to Off. So the notch used is the one nearest Neutral, the first
+        a driver comes to."""
+        model = self.lever.model
+        if not model.notches:
+            return                         # the handle stays wherever it's sent
+        f, r = self.notches.get("forward"), self.notches.get("reverse")
+        for pos, x in list(self.notches.items()):
+            if any(a - 1e-6 <= x <= b + 1e-6 for a, b, _ in model.notches):
+                continue
+            za, zb = next(((a, b) for a, b, _, _ in self.lever.zones if a is not None and a <= x <= b), (x, x))
+            inside = [(a + b) / 2 for a, b, _ in model.notches if za - 1e-9 <= a and b <= zb + 1e-9]
+            towards = (f + r) / 2 if pos == "neutral" and f is not None and r is not None \
+                else self.notches.get("neutral", x)
+            if inside:
+                self.notches[pos] = min(inside, key=lambda n: abs(n - towards))
 
     def _trim_overlaps(self):
         """Keep each notch's output range off the other, narrower, named notches: the Class 323 names Reverse
