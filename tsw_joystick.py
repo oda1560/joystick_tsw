@@ -4,7 +4,8 @@ Train Sim World 7 - joystick throttle/brake bridge.
 Joystick Y axis:
     push forward  -> throttle (power)
     centre        -> neutral (throttle 0, brake released)
-    pull back     -> train brake (a Release / Hold / Apply valve, Class 66: a third of the travel each)
+    pull back     -> train brake (a Release / Hold / Apply valve, Class 66: a third of the travel each,
+                     held in Release or Apply for as long as the stick is there)
 
 Base slider (Z axis) -> reverser: + end Forward, middle Neutral, - end Reverse
     (only moved when the train is stopped, never to Off)
@@ -30,6 +31,7 @@ Usage:
     python tsw_joystick.py --axes       show live joystick axis values (debug)
 """
 
+import atexit
 import ctypes
 import json
 import math
@@ -352,6 +354,7 @@ class Lever:
         self._exact_notches = False       # notch positions read from the game files
         self.positions = None             # a Release / Hold / Apply valve's three positions (see _valve)
         self._position = None             # index of the one last sent
+        self.held = False                 # held in place in the game, as a hand would (see _set_valve)
         if model is not None and model.lever and model.table_known and not model.custom:
             self._from_game_files(model, role)
 
@@ -491,6 +494,34 @@ class Lever:
         return self.positions[k]
 
     VALVE_HYSTERESIS = 0.03   # of the stick's travel back, past a boundary before moving to the next position
+
+    def _set_valve(self, value):
+        """The game springs a Release / Hold / Apply valve back to Hold as soon as it's let go (Class 66: in
+        about 0.15 s; its keys only apply for as long as they're held). So in Release or Apply the handle is
+        held there as a hand would hold it (the game's Interacting flag; seen in the game to keep it in
+        place), and let go again in Hold."""
+        hold = value != self.positions[1]
+        if hold and not self.held:
+            self._interact(True)
+        self.api.set(self.path, value)
+        self._last_sent = (value, time.time())
+        if not hold and self.held:
+            self._interact(False)
+
+    def _interact(self, on):
+        self.held = on
+        self.api.set(f"CurrentDrivableActor/{self.name}.Interacting", 1.0 if on else 0.0)
+
+    def let_go(self):
+        """Stop holding the handle, so it goes where the game takes it (a valve springs back to Hold). Done
+        whenever the bridge stops driving: paused, joystick gone, another train or cab, closed."""
+        if not self.held:
+            return
+        self._last_sent = (None, 0.0)              # held again on the next send
+        try:
+            self._interact(False)
+        except Exception:
+            self.held = False
 
     @staticmethod
     def _strongest(model, start, way, places):
@@ -891,6 +922,9 @@ class Lever:
             last_value, last_time = self._last_sent
             if value == last_value and time.time() - last_time < 0.5:
                 return None                # already there (re-sent now and then in case keys moved it)
+        if self.positions:
+            self._set_valve(value)
+            return None
         previous = self._last_sent[0]
         self.api.set(self.path, value)
         self._last_sent = (value, time.time())
@@ -1795,6 +1829,12 @@ class TrainControls:
             self.brake = lever if lever.works() else None
         return names, ids
 
+    def let_go(self):
+        """Let go of any handle the bridge is holding in place (see Lever.let_go)."""
+        for lever in (self.throttle, self.brake):
+            if lever:
+                lever.let_go()
+
     def press(self, name, down):
         """Press (down=True) or release a cab button worked by a joystick button: "aws", "alerter",
         "door_open_left" etc. Returns a message for the log, or None."""
@@ -1980,6 +2020,7 @@ def run():
     y_filter = AxisFilter()
     look = LookController(lambda msg: print(time.strftime("%H:%M:%S"), msg, flush=True))
     look.start()
+    atexit.register(controls.let_go)          # never leave a handle held when the bridge stops
     cab_buttons = {AWS_BUTTON: "aws", ALERTER_BUTTON: "alerter",
                    DOOR_OPEN_LEFT_BUTTON: "door_open_left", DOOR_OPEN_RIGHT_BUTTON: "door_open_right",
                    DOOR_CLOSE_LEFT_BUTTON: "door_close_left", DOOR_CLOSE_RIGHT_BUTTON: "door_close_right"}
@@ -1990,6 +2031,7 @@ def run():
         for event in pygame.event.get():
             if event.type == pygame.JOYDEVICEREMOVED:
                 stick = None
+                controls.let_go()
             elif (event.type in (pygame.JOYBUTTONDOWN, pygame.JOYBUTTONUP) and event.button in cab_buttons
                   and controls.train_id is not None):
                 try:
@@ -2018,6 +2060,7 @@ def run():
             try:
                 train = api.get_value("CurrentDrivableActor.ObjectClass")
                 if train != controls.train_id or controls.cab_changed():
+                    controls.let_go()
                     controls.train_id = train
                     controls.detect()
                     last_sent = None
@@ -2027,10 +2070,12 @@ def run():
                 if e.code == 403:
                     api.load_key()   # key may have been regenerated
                 say(f"Game API error {e.code} (are you in a train cab?)")
+                controls.let_go()
                 controls.train_id = None
                 continue
             except Exception:
                 say("Waiting for TSW7 API on port 31270 (is the game running with -HTTPAPI?)...")
+                controls.let_go()
                 controls.train_id = None
                 continue
 
@@ -2050,6 +2095,7 @@ def run():
                 rev_sync.update(controls, rev_zone)
             except Exception as e:
                 say(f"Reverser failed: {e}")
+                controls.let_go()
                 controls.train_id = None
                 continue
 
@@ -2064,6 +2110,7 @@ def run():
             last_sent = y
         except Exception as e:
             say(f"Send failed: {e}")
+            controls.let_go()
             controls.train_id = None
 
 

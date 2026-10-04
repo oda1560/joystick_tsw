@@ -58,6 +58,8 @@ def is_neutral(label):
 class Control(tsw_handles.Control):
     """A cab control as the game would behave (see tsw_handles), answering the game's API."""
 
+    interacting = False                  # held in place, as by a hand (the game's Interacting flag)
+
     # -------- the game's API
     def answer(self, endpoint):
         if endpoint == "ObjectClass":
@@ -126,6 +128,9 @@ class ModelApi(tj.TSWApi):
             else None
         if c is None:
             return dict(ERROR)
+        if kind == "set" and endpoint == "Interacting" and c.vhid:
+            c.interacting = float(params["Value"]) >= 0.5
+            return {"Result": "Success"}
         if kind == "set":
             if endpoint != "InputValue" or not c.vhid:
                 return dict(ERROR)
@@ -251,7 +256,7 @@ def check_train(train, package, files, cab=None):
     # the stick: as you'd use it after getting into the cab
     driver = Driver(controls, clock)
     driver.tick()
-    snapshots = {}
+    snapshots, held = {}, {}
     # a handle that starts beyond emergency (1972 Stock: Shutdown) has to pass through it, as a driver would
     beyond = {c.name for c in (tm, bm) if c and any(w in (c.zone(c.value)[0] or "").lower()
                                                     for w in ("shutdown", "shut down"))}
@@ -260,6 +265,7 @@ def check_train(train, package, files, cab=None):
         start = len(api.moves)
         driver.move_to(y)
         snapshots[name] = {c.name: c.value for c in (tm, bm) if c}
+        held[name] = bm.interacting if bm else False
         for c, x in api.moves[start:]:
             if c in (tm, bm) and c.zone(x)[1]:
                 text = f"{c.name} went into emergency ({c.describe(x)}) while moving the stick to {name}"
@@ -329,6 +335,15 @@ def check_train(train, package, files, cab=None):
                 result.problems.append(f"stick at {name}: {b.name} is at {bm.describe(x)}, not released")
                 break
 
+    if b and b.positions:
+        # the game springs a Release / Hold / Apply valve back to Hold unless it's held (Class 66)
+        for name, want in (("full brake", True), ("half brake", False), ("centre", True)):
+            if held[name] != want:
+                result.problems.append(f"stick at {name}: {b.name} is {'not ' if want else ''}held in "
+                                       f"{bm.describe(on(bm, name))}")
+        controls.let_go()
+        if bm.interacting:
+            result.problems.append(f"{b.name} is still held after the bridge lets go")
     check_reverser(result, controls, model)
     check_buttons(result, controls, model)
     for m in messages:

@@ -139,6 +139,8 @@ class Bridge(threading.Thread):
             self.log(f"Game: {text}")
 
     def drop_train(self):
+        if self.controls is not None:
+            self.controls.let_go()
         self.controls = None
         self.train = None
         self.last_sent = None
@@ -160,14 +162,18 @@ class Bridge(threading.Thread):
                 self.log(message)
 
     def run(self):
-        while self.running:
-            time.sleep(1.0 / core.POLL_HZ)
-            try:
-                self.step()
-            except Exception as e:
-                self.set_game("bad", f"Error: {e}")
-                self.drop_train()
-                time.sleep(1)
+        try:
+            while self.running:
+                time.sleep(1.0 / core.POLL_HZ)
+                try:
+                    self.step()
+                except Exception as e:
+                    self.set_game("bad", f"Error: {e}")
+                    self.drop_train()
+                    time.sleep(1)
+        finally:
+            if self.controls is not None:
+                self.controls.let_go()        # never leave a handle held when the bridge stops
 
     def step(self):
         if not self.api.key and not self.api.load_key():
@@ -197,6 +203,8 @@ class Bridge(threading.Thread):
                 return
             self.set_game("ok", "Connected")
             if train != self.train or force or (self.controls is not None and self.controls.cab_changed()):
+                if self.controls is not None:
+                    self.controls.let_go()
                 controls = core.TrainControls(self.api, log=self.log)
                 controls.train_id = train
                 controls.detect()
@@ -214,6 +222,7 @@ class Bridge(threading.Thread):
             self.rev_actual = controls.reverser.position() if controls.reverser else None
 
         if not self.enabled:
+            controls.let_go()
             self.last_sent = None
             self.rev_sync.reset()
             return
@@ -221,6 +230,7 @@ class Bridge(threading.Thread):
 
         y = self.y
         if y is None:
+            controls.let_go()
             self.last_sent = None
             return
         if self.last_sent is None:
@@ -589,6 +599,7 @@ class App:
     def close(self):
         save_settings(self.s)
         self.bridge.running = False
+        self.bridge.join(timeout=3)   # lets go of any handle it's holding
         self.look.running = False
         pygame.quit()
         self.root.destroy()
