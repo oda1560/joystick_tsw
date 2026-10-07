@@ -269,6 +269,9 @@ class App:
         self.raw_y = 0.0
         self.y = 0.0
         self.y_filter = core.AxisFilter()
+        self.follow = core.HandleFollower()   # moves the handle after the stick at the train's handle speed
+        self.hs_train = None          # train the handle speed setting shows ("" = not in a train)
+        self._hs_quiet = False        # the slider is being set to the train's value, not by you
         self.rev_s = 0.0              # slider position, +1 = forward end
         self.rev_zone = None
         self.frame = 0
@@ -407,9 +410,23 @@ class App:
         self.look_dz_label.pack(side="left", padx=(6, 0))
         self.on_look_deadzone(self.s["look_deadzone"])
 
-        ttk.Label(grid, text="Reverser", style="Muted.TLabel").grid(row=3, column=0, sticky="w", pady=3, padx=(0, 14))
+        ttk.Label(grid, text="Handle speed", style="Muted.TLabel").grid(row=3, column=0, sticky="w",
+                                                                       pady=3, padx=(0, 14))
+        hs_row = ttk.Frame(grid, style="Panel.TFrame")
+        hs_row.grid(row=3, column=1, columnspan=3, sticky="w", pady=3)
+        ttk.Label(hs_row, text="With stick", style="Muted.TLabel").pack(side="left", padx=(0, 6))
+        self.hs_scale = ttk.Scale(hs_row, from_=0.0, to=core.HANDLE_SECONDS_MAX, length=round(180 * self.k),
+                                  value=0.0, command=self.on_handle_speed)
+        self.hs_scale.pack(side="left")
+        self.hs_scale.bind("<ButtonRelease-1>", self.on_handle_speed_done)
+        ttk.Label(hs_row, text="Slow", style="Muted.TLabel").pack(side="left", padx=(6, 10))
+        self.hs_label = ttk.Label(hs_row, text="", style="Panel.TLabel")
+        self.hs_label.pack(side="left")
+        self._sync_handle_speed()
+
+        ttk.Label(grid, text="Reverser", style="Muted.TLabel").grid(row=4, column=0, sticky="w", pady=3, padx=(0, 14))
         rev_row = ttk.Frame(grid, style="Panel.TFrame")
-        rev_row.grid(row=3, column=1, columnspan=3, sticky="w", pady=3)
+        rev_row.grid(row=4, column=1, columnspan=3, sticky="w", pady=3)
         self.rev_var = tk.BooleanVar(value=bool(self.s["rev_enabled"]))
         ttk.Checkbutton(rev_row, text="Use slider", variable=self.rev_var, style="Panel.TCheckbutton",
                         command=self.on_rev_enabled).pack(side="left", padx=(0, 12))
@@ -420,9 +437,9 @@ class App:
         ttk.Checkbutton(rev_row, text="Invert", variable=self.rev_invert_var, style="Panel.TCheckbutton",
                         command=self.on_rev_invert).pack(side="left", padx=(12, 0))
 
-        ttk.Label(grid, text="Look", style="Muted.TLabel").grid(row=4, column=0, sticky="w", pady=3, padx=(0, 14))
+        ttk.Label(grid, text="Look", style="Muted.TLabel").grid(row=5, column=0, sticky="w", pady=3, padx=(0, 14))
         look_row = ttk.Frame(grid, style="Panel.TFrame")
-        look_row.grid(row=4, column=1, columnspan=3, sticky="w", pady=3)
+        look_row.grid(row=5, column=1, columnspan=3, sticky="w", pady=3)
         self.look_var = tk.BooleanVar(value=bool(self.s["look_enabled"]))
         ttk.Checkbutton(look_row, text="Use twist", variable=self.look_var, style="Panel.TCheckbutton",
                         command=self.on_look_enabled).pack(side="left", padx=(0, 12))
@@ -440,10 +457,10 @@ class App:
         self.look_angle_label.pack(side="left", padx=(6, 0))
         self.on_look_angle(self.s["look_angle"])
 
-        ttk.Label(grid, text="Look smoothing", style="Muted.TLabel").grid(row=5, column=0, sticky="w",
+        ttk.Label(grid, text="Look smoothing", style="Muted.TLabel").grid(row=6, column=0, sticky="w",
                                                                          pady=3, padx=(0, 14))
         smooth_row = ttk.Frame(grid, style="Panel.TFrame")
-        smooth_row.grid(row=5, column=1, columnspan=3, sticky="w", pady=3)
+        smooth_row.grid(row=6, column=1, columnspan=3, sticky="w", pady=3)
         ttk.Label(smooth_row, text="Quick", style="Muted.TLabel").pack(side="left", padx=(0, 6))
         self.smooth_scale = ttk.Scale(smooth_row, from_=0.0, to=0.6, length=round(180 * self.k),
                                       value=float(self.s["look_smoothing"]), command=self.on_look_smoothing)
@@ -455,7 +472,7 @@ class App:
         self.on_look_smoothing(self.s["look_smoothing"])
 
         self.btn_labels = {}
-        for row, (key, (title, _)) in enumerate(BUTTON_ACTIONS.items(), start=6):
+        for row, (key, (title, _)) in enumerate(BUTTON_ACTIONS.items(), start=7):
             ttk.Label(grid, text=title, style="Muted.TLabel").grid(row=row, column=0, sticky="w",
                                                                    pady=3, padx=(0, 14))
             btn_row = ttk.Frame(grid, style="Panel.TFrame")
@@ -567,6 +584,46 @@ class App:
         self.s["look_smoothing"] = round(float(value), 2)
         self.smooth_label.config(text="off" if self.s["look_smoothing"] < 0.01
                                  else f"{self.s['look_smoothing']:.2f} s")
+
+    def on_handle_speed(self, value):
+        if self._hs_quiet:
+            return
+        seconds = round(float(value), 1)
+        self.follow.seconds = seconds if seconds >= 0.1 else 0.0
+        self._show_handle_speed()
+
+    def on_handle_speed_done(self, _event=None):
+        if self.hs_train:
+            core.save_handle_seconds(self.hs_train, self.follow.seconds)
+            self.log(f"Handle speed on {pretty_train(core.train_family(self.hs_train))}: "
+                     + (f"{self.follow.seconds:.1f} s from Off to full" if self.follow.seconds
+                        else "follows the stick at once"))
+
+    def _sync_handle_speed(self):
+        """Show and use the handle speed of the train you're in, each train having its own."""
+        train = self.bridge.train or ""
+        if train == self.hs_train:
+            return
+        self.hs_train = train
+        self.follow.seconds = core.handle_seconds(train) if train else core.HANDLE_SECONDS
+        self._hs_quiet = True
+        try:
+            self.hs_scale.state(["!disabled"])        # a disabled slider ignores being set
+            self.hs_scale.set(self.follow.seconds)
+        finally:
+            self._hs_quiet = False
+        if not train:
+            self.hs_scale.state(["disabled"])
+        self._show_handle_speed()
+
+    def _show_handle_speed(self):
+        seconds = self.follow.seconds
+        text = f"{seconds:.1f} s from Off to full" if seconds else "instant"
+        if self.hs_train:
+            text += f"  ·  {pretty_train(core.train_family(self.hs_train))}"
+        else:
+            text += "  ·  set in a train"
+        self.hs_label.config(text=text)
 
     def on_look_deadzone(self, value):
         self.s["look_deadzone"] = round(float(value), 3)
@@ -705,7 +762,7 @@ class App:
         axis, invert, dz = self.s["axis"], bool(self.s["invert"]), float(self.s["deadzone"])
         raw = self.stick.get_axis(axis) if axis < self.stick.get_numaxes() else 0.0
         self.raw_y = raw if invert else -raw
-        self.y = self.y_filter.update(core.read_y(self.stick, axis, invert, dz))
+        self.y = self.follow.update(self.y_filter.update(core.read_y(self.stick, axis, invert, dz)))
         self.bridge.y = self.y
 
         if self.frame % 6 == 0:
@@ -999,6 +1056,7 @@ class App:
     def tick(self):
         self.frame += 1
         try:
+            self._sync_handle_speed()
             self._poll_joystick()
             self._update_status()
             self._draw()

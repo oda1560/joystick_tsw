@@ -6,6 +6,8 @@ Joystick Y axis:
     centre        -> neutral (throttle 0, brake released)
     pull back     -> train brake (a Release / Hold / Apply valve, Class 66: a third of the travel each,
                      held in Release or Apply for as long as the stick is there)
+    Each train can have a handle speed (set in the window): the handle then follows the stick no faster
+    than that, instead of jumping wherever the stick is pushed or flicked (M3a: 1.5 s from Off to full).
 
 Base slider (Z axis) -> reverser: + end Forward, middle Neutral, - end Reverse
     (only moved when the train is stopped, never to Off)
@@ -65,6 +67,9 @@ DEADZONE = 0.08                  # around centre, treated as neutral
 SEND_THRESHOLD = 0.01            # minimum change before sending to the game
 STICK_BAND = 0.015               # stick reversals smaller than this are ignored (sensor flicker)
 STICK_SMOOTHING = 0.05           # seconds of smoothing on the stick
+HANDLE_SECONDS = 0.0             # seconds for the handle to go from Off to full power / brake; 0 = with the
+                                 # stick. Set per train in the window (handle_speed.json)
+HANDLE_SECONDS_MAX = 4.0
 POLL_HZ = 30
 TRAIN_CHECK_SECONDS = 2.0        # how often to check whether you changed train
 
@@ -251,6 +256,40 @@ def save_calibration(key, value):
     try:
         with open(CALIBRATION_FILE, "w", encoding="utf-8") as f:
             json.dump(_calibration, f, indent=2)
+    except OSError:
+        pass
+
+
+HANDLE_SPEED_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "handle_speed.json")
+
+
+def train_family(train):
+    """A train's name for its own settings, the same from either end of a pair of cars (M3a-A / M3a-B)."""
+    return re.sub(r"[-_][A-Z]_C$", "_C", str(train or ""))
+
+
+def handle_seconds(train):
+    """Seconds the handle takes to go from Off to full power / brake on this train (see HandleFollower)."""
+    try:
+        with open(HANDLE_SPEED_FILE, encoding="utf-8") as f:
+            v = json.load(f).get(train_family(train))
+    except (OSError, ValueError, AttributeError):
+        v = None
+    return float(v) if isinstance(v, (int, float)) and v >= 0 else HANDLE_SECONDS
+
+
+def save_handle_seconds(train, seconds):
+    try:
+        with open(HANDLE_SPEED_FILE, encoding="utf-8") as f:
+            speeds = json.load(f)
+        if not isinstance(speeds, dict):
+            speeds = {}
+    except (OSError, ValueError):
+        speeds = {}
+    speeds[train_family(train)] = round(seconds, 2)
+    try:
+        with open(HANDLE_SPEED_FILE, "w", encoding="utf-8") as f:
+            json.dump(speeds, f, indent=2)
     except OSError:
         pass
 
@@ -2024,6 +2063,30 @@ class AxisFilter:
         return self.value
 
 
+class HandleFollower:
+    """Moves the handle after the stick no faster than a hand would move it: a quick push or flick of the stick
+    takes the handle through the notches in turn instead of jumping straight there, and letting go of the stick
+    brings it back to Off the same way (M3a: full forward went from Coast to P4 in a third of a second).
+    seconds: time from Off to full power or full brake, twice that from one to the other; 0 follows the stick
+    at once. Off and the ends of travel are still reached exactly."""
+
+    def __init__(self, seconds=HANDLE_SECONDS):
+        self.seconds = seconds
+        self.value = None
+        self._time = 0.0
+
+    def update(self, target, now=None):
+        now = time.time() if now is None else now
+        if self.value is None or self.seconds <= 0:
+            self.value = target
+        else:
+            step = min(0.1, max(0.0, now - self._time)) / self.seconds   # a stall never makes it jump
+            self.value = (min(target, self.value + step) if target > self.value
+                          else max(target, self.value - step))
+        self._time = now
+        return self.value
+
+
 def read_y(stick, axis=None, invert=None, deadzone=None):
     axis = Y_AXIS if axis is None else axis
     invert = INVERT_Y if invert is None else invert
@@ -2091,6 +2154,7 @@ def run():
     rev_sync = ReverserSync(lambda msg: print(time.strftime("%H:%M:%S"), msg, flush=True))
     rev_zone = None
     y_filter = AxisFilter()
+    follower = HandleFollower()
     look = LookController(lambda msg: print(time.strftime("%H:%M:%S"), msg, flush=True))
     look.start()
     atexit.register(controls.let_go)          # never leave a handle held when the bridge stops
@@ -2136,6 +2200,7 @@ def run():
                     controls.let_go()
                     controls.train_id = train
                     controls.detect()
+                    follower.seconds = handle_seconds(train)
                     last_sent = None
                     rev_sync.reset()
                     say(f"Train: {train} -> {controls.describe()}")
@@ -2172,7 +2237,7 @@ def run():
                 controls.train_id = None
                 continue
 
-        y = y_filter.update(read_y(stick))
+        y = follower.update(y_filter.update(read_y(stick)))
         if last_sent is not None and abs(y - last_sent) < SEND_THRESHOLD:
             continue   # stick not moved: leave levers alone so keyboard still works
         if last_sent is None:
