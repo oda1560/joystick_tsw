@@ -84,6 +84,7 @@ DOOR_OPEN_LEFT_BUTTON = 6        # base buttons labelled 7 / 8: open the left / 
 DOOR_OPEN_RIGHT_BUTTON = 7
 DOOR_CLOSE_LEFT_BUTTON = 8       # base buttons labelled 9 / 10: close the left / right doors
 DOOR_CLOSE_RIGHT_BUTTON = 9
+STOP_BUTTON = 10                 # base button labelled 11: shows how far the next stop is while held
 DOOR_MAX_SPEED = 0.3             # m/s; doors are never opened faster than this (~1 km/h)
 
 USE_GAME_FILES = True            # look each train's controls up in the game's files (exact places, no guessing)

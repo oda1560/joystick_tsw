@@ -14,6 +14,7 @@ import io
 import os
 import re
 import struct
+import threading
 import zlib
 
 PAK_MAGIC = 0x5A6F12E1
@@ -49,6 +50,7 @@ class Pak:
     def __init__(self, path):
         self.path = path
         self._f = None
+        self._lock = threading.Lock()   # one file handle: the bridge and the stop tracker read from two threads
         with open(path, "rb") as f:
             f.seek(0, 2)
             size = f.tell()
@@ -120,17 +122,18 @@ class Pak:
 
     def read(self, name):
         off, usize, method, blocks, header = self._entry(self.files[name])
-        if self._f is None:
-            self._f = open(self.path, "rb")
-        f = self._f
-        if not method:
-            f.seek(off + (header or 53))
-            return f.read(usize)
-        out = bytearray()
-        for a, b in blocks:
-            f.seek(off + a)                 # block offsets are relative to the entry
-            out += zlib.decompress(f.read(b - a))
-        return bytes(out)
+        with self._lock:
+            if self._f is None:
+                self._f = open(self.path, "rb")
+            f = self._f
+            if not method:
+                f.seek(off + (header or 53))
+                return f.read(usize)
+            raw = []
+            for a, b in blocks:
+                f.seek(off + a)             # block offsets are relative to the entry
+                raw.append(f.read(b - a))
+        return b"".join(zlib.decompress(r) for r in raw)
 
 
 # ---------------------------------------------------------------- cooked packages

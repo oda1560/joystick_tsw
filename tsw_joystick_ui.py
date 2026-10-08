@@ -1,7 +1,8 @@
 """
 Train Sim World 7 joystick bridge - desktop window.
 
-Shows joystick / game / train status, live stick and lever gauges, and settings.
+Shows joystick / game / train status, live stick and lever gauges, and settings. While its joystick button is
+held, it shows over the game how far the next stop is (tsw_stops.py).
 The bridge itself (game API, lever detection, emergency exclusion) lives in tsw_joystick.py.
 
 Usage:
@@ -11,6 +12,7 @@ Usage:
 """
 
 import ctypes
+import ctypes.wintypes as wintypes
 import json
 import os
 import queue
@@ -25,6 +27,7 @@ from tkinter import ttk
 
 import tsw_autostart as autostart
 import tsw_joystick as core   # sets SDL env vars before pygame is imported
+import tsw_stops
 import pygame
 
 try:
@@ -43,6 +46,7 @@ DEFAULTS = {"axis": core.Y_AXIS, "invert": core.INVERT_Y, "deadzone": core.DEADZ
             "door_open_right_button": core.DOOR_OPEN_RIGHT_BUTTON,
             "door_close_left_button": core.DOOR_CLOSE_LEFT_BUTTON,
             "door_close_right_button": core.DOOR_CLOSE_RIGHT_BUTTON,
+            "stop_button": core.STOP_BUTTON,
             "look_enabled": core.USE_LOOK, "look_axis": core.LOOK_AXIS, "look_invert": core.LOOK_INVERT,
             "look_deadzone": core.LOOK_DEADZONE, "look_angle": core.LOOK_MAX_ANGLE,
             "look_smoothing": core.LOOK_SMOOTHING}
@@ -61,6 +65,7 @@ BUTTON_ACTIONS = {"aws_button": ("AWS button", "acknowledges AWS"),
                   "door_open_right_button": ("Open right doors", "opens the right doors"),
                   "door_close_left_button": ("Close left doors", "closes the left doors"),
                   "door_close_right_button": ("Close right doors", "closes the right doors"),
+                  "stop_button": ("Next stop", "shows the next stop while held"),
                   "toggle_button": ("Pause button", "pauses / resumes")}
 # cab buttons held down for as long as their joystick button is held: setting -> TrainControls attribute
 CAB_BUTTONS = {"aws_button": "aws", "alerter_button": "alerter",
@@ -248,6 +253,77 @@ class Bridge(threading.Thread):
             self.drop_train()
 
 
+# ---------------------------------------------------------------- next stop readout
+class StopOverlay:
+    """How far the next stop is, over the game near the top of the screen, only while its joystick button is
+    held. It's shown and hidden without ever taking focus from the game, and clicks go through it."""
+    TOP = 0.10                        # gap above it, as a share of the screen height
+    EX_STYLE = 0x08000000 | 0x00000080 | 0x00080000 | 0x00000020   # no activate, tool window, layered, click-through
+    SHOW = 0x0001 | 0x0002 | 0x0010 | 0x0040    # SetWindowPos: keep size and place, don't activate, show
+    HIDE = 0x0001 | 0x0002 | 0x0004 | 0x0010 | 0x0080
+    TOPMOST = wintypes.HWND(-1)
+
+    def __init__(self, root, k):
+        user32 = ctypes.windll.user32
+        self.set_pos = user32.SetWindowPos
+        self.set_pos.argtypes = [wintypes.HWND, wintypes.HWND] + [ctypes.c_int] * 4 + [wintypes.UINT]
+        before = user32.GetForegroundWindow()
+        self.root = root
+        top = self.top = tk.Toplevel(root)
+        top.overrideredirect(True)
+        top.attributes("-topmost", True)
+        top.attributes("-alpha", 0.0)
+        top.geometry("+-10000+-10000")
+        top.configure(bg=PANEL)
+        box = tk.Frame(top, bg=PANEL, padx=round(22 * k), pady=round(8 * k))
+        box.pack()
+        self.big = tk.Label(box, text="-", bg=PANEL, fg=FG, font=(FONT, 26, "bold"))
+        self.big.pack()
+        self.small = tk.Label(box, text="", bg=PANEL, fg=MUTED, font=(FONT, 12))
+        self.small.pack()
+        self.shown = False
+        self.place = None
+        top.update_idletasks()        # Tk makes the window now, and makes it the active one
+        self.hwnd = int(top.wm_frame(), 16)
+        user32.SetWindowLongW(self.hwnd, -20, user32.GetWindowLongW(self.hwnd, -20) | self.EX_STYLE)
+        self.set_pos(self.hwnd, None, 0, 0, 0, 0, self.HIDE)
+        top.attributes("-alpha", 0.92)
+        if before and user32.GetForegroundWindow() != before:
+            user32.SetForegroundWindow(before)    # give back the focus it took
+
+    def show(self, state):
+        self.update(state)
+        self.top.update_idletasks()
+        self.set_pos(self.hwnd, self.TOPMOST, 0, 0, 0, 0, self.SHOW)
+        self.shown = True
+
+    def hide(self):
+        if self.shown:
+            self.set_pos(self.hwnd, None, 0, 0, 0, 0, self.HIDE)
+            self.shown = False
+
+    def update(self, state):
+        if state["metres"] is not None:
+            big = ("≈ " if state["estimated"] else "") + state["text"]
+            small = " · ".join(p for p in (state["name"], state["detail"]) if p)
+            color = WARN if state["metres"] < -1 else FG
+        elif state["name"]:
+            big, small, color = state["name"], state["text"], FG
+        else:
+            big, small, color = "-", state["text"], MUTED
+        if self.big.cget("text") != big or self.big.cget("fg") != color:
+            self.big.config(text=big, fg=color)
+        if self.small.cget("text") != small:
+            self.small.config(text=small)
+        self.top.update_idletasks()
+        width = self.top.winfo_reqwidth()
+        place = (max(0, (self.root.winfo_screenwidth() - width) // 2),
+                 round(self.root.winfo_screenheight() * self.TOP))
+        if place != self.place:          # keep it centred as the text changes width
+            self.place = place
+            self.top.geometry(f"+{place[0]}+{place[1]}")
+
+
 # ---------------------------------------------------------------- window
 class App:
     CW, CH = 560, 290    # canvas size at 96 dpi
@@ -261,6 +337,7 @@ class App:
         self.bridge = Bridge(self.log)
         self.bridge.enabled = not start_paused
         self.look = core.LookController(self.log)
+        self.tracker = tsw_stops.StopTracker(self.log)
         self.look_raw = 0.0           # twist position, +1 = full right
         self.stick = None
         self.next_stick_try = 0.0
@@ -280,12 +357,15 @@ class App:
         pygame.init()
         self._style()
         self._build()
+        root.update_idletasks()       # shows this window first, so the overlay hands the focus back to it
+        self.overlay = StopOverlay(root, self.k)
         self._refresh_toggle()
         self._refresh_button_label()
         root.attributes("-topmost", bool(self.s["on_top"]))
         root.protocol("WM_DELETE_WINDOW", self.close)
         self.bridge.start()
         self.look.start()
+        self.tracker.start()
         self.log("Bridge started" + (" (paused)" if start_paused else ""))
         self.tick()
         if with_game:
@@ -673,6 +753,7 @@ class App:
         self.bridge.running = False
         self.bridge.join(timeout=3)   # lets go of any handle it's holding
         self.look.running = False
+        self.tracker.running = False
         pygame.quit()
         self.root.destroy()
 
@@ -710,6 +791,14 @@ class App:
     def _release_all(self):
         for name in self.held:
             self._set_held(name, False)
+        self._show_stop(False)
+
+    def _show_stop(self, down):
+        self.tracker.shown = down
+        if down:
+            self.overlay.show(self.tracker.state)
+        else:
+            self.overlay.hide()
 
     def _poll_joystick(self):
         sid = self.stick.get_instance_id() if self.stick else None
@@ -727,6 +816,8 @@ class App:
                     self._assign_button(ev.button)
                 elif cab_button:
                     self._set_held(cab_button, down)
+                elif ev.button == self.s["stop_button"]:
+                    self._show_stop(down)
                 elif down and ev.button == self.s["toggle_button"]:
                     self.toggle()
 
@@ -1060,6 +1151,8 @@ class App:
             self._poll_joystick()
             self._update_status()
             self._draw()
+            if self.overlay.shown:
+                self.overlay.update(self.tracker.state)
             self._drain_log()
         except Exception as e:
             self.log(f"UI error: {e}")
