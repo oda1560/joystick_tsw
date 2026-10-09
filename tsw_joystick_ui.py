@@ -2,8 +2,8 @@
 Train Sim World 7 joystick bridge - desktop window.
 
 Shows joystick / game / train status, live stick and lever gauges, and settings. While its joystick button is
-held, it shows over the game how far the next stop is (tsw_stops.py), and while you're over the speed limit, the
-limit (tsw_speed.py).
+held, it shows over the game how far the next stop is (tsw_stops.py) and the speed limit now, and while you're over
+the speed limit, the limit (tsw_speed.py).
 The bridge itself (game API, lever detection, emergency exclusion) lives in tsw_joystick.py.
 
 Usage:
@@ -309,7 +309,8 @@ class Overlay:
         self.set_pos = user32.SetWindowPos
         self.set_pos.argtypes = [wintypes.HWND, wintypes.HWND] + [ctypes.c_int] * 4 + [wintypes.UINT]
         before = user32.GetForegroundWindow()
-        self.root, self.gap = root, top
+        self.root, self.gap, self.k = root, top, k
+        self.under = None             # an overlay this one keeps below while both are shown
         win = self.win = tk.Toplevel(root)
         win.overrideredirect(True)
         win.attributes("-topmost", True)
@@ -332,10 +333,22 @@ class Overlay:
             user32.SetForegroundWindow(before)    # give back the focus it took
 
     def show(self):
+        self._place()                 # the overlay above may have come or gone
         if not self.shown:
             self.win.update_idletasks()
             self.set_pos(self.hwnd, self.TOPMOST, 0, 0, 0, 0, self.SHOW)
             self.shown = True
+
+    def _place(self):
+        """Centred, `gap` from the top of the screen, and below the overlay above while that's shown."""
+        top = round(self.root.winfo_screenheight() * self.gap)
+        above = self.under
+        if above is not None and above.shown and above.place is not None:
+            top = max(top, above.place[1] + above.win.winfo_reqheight() + round(6 * self.k))
+        place = (max(0, (self.root.winfo_screenwidth() - self.win.winfo_reqwidth()) // 2), top)
+        if place != self.place:          # keep it centred as the text changes width
+            self.place = place
+            self.win.geometry(f"+{place[0]}+{place[1]}")
 
     def hide(self):
         if self.shown:
@@ -357,39 +370,47 @@ class Overlay:
                 label.config(text=line[0], fg=line[1])
         self.lines = list(lines)
         self.win.update_idletasks()
-        place = (max(0, (self.root.winfo_screenwidth() - self.win.winfo_reqwidth()) // 2),
-                 round(self.root.winfo_screenheight() * self.gap))
-        if place != self.place:          # keep it centred as the text changes width
-            self.place = place
-            self.win.geometry(f"+{place[0]}+{place[1]}")
+        self._place()
 
 
 class StopOverlay(Overlay):
-    """How far the next stop (or go-via) is, while its joystick button is held."""
+    """How far the next stop (or go-via) is, while its joystick button is held, and the speed limit now."""
 
     def __init__(self, root, k):
-        super().__init__(root, k, 0.10, [(26, True), (12, False), (10, False)])
+        super().__init__(root, k, 0.10, [(26, True), (12, False), (10, False), (11, True)])
 
-    def show(self, state, imperial):
-        self.update(state, imperial)
+    def show(self, state, watch):
+        """`watch`: the SpeedWatch, for the limit and the units."""
+        self.update(state, watch)
         super().show()
 
-    def update(self, state, imperial):
+    def update(self, state, watch):
+        imperial = watch.imperial
         then = state["then"]
         if then and state["then_metres"] is not None:
             then += " in " + tsw_units.distance(state["then_metres"], imperial)
         if state["metres"] is not None:
             big = ("≈ " if state["estimated"] else "") + tsw_units.distance(state["metres"], imperial)
-            self.set((big, WARN if state["metres"] < -1 else FG), (state["label"], FG), (then, MUTED))
+            lines = (big, WARN if state["metres"] < -1 else FG), (state["label"], FG), (then, MUTED)
         elif state["label"]:
-            self.set(("-", MUTED), (state["label"], FG), (state["text"], MUTED))
+            lines = ("-", MUTED), (state["label"], FG), (state["text"], MUTED)
         else:
-            self.set(("-", MUTED), (state["text"], FG), ("", MUTED))
+            lines = ("-", MUTED), (state["text"], FG), ("", MUTED)
+        self.set(*lines, self._limit(watch))
+
+    @staticmethod
+    def _limit(watch):
+        """'Speed limit 60 mph', amber / red while over it as the speeding popup is."""
+        limit, over = watch.limit, watch.state
+        if limit is None:
+            return "", MUTED
+        colour = (BAD if over["counted"] else WARN) if over else FG
+        return "Speed limit " + tsw_units.speed(limit, watch.imperial), colour
 
 
 class SpeedOverlay(Overlay):
     """The speed limit, for as long as you're over it: amber while within the game's tolerance, red once the game
-    counts it as speeding. Sits below the next stop readout."""
+    counts it as speeding. Sits below the next stop readout, moving down while that's shown if it needs to."""
 
     def __init__(self, root, k):
         super().__init__(root, k, 0.20, [(9, True), (26, True), (11, False)])
@@ -440,6 +461,7 @@ class App:
         root.update_idletasks()       # shows this window first, so the overlays hand the focus back to it
         self.overlay = StopOverlay(root, self.k)
         self.speed_overlay = SpeedOverlay(root, self.k)
+        self.speed_overlay.under = self.overlay
         self._refresh_toggle()
         self._refresh_button_label()
         root.attributes("-topmost", bool(self.s["on_top"]))
@@ -857,7 +879,7 @@ class App:
     def _show_stop(self, down):
         self.tracker.shown = down
         if down:
-            self.overlay.show(self.tracker.state, self.speed_watch.imperial)
+            self.overlay.show(self.tracker.state, self.speed_watch)
         else:
             self.overlay.hide()
 
@@ -1213,7 +1235,7 @@ class App:
             self._update_status()
             self._draw()
             if self.overlay.shown:
-                self.overlay.update(self.tracker.state, self.speed_watch.imperial)
+                self.overlay.update(self.tracker.state, self.speed_watch)
             speeding = self.speed_watch.state if self.s["speed_popup"] else None
             if speeding:
                 self.speed_overlay.show(speeding, self.speed_watch.imperial)
