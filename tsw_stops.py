@@ -15,7 +15,8 @@ stop on, by adding up the speed over the game's own clock (it runs slower than t
 It also says what to do while you're stopped at a stop, from the step of the timetable the game is on and the
 stop's scheduled departure: the game keeps a stop's step going until its departure time and the doors are shut,
 then goes on to the next (seen on Airedale-Wharfedale 2P27 at Frizinghall: doors shut 8 s before 08:36:30, the
-step done at 08:36:29).
+step done at 08:36:29). Before a service starts, the game can have a wait step of its own; that counts as being
+at the first stop.
 
     tracker = StopTracker(); tracker.start()
     tracker.state      # {"text": message, "label": "Stop at ...", "metres": to go, "estimated": ...,
@@ -403,6 +404,7 @@ class StopTracker(threading.Thread):
         self.clock = clock
 
         order = key = None
+        waiting = False                              # on the game's own wait before the service starts
         if self.steps is not None:
             current = api.get_value("Objectives.Current")
             if isinstance(current, (int, float)) and current >= self.offset:
@@ -412,7 +414,9 @@ class StopTracker(threading.Thread):
                 else:
                     key = self.steps[k]
                     order = path.order[key] if self.vias_counted else path.first[key[0]]
-        self._at_stop(key, order, speed, clock, aid)
+            elif isinstance(current, (int, float)) and current >= 0:
+                waiting = True
+        self._at_stop(key, order, speed, clock, aid, waiting)
         if key is not None and self.step_key is not None and path.order[key] > path.order[self.step_key]:
             done = next((t for t in path.targets if t.key == self.step_key), None)
             if done is not None and not self.fixed:
@@ -433,11 +437,17 @@ class StopTracker(threading.Thread):
             self._say("", target, target.metres - self.position, estimated=not self.fixed, then=then,
                       then_metres=then.metres - self.position if then else None)
 
-    def _at_stop(self, key, order, speed, clock, aid):
+    def _at_stop(self, key, order, speed, clock, aid, waiting=False):
         """Sets self.stop while you're stopped at a stop: from when the game is on its LoadUnload step until the
-        train moves off."""
+        train moves off. `waiting`: the game is on a wait of its own before the service's first step (on Airedale
+        2P27, a wait for a time of day at Bradford Forster Square): you're at the first stop."""
         path = self.path
-        instruction = key[0] if key is not None else len(path.instructions) if order == len(path.steps) else None
+        if key is not None:
+            instruction = key[0]
+        elif order == len(path.steps):
+            instruction = len(path.instructions)         # all done
+        else:
+            instruction = 0 if waiting else None
         if instruction is None or clock is None:
             self.dwell = self.stop = None
             return

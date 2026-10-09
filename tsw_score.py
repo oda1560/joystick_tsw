@@ -144,13 +144,16 @@ class Points:
             self.seen = seen
             try:
                 save = read_save(path)
-            except (OSError, ValueError, KeyError, struct.error, zlib.error):
-                return None
-            if self.save and self.save[0] == save[0]:
-                self.before = self.save[2].get("CurrentHUDScore")
-            else:
-                self.before = None
-            self.save = save
+            except (OSError, ValueError, KeyError, IndexError, TypeError, struct.error, zlib.error):
+                save = None                 # half written, say: the one before stands until the game next writes
+            if save is not None:
+                if self.save and self.save[0] == save[0]:
+                    self.before = self.save[2].get("CurrentHUDScore")
+                else:
+                    self.before = None
+                self.save = save
+        if self.save is None:
+            return None
         name, saved, record = self.save
         if name not in services or saved is None or game_seconds is None or \
                 not 0 <= game_seconds - saved < STALE_SECONDS:

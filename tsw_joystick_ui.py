@@ -297,20 +297,21 @@ class Bridge(threading.Thread):
 
 # ---------------------------------------------------------------- popups over the game
 class Overlay:
-    """A small panel over the game, centred near the top of the screen. It's shown and hidden without ever taking
-    focus from the game, and clicks go through it."""
+    """A small panel over the game near the top of the screen, centred or in the right-hand corner. It's shown and
+    hidden without ever taking focus from the game, and clicks go through it."""
     EX_STYLE = 0x08000000 | 0x00000080 | 0x00080000 | 0x00000020   # no activate, tool window, layered, click-through
     SHOW = 0x0001 | 0x0002 | 0x0010 | 0x0040    # SetWindowPos: keep size and place, don't activate, show
     HIDE = 0x0001 | 0x0002 | 0x0004 | 0x0010 | 0x0080
     TOPMOST = wintypes.HWND(-1)
 
-    def __init__(self, root, k, top, lines):
-        """`top`: the gap above it, as a share of the screen height; `lines`: font size and bold, line by line."""
+    def __init__(self, root, k, top, lines, right=False):
+        """`top`: the gap above it, as a share of the screen height; `lines`: font size and bold, line by line;
+        `right`: in the top right corner, not centred."""
         user32 = ctypes.windll.user32
         self.set_pos = user32.SetWindowPos
         self.set_pos.argtypes = [wintypes.HWND, wintypes.HWND] + [ctypes.c_int] * 4 + [wintypes.UINT]
         before = user32.GetForegroundWindow()
-        self.root, self.gap, self.k = root, top, k
+        self.root, self.gap, self.k, self.right = root, top, k, right
         self.under = None             # an overlay this one keeps below while both are shown
         win = self.win = tk.Toplevel(root)
         win.overrideredirect(True)
@@ -341,13 +342,15 @@ class Overlay:
             self.shown = True
 
     def _place(self):
-        """Centred, `gap` from the top of the screen, and below the overlay above while that's shown."""
+        """Centred (or at the right), `gap` from the top of the screen, and below the overlay above while that's
+        shown."""
         top = round(self.root.winfo_screenheight() * self.gap)
         above = self.under
         if above is not None and above.shown and above.place is not None:
             top = max(top, above.place[1] + above.win.winfo_reqheight() + round(6 * self.k))
-        place = (max(0, (self.root.winfo_screenwidth() - self.win.winfo_reqwidth()) // 2), top)
-        if place != self.place:          # keep it centred as the text changes width
+        spare = self.root.winfo_screenwidth() - self.win.winfo_reqwidth()
+        place = (max(0, spare - round(24 * self.k) if self.right else spare // 2), top)
+        if place != self.place:          # keep it in place as the text changes width
             self.place = place
             self.win.geometry(f"+{place[0]}+{place[1]}")
 
@@ -423,13 +426,13 @@ def minutes(seconds):
 
 
 class DwellOverlay(Overlay):
-    """While you're stopped at a stop: whether to wait, shut the doors or go, the time now and the departure
-    time, and your points (tsw_stops.StopTracker.stop)."""
+    """While you're stopped at a stop, in the top right corner: whether to wait, shut the doors or go, the time
+    now and the departure time, and your points (tsw_stops.StopTracker.stop)."""
     PHASES = {"wait": ("WAIT", FG), "close": ("SHUT THE DOORS", WARN), "depart": ("DEPART", GOOD),
               "signal": ("WAIT FOR THE SIGNAL", WARN), "end": ("END OF SERVICE", FG)}
 
     def __init__(self, root, k):
-        super().__init__(root, k, 0.10, [(24, True), (12, False), (11, False), (12, True), (10, False)])
+        super().__init__(root, k, 0.03, [(24, True), (12, False), (11, False), (12, True), (10, False)], right=True)
 
     def show(self, stop):
         self.set(*self.lines_for(stop))
@@ -518,7 +521,6 @@ class App:
         root.update_idletasks()       # shows this window first, so the overlays hand the focus back to it
         self.dwell_overlay = DwellOverlay(root, self.k)
         self.overlay = StopOverlay(root, self.k)
-        self.overlay.under = self.dwell_overlay
         self.speed_overlay = SpeedOverlay(root, self.k)
         self.speed_overlay.under = self.overlay
         self._refresh_toggle()
