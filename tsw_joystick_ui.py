@@ -2,8 +2,9 @@
 Train Sim World 7 joystick bridge - desktop window.
 
 Shows joystick / game / train status, live stick and lever gauges, and settings. While its joystick button is
-held, it shows over the game how far the next stop is (tsw_stops.py) and the speed limit now, and while you're over
-the speed limit, the limit (tsw_speed.py).
+held, it shows over the game how far the next stop is (tsw_stops.py) and the speed limit now; while you're stopped
+at a stop, whether to wait, shut the doors or go, with the times and your points (tsw_score.py); and while you're
+over the speed limit, the limit (tsw_speed.py).
 The bridge itself (game API, lever detection, emergency exclusion) lives in tsw_joystick.py.
 
 Usage:
@@ -41,7 +42,7 @@ except ImportError:
 HERE = os.path.dirname(os.path.abspath(__file__))
 SETTINGS_FILE = os.path.join(HERE, "settings.json")
 DEFAULTS = {"axis": core.Y_AXIS, "invert": core.INVERT_Y, "deadzone": core.DEADZONE,
-            "toggle_button": None, "on_top": False, "speed_popup": True, "joystick": "",
+            "toggle_button": None, "on_top": False, "speed_popup": True, "stop_panel": True, "joystick": "",
             "rev_enabled": core.USE_REVERSER, "rev_axis": core.REVERSER_AXIS,
             "rev_invert": core.REVERSER_INVERT, "aws_button": core.AWS_BUTTON,
             "alerter_button": core.ALERTER_BUTTON,
@@ -358,6 +359,7 @@ class Overlay:
     def set(self, *lines):
         """Each line as (text, colour); a line without text is left out."""
         if list(lines) == self.lines:
+            self._place()             # the overlay above may have come or gone
             return
         if [bool(t) for t, _ in lines] != [bool(old and old[0]) for old in self.lines]:
             for label in self.labels:
@@ -406,6 +408,61 @@ class StopOverlay(Overlay):
             return "", MUTED
         colour = (BAD if over["counted"] else WARN) if over else FG
         return "Speed limit " + tsw_units.speed(limit, watch.imperial), colour
+
+
+def clock_time(seconds):
+    """'08:36:30' from seconds after midnight."""
+    s = int(seconds) % 86400
+    return f"{s // 3600:02d}:{s // 60 % 60:02d}:{s % 60:02d}"
+
+
+def minutes(seconds):
+    """'1:05' from seconds."""
+    s = int(round(abs(seconds)))
+    return f"{s // 60}:{s % 60:02d}"
+
+
+class DwellOverlay(Overlay):
+    """While you're stopped at a stop: whether to wait, shut the doors or go, the time now and the departure
+    time, and your points (tsw_stops.StopTracker.stop)."""
+    PHASES = {"wait": ("WAIT", FG), "close": ("SHUT THE DOORS", WARN), "depart": ("DEPART", GOOD),
+              "signal": ("WAIT FOR THE SIGNAL", WARN), "end": ("END OF SERVICE", FG)}
+
+    def __init__(self, root, k):
+        super().__init__(root, k, 0.10, [(24, True), (12, False), (11, False), (12, True), (10, False)])
+
+    def show(self, stop):
+        self.set(*self.lines_for(stop))
+        super().show()
+
+    @classmethod
+    def lines_for(cls, stop):
+        action, colour = cls.PHASES[stop["phase"]]
+        left, departs = stop["left"], stop["departs"]
+        if stop["phase"] == "close" and left is not None and left < 0:
+            colour = BAD                                  # it's past the departure time
+        where = stop["station"]
+        if stop["phase"] == "end":
+            where += "  ·  terminates here"
+        elif departs is not None:
+            where += "  ·  departs " + clock_time(departs)
+        now = "now " + clock_time(stop["now"])
+        if departs is not None and left is not None and stop["phase"] in ("wait", "close"):
+            now += f"  ·  in {minutes(left)}" if left >= 0.5 else f"  ·  {minutes(left)} late"
+        if stop["phase"] == "wait":
+            now += "  ·  doors " + ("open" if stop["doors"] else "shut")
+        points, arrival = stop["points"] or {}, ""
+        score = ""
+        if points.get("points") is not None:
+            score = f"{points['points']:,} points"
+            if points.get("change"):
+                score += f"  ({points['change']:+,})"
+        if points.get("late") is not None:
+            late = points["late"]
+            arrival = ("arrived on time" if abs(late) < 1 else
+                       f"arrived {minutes(late)} {'late' if late > 0 else 'early'}")
+            arrival += f", {points['off']:.1f} m from the marker"
+        return (action, colour), (where, FG), (now, MUTED), (score, FG), (arrival, MUTED)
 
 
 class SpeedOverlay(Overlay):
@@ -459,7 +516,9 @@ class App:
         self._style()
         self._build()
         root.update_idletasks()       # shows this window first, so the overlays hand the focus back to it
+        self.dwell_overlay = DwellOverlay(root, self.k)
         self.overlay = StopOverlay(root, self.k)
+        self.overlay.under = self.dwell_overlay
         self.speed_overlay = SpeedOverlay(root, self.k)
         self.speed_overlay.under = self.overlay
         self._refresh_toggle()
@@ -647,6 +706,9 @@ class App:
         self.speed_var = tk.BooleanVar(value=bool(self.s["speed_popup"]))
         ttk.Checkbutton(bottom, text="Show the limit when speeding", variable=self.speed_var,
                         style="Panel.TCheckbutton", command=self.on_speed_popup).pack(side="left", padx=(16, 0))
+        self.stop_panel_var = tk.BooleanVar(value=bool(self.s["stop_panel"]))
+        ttk.Checkbutton(bottom, text="Show what to do at stops", variable=self.stop_panel_var,
+                        style="Panel.TCheckbutton", command=self.on_stop_panel).pack(side="left", padx=(16, 0))
         ttk.Button(bottom, text="Re-detect train", command=self.on_redetect).pack(side="right")
 
         # log
@@ -815,6 +877,10 @@ class App:
 
     def on_speed_popup(self):
         self.s["speed_popup"] = bool(self.speed_var.get())
+        save_settings(self.s)
+
+    def on_stop_panel(self):
+        self.s["stop_panel"] = bool(self.stop_panel_var.get())
         save_settings(self.s)
 
     def on_redetect(self):
@@ -1234,6 +1300,11 @@ class App:
             self._poll_joystick()
             self._update_status()
             self._draw()
+            at_stop = self.tracker.stop if self.s["stop_panel"] else None
+            if at_stop:
+                self.dwell_overlay.show(at_stop)
+            else:
+                self.dwell_overlay.hide()
             if self.overlay.shown:
                 self.overlay.update(self.tracker.state, self.speed_watch)
             speeding = self.speed_watch.state if self.s["speed_popup"] else None

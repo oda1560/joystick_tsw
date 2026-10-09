@@ -12,9 +12,18 @@ Tried on Medway Valley 2T09: it ran on smoothly from one signal to the next and 
 took the stop. About 4 in 10 route timetables name no signals. There the place is only known from the last
 stop on, by adding up the speed over the game's own clock (it runs slower than the wall clock).
 
+It also says what to do while you're stopped at a stop, from the step of the timetable the game is on and the
+stop's scheduled departure: the game keeps a stop's step going until its departure time and the doors are shut,
+then goes on to the next (seen on Airedale-Wharfedale 2P27 at Frizinghall: doors shut 8 s before 08:36:30, the
+step done at 08:36:29).
+
     tracker = StopTracker(); tracker.start()
     tracker.state      # {"text": message, "label": "Stop at ...", "metres": to go, "estimated": ...,
                        #  "then": the stop after a go-via, "then_metres": to go}
+    tracker.stop       # while stopped at a stop, else None: {"phase": "wait" / "close" (the doors) / "depart" /
+                       #  "signal" (wait for it) / "end" (of the service), "station": name, "now", "departs" (game
+                       #  seconds after midnight; departs None if not timed), "left": seconds to departure,
+                       #  "doors": open, "points": tsw_score.Points.read()}
 """
 
 import functools
@@ -24,12 +33,20 @@ import time
 
 import tsw_joystick as core
 import tsw_paks
+import tsw_score
 
 POLL_SECONDS = 0.5             # how often the train is placed on its path
 SHOWN_POLL_SECONDS = 0.2       # ... while the readout is on screen
 SERVICE_CHECK_SECONDS = 3.0    # how often to check whether you started another service
 PASSED_METRES = 20.0           # without objectives, a stop counts as passed this far beyond it (a go-via at once)
 NO_GUID = "0" * 32
+STOPPED = 0.3                  # m/s: slower than this the train is stopped
+DEPARTED = 1.0                 # m/s: faster than this, it has left the stop
+CLOSE_DOORS_SECONDS = 30.0     # the doors are to be shut this long before the departure time
+DOOR_SECONDS = 1.0             # how often the doors are looked at while at a stop
+MAX_CARS = 16
+DANGER = {"Stop", "Danger"}    # signal aspects to wait at
+DANGER_METRES = 400.0          # ... when the signal is this close
 PLATFORM = re.compile(r"^(.*?)[\s,-]+((?:platform|plat|pl|gleis|track|bahnsteig|voie|binario)\.?\s*\S+)$", re.I)
 
 
@@ -75,15 +92,26 @@ class ServicePath:
     """A service's stops, go-vias and signals along its path, from the timetable files. Distances in metres from
     the start of the path."""
 
-    def __init__(self, name, steps, targets, signals):
+    def __init__(self, name, steps, targets, signals, instructions=(), schedule=None):
         self.name = name
         self.steps = steps                # [(instruction, go-via or None)]: each instruction after its go-vias
         self.targets = targets            # [Target] in that order
         self.signals = signals            # {API GUID: [metres where a stretch it protects starts]}
+        self.instructions = instructions  # [(type, stopping, destination, go-vias)] from the timetable
+        self.times = (schedule or {}).get("times") or [(None, None)] * len(instructions)
+        self.origin = (schedule or {}).get("origin") or ""
         self.order = {key: k for k, key in enumerate(steps)}
         self.first = {}                   # instruction -> order of its first step
         for k, (i, _) in enumerate(steps):
             self.first.setdefault(i, k)
+
+    def station(self, instruction):
+        """The name of the stop a LoadUnload instruction is at: the place the service went to before it, or
+        where it starts."""
+        for kind, _, dest, _ in reversed(self.instructions[:instruction]):
+            if kind == "GoTo" and dest and dest != "None":
+                return split_platform(dest)[0]
+        return self.origin
 
     def place(self, signal, to_signal, near=None):
         """Where the train is, from its next signal and the distance to it (metres), or None if that signal
@@ -122,22 +150,36 @@ def _load(files, path, keep=None):
 # what's read of a timetable's services: the rest is most of a big timetable (80 MB on Frankfurt-Fulda)
 SERVICE_FIELDS = {"Name": None, "ServiceNumber": None, "bIsPlayerDrivable": None, "MapPointA": None,
                   "MapPointB": None, "Instructions": {"InstructionType": None, "bIsStopping": None,
-                                                      "Destination": {"Name": None}, "GoVias": {"Name": None}}}
+                                                      "Destination": {"Name": None}, "GoVias": {"Name": None},
+                                                      "ArrivalTime": None, "CompletionTime": None,
+                                                      "bHasScheduledArrivalTime": None,
+                                                      "bHasScheduledCompletionTime": None}}
+DAY = 86400.0
+
+
+def _time_of_day(ticks, scheduled):
+    """Seconds after midnight of a timetable time (FTimespan ticks), or None if it isn't a scheduled one."""
+    return (ticks / 1e7) % DAY if scheduled and ticks is not None else None
 
 
 @functools.lru_cache(maxsize=4)        # reading a route's timetable takes seconds
 def timetable_services(files, path):
-    """{service name: (service number, player drivable, instructions)} for each service in a timetable file, its
-    instructions as (type "GoTo" / "LoadUnload" / ..., stopping, destination, (go-via names))."""
+    """{service name: (service number, player drivable, instructions, schedule)} for each service in a timetable
+    file, its instructions as (type "GoTo" / "LoadUnload" / ..., stopping, destination, (go-via names)), and its
+    schedule as {"origin": where it starts, "times": [(arrival, departure) per instruction, in seconds after
+    midnight, None where not scheduled]}: a stop's times are on its LoadUnload."""
     out = {}
     for s in _load(files, path, {"Services": SERVICE_FIELDS}).get("Services") or []:
-        instructions = []
+        instructions, times = [], []
         for ins in s.get("Instructions") or []:
             kind = str(ins.get("InstructionType", "")).split("::")[-1]
             dest = (ins.get("Destination") or {}).get("Name") or ""
             vias = tuple(v.get("Name") or "" for v in ins.get("GoVias") or [])
             instructions.append((kind, bool(ins.get("bIsStopping")), dest, vias))
-        out[s.get("Name")] = (s.get("ServiceNumber"), bool(s.get("bIsPlayerDrivable")), tuple(instructions))
+            times.append((_time_of_day(ins.get("ArrivalTime"), ins.get("bHasScheduledArrivalTime")),
+                          _time_of_day(ins.get("CompletionTime"), ins.get("bHasScheduledCompletionTime"))))
+        schedule = {"origin": str(s.get("MapPointA") or ""), "times": tuple(times)}
+        out[s.get("Name")] = (s.get("ServiceNumber"), bool(s.get("bIsPlayerDrivable")), tuple(instructions), schedule)
     return out
 
 
@@ -179,13 +221,14 @@ def service_path(files, timetable_id, service):
             data = dict(_load(files, track).get("ServiceDataTracks") or [])
             for name in names:
                 if name in data:
-                    paths.append(_build(name, services[name][2], data[name].get("TrackData") or []))
+                    paths.append(_build(name, services[name][2], data[name].get("TrackData") or [],
+                                        services[name][3]))
         if paths:
             break
     return paths
 
 
-def _build(name, instructions, rows):
+def _build(name, instructions, rows, schedule=None):
     places, signals, last = {}, {}, None
     for row in rows:
         kind = str(row.get("DataType", ""))
@@ -208,7 +251,7 @@ def _build(name, instructions, rows):
         steps.append((i, None))
         if kind == "GoTo" and (i, None) in places:
             targets.append(Target("stop" if stopping else "via", i, None, places[(i, None)], dest))
-    return ServicePath(name, steps, targets, signals)
+    return ServicePath(name, steps, targets, signals, instructions, schedule or {})
 
 
 # ---------------------------------------------------------------- following the train
@@ -222,6 +265,7 @@ class StopTracker(threading.Thread):
         self.log = log or (lambda msg: None)
         self.running = True
         self.shown = False
+        self.points = tsw_score.Points()
         self._say("Starting...")
         self._reset(None)
         self.last_service_check = 0.0
@@ -237,6 +281,11 @@ class StopTracker(threading.Thread):
         self.fixed = False            # position from a signal (else counted on from the last stop)
         self.clock = None             # game seconds at the last poll
         self.step_key = None          # (instruction, go-via) the game is on
+        self.dwell = None             # the LoadUnload instruction of the stop you're stopped at
+        self.stop = None              # what to do there (see the module's notes)
+        self.door_nodes = None        # API paths of the passenger doors
+        self.doors_open = False
+        self.doors_read = 0.0
 
     def _say(self, text, target=None, metres=None, estimated=False, then=None, then_metres=None):
         self.state = {"text": text, "label": target.label() if target else "", "metres": metres,
@@ -253,6 +302,7 @@ class StopTracker(threading.Thread):
                 self.step()
             except Exception as e:
                 self._say(f"Not available: {e}")     # the game drops a connection now and then: carry on
+                self.stop = None
                 time.sleep(1)
             time.sleep(SHOWN_POLL_SECONDS if self.shown else POLL_SECONDS)
 
@@ -362,6 +412,7 @@ class StopTracker(threading.Thread):
                 else:
                     key = self.steps[k]
                     order = path.order[key] if self.vias_counted else path.first[key[0]]
+        self._at_stop(key, order, speed, clock, aid)
         if key is not None and self.step_key is not None and path.order[key] > path.order[self.step_key]:
             done = next((t for t in path.targets if t.key == self.step_key), None)
             if done is not None and not self.fixed:
@@ -381,3 +432,53 @@ class StopTracker(threading.Thread):
         else:
             self._say("", target, target.metres - self.position, estimated=not self.fixed, then=then,
                       then_metres=then.metres - self.position if then else None)
+
+    def _at_stop(self, key, order, speed, clock, aid):
+        """Sets self.stop while you're stopped at a stop: from when the game is on its LoadUnload step until the
+        train moves off."""
+        path = self.path
+        instruction = key[0] if key is not None else len(path.instructions) if order == len(path.steps) else None
+        if instruction is None or clock is None:
+            self.dwell = self.stop = None
+            return
+        if instruction < len(path.instructions) and path.instructions[instruction][0] == "LoadUnload" \
+                and path.instructions[instruction][1] and speed < STOPPED:
+            self.dwell = instruction
+        if self.dwell is not None and (speed > DEPARTED or instruction < self.dwell):
+            self.dwell = None
+        if self.dwell is None:
+            self.stop = None
+            return
+        _, departs = path.times[self.dwell]
+        now = clock % DAY
+        left = None if departs is None else (departs - now + DAY / 2) % DAY - DAY / 2
+        doors = self._doors_open()
+        if not any(kind == "GoTo" for kind, *_ in path.instructions[self.dwell + 1:]):
+            phase = "end"
+        elif instruction > self.dwell:                      # the game has let the train go
+            danger = aid.get("signalAspectClass") in DANGER and \
+                (aid.get("distanceToSignal") or 0.0) / 100 < DANGER_METRES
+            phase = "close" if doors else "signal" if danger else "depart"
+        elif doors and left is not None and left <= CLOSE_DOORS_SECONDS:
+            phase = "close"
+        else:
+            phase = "wait"
+        self.stop = {"phase": phase, "station": path.station(self.dwell), "now": now, "departs": departs,
+                     "left": left, "doors": doors, "points": self.points.read({self.service, path.name}, clock)}
+
+    def _doors_open(self):
+        """Whether any passenger door of the train is open (looked at once a second)."""
+        if time.monotonic() - self.doors_read < DOOR_SECONDS:
+            return self.doors_open
+        self.doors_read = time.monotonic()
+        api = self.api
+        if self.door_nodes is None:
+            self.door_nodes = []
+            for i in range(MAX_CARS):
+                names = core.node_names(api.list(f"CurrentFormation/{i}"))
+                if not names:
+                    break
+                self.door_nodes += [f"CurrentFormation/{i}/{n}" for n in names if n.startswith("PassengerDoor_")]
+        self.doors_open = any((api.get_value(n + ".Function.GetCurrentOutputValue") or 0.0) > 0.05
+                              for n in self.door_nodes)
+        return self.doors_open
