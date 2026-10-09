@@ -1,9 +1,10 @@
 """
-How far along the track the next stop of the service you're driving is.
+How far along the track the next stop (or go-via) of the service you're driving is.
 
 The game's API has no stop positions, but its timetable files do. For every service a "data track" gives the
-place of each timetable instruction as a distance along the service's path, and names the signal that protects
-each stretch of that path. The API names the next signal and how far away it is, which places the train:
+place of each timetable instruction and go-via point as a distance along the service's path, and names the
+signal that protects each stretch of that path. The API names the next signal and how far away it is, which
+places the train:
 
     train = (where that signal's first stretch starts) - (distance to the signal)
 
@@ -12,7 +13,7 @@ took the stop. About 4 in 10 route timetables name no signals. There the place i
 stop on, by adding up the speed over the game's own clock (it runs slower than the wall clock).
 
     tracker = StopTracker(); tracker.start()
-    tracker.state      # {"text": ..., "name": ..., "detail": ..., "metres": ..., "estimated": ...}
+    tracker.state      # {"text": ..., "label": ..., "then": ..., "metres": ..., "estimated": ...}
 """
 
 import functools
@@ -26,7 +27,7 @@ import tsw_paks
 POLL_SECONDS = 0.5             # how often the train is placed on its path
 SHOWN_POLL_SECONDS = 0.2       # ... while the readout is on screen
 SERVICE_CHECK_SECONDS = 3.0    # how often to check whether you started another service
-PASSED_METRES = 20.0           # without objectives, a stop counts as passed this far beyond it
+PASSED_METRES = 20.0           # without objectives, a stop counts as passed this far beyond it (a go-via at once)
 NO_GUID = "0" * 32
 PLATFORM = re.compile(r"^(.*?)[\s,-]+((?:platform|plat|pl|gleis|track|bahnsteig|voie|binario)\.?\s*\S+)$", re.I)
 
@@ -56,25 +57,44 @@ def format_distance(metres):
     return f"{metres / 1000:.2f} km"
 
 
-class Stop:
-    def __init__(self, instruction, metres, destination):
+class Target:
+    """A place the service stops at or goes via, from the timetable."""
+
+    def __init__(self, kind, instruction, via, metres, destination):
+        self.kind = kind                  # "stop", or "via": a go-via point or a destination passed without stopping
         self.instruction = instruction    # index of its timetable instruction
+        self.via = via                    # which go-via of that instruction it is; None: the instruction itself
         self.metres = metres              # from the start of the service's path
-        self.name, self.detail = split_platform(destination)
+        self.named = bool(destination) and destination != "None"
+        self.name, self.detail = split_platform(destination) if self.named else ("", "")
+
+    @property
+    def key(self):
+        return self.instruction, self.via
+
+    def label(self):
+        words = "Stop at" if self.kind == "stop" else "Go via"
+        if not self.named:
+            return words + " marker"
+        return f"{words} {self.name}" + (f" · {self.detail}" if self.detail else "")
 
     def __repr__(self):
-        return f"Stop({self.instruction}, {self.metres:.0f} m, {self.name} {self.detail})"
+        return f"Target({self.key}, {self.metres:.0f} m, {self.label()})"
 
 
 class ServicePath:
-    """A service's stops and signals along its path, from the timetable files. Distances in metres from the
-    start of the path."""
+    """A service's stops, go-vias and signals along its path, from the timetable files. Distances in metres from
+    the start of the path."""
 
-    def __init__(self, name, instructions, stops, signals):
+    def __init__(self, name, steps, targets, signals):
         self.name = name
-        self.instructions = instructions  # how many timetable instructions the service has
-        self.stops = stops                # [Stop] in path order
+        self.steps = steps                # [(instruction, go-via or None)]: each instruction after its go-vias
+        self.targets = targets            # [Target] in that order
         self.signals = signals            # {API GUID: [metres where a stretch it protects starts]}
+        self.order = {key: k for k, key in enumerate(steps)}
+        self.first = {}                   # instruction -> order of its first step
+        for k, (i, _) in enumerate(steps):
+            self.first.setdefault(i, k)
 
     def place(self, signal, to_signal, near=None):
         """Where the train is, from its next signal and the distance to it (metres), or None if that signal
@@ -85,13 +105,18 @@ class ServicePath:
         start = starts[0] if near is None else min(starts, key=lambda s: abs(s - to_signal - near))
         return start - to_signal
 
-    def next_stop(self, instruction=None, position=None):
-        """The next stop: the first one at or after the instruction the game is on, or failing that the first
-        one not yet passed."""
-        if instruction is not None:
-            return next((s for s in self.stops if s.instruction >= instruction), None)
-        if position is not None:
-            return next((s for s in self.stops if s.metres > position - PASSED_METRES), None)
+    def next_target(self, order=None, position=None, wanted=lambda t: True):
+        """The next place to stop at or go via: the first one at or after the step the game is on (leaving out
+        go-vias already passed), or without that, the first one not yet passed."""
+        for t in self.targets:
+            if not wanted(t):
+                continue
+            if order is not None:
+                if self.order[t.key] < order or (t.kind == "via" and position is not None and t.metres < position):
+                    continue
+                return t
+            if position is not None and t.metres > position - (PASSED_METRES if t.kind == "stop" else 0.0):
+                return t
         return None
 
 
@@ -104,17 +129,17 @@ def _load(files, path):
 
 @functools.lru_cache(maxsize=4)        # reading a route's timetable takes several seconds
 def timetable_services(files, path):
-    """{service name: (service number, player drivable, instruction count, [(instruction, destination)])} for
-    the stopping instructions of each service in a timetable file."""
+    """{service name: (service number, player drivable, instructions)} for each service in a timetable file, its
+    instructions as (type "GoTo" / "LoadUnload" / ..., stopping, destination, (go-via names))."""
     out = {}
     for s in _load(files, path).get("Services") or []:
-        instructions = s.get("Instructions") or []
-        stops = []
-        for i, ins in enumerate(instructions):
-            dest = (ins.get("Destination") or {}).get("Name")
-            if ins.get("bIsStopping") and dest and dest != "None":
-                stops.append((i, dest))
-        out[s.get("Name")] = (s.get("ServiceNumber"), bool(s.get("bIsPlayerDrivable")), len(instructions), stops)
+        instructions = []
+        for ins in s.get("Instructions") or []:
+            kind = str(ins.get("InstructionType", "")).split("::")[-1]
+            dest = (ins.get("Destination") or {}).get("Name") or ""
+            vias = tuple(v.get("Name") or "" for v in ins.get("GoVias") or [])
+            instructions.append((kind, bool(ins.get("bIsStopping")), dest, vias))
+        out[s.get("Name")] = (s.get("ServiceNumber"), bool(s.get("bIsPlayerDrivable")), tuple(instructions))
     return out
 
 
@@ -151,26 +176,36 @@ def service_path(files, timetable_id, service):
             data = dict(_load(files, track).get("ServiceDataTracks") or [])
             for name in names:
                 if name in data:
-                    _, _, count, stops = services[name]
-                    paths.append(_build(name, count, stops, data[name].get("TrackData") or []))
+                    paths.append(_build(name, services[name][2], data[name].get("TrackData") or []))
         if paths:
             break
     return paths
 
 
-def _build(name, instructions, stops, rows):
-    actions, signals, last = {}, {}, None
+def _build(name, instructions, rows):
+    places, signals, last = {}, {}, None
     for row in rows:
         kind = str(row.get("DataType", ""))
         metres = row.get("Distance", 0.0) / 100
         if kind.endswith("ActionPoint"):
-            actions.setdefault(row.get("InstructionIndex"), metres)
+            places.setdefault((row.get("InstructionIndex"), None), metres)
+        elif kind.endswith("GoVia"):
+            places.setdefault((row.get("InstructionIndex"), row.get("GoViaIndex")), metres)
         signal = (row.get("SignalRef") or {}).get("PropertyReference", NO_GUID)
         if signal != NO_GUID:
             if signal != last:            # a new run of stretches behind this signal: it stands here
                 signals.setdefault(api_guid(signal), []).append(metres)
             last = signal
-    return ServicePath(name, instructions, [Stop(i, actions[i], d) for i, d in stops if i in actions], signals)
+    steps, targets = [], []
+    for i, (kind, stopping, dest, vias) in enumerate(instructions):
+        for j, via in enumerate(vias):
+            steps.append((i, j))
+            if (i, j) in places:
+                targets.append(Target("via", i, j, places[(i, j)], via))
+        steps.append((i, None))
+        if kind == "GoTo" and (i, None) in places:
+            targets.append(Target("stop" if stopping else "via", i, None, places[(i, None)], dest))
+    return ServicePath(name, steps, targets, signals)
 
 
 # ---------------------------------------------------------------- following the train
@@ -184,7 +219,7 @@ class StopTracker(threading.Thread):
         self.log = log or (lambda msg: None)
         self.running = True
         self.shown = False
-        self.state = {"text": "Starting...", "name": "", "detail": "", "metres": None, "estimated": False}
+        self.state = {"text": "Starting...", "label": "", "then": "", "metres": None, "estimated": False}
         self._reset(None)
         self.last_service_check = 0.0
 
@@ -192,15 +227,22 @@ class StopTracker(threading.Thread):
         self.service = service        # name the game gives the service you're driving
         self.paths = []               # ServicePath candidates for it
         self.path = None              # the one you're driving
-        self.offset = None            # objective number of the service's first instruction
+        self.offset = None            # objective number of the service's first step
+        self.steps = None             # the steps the game makes objectives for, None: not matched
+        self.vias_counted = False     # the game makes go-vias objectives of their own
         self.position = None          # metres along the path
         self.fixed = False            # position from a signal (else counted on from the last stop)
         self.clock = None             # game seconds at the last poll
-        self.instruction = None
+        self.step_key = None          # (instruction, go-via) the game is on
 
-    def _say(self, text, stop=None, metres=None, estimated=False):
-        self.state = {"text": text, "name": stop.name if stop else "", "detail": stop.detail if stop else "",
+    def _say(self, text, target=None, metres=None, estimated=False, then=""):
+        self.state = {"text": text, "label": target.label() if target else "", "then": then,
                       "metres": metres, "estimated": estimated}
+
+    def _wanted(self, target):
+        """Go-vias without a name are only shown when the game makes objectives of them (they may only be there
+        to route the service)."""
+        return target.kind == "stop" or target.via is None or target.named or self.vias_counted
 
     def run(self):
         while self.running:
@@ -251,20 +293,37 @@ class StopTracker(threading.Thread):
             return
         self.path = self.paths[0]
         self._find_objectives()
-        self.log(f"Next stop: {service} read, {len(self.path.stops)} stops"
-                 + ("" if any(p.signals for p in self.paths) else " (counted from the last stop: no signal data)"))
 
     def _find_objectives(self):
-        """The game makes one objective per timetable instruction, after any of its own (on Medway Valley a
-        'wait' comes first), so Objectives.Current gives the instruction it's on."""
-        self.offset = None
+        """Match the game's objectives to the timetable, so Objectives.Current tells the step the game is on. The
+        game makes one objective per timetable instruction after any of its own (on Medway Valley a 'wait'
+        comes first). Go-vias may have objectives of their own: those objectives say bIsGoVia."""
+        self.offset, self.steps, self.vias_counted = None, None, False
+        path = self.path
+        plain = [k for k in path.steps if k[1] is None]
+        passing = {t.key for t in path.targets if t.kind == "via" and t.via is None}   # may count as go-vias
         try:
             count = len(core.node_names(self.api.list("Objectives")))
-            offset = count - self.path.instructions
-            if offset >= 0 and "ServiceBP" in str(self.api.get_value(f"Objectives/{offset}.ObjectClass")):
-                self.offset = offset
+            for steps in ([path.steps, plain] if len(plain) < len(path.steps) else [plain]):
+                offset = count - len(steps)
+                if offset < 0 or "ServiceBP" not in str(self.api.get_value(f"Objectives/{offset}.ObjectClass")):
+                    continue
+                flags = [bool(self.api.get_value(f"Objectives/{offset + k}.Property.bIsGoVia"))
+                         for k in range(len(steps))]
+                if all(flag == (key[1] is not None) or key in passing for flag, key in zip(flags, steps)):
+                    self.offset, self.steps, self.vias_counted = offset, steps, steps is path.steps
+                    break
         except Exception:
             pass
+        stops = sum(t.kind == "stop" for t in path.targets)
+        vias = sum(t.kind == "via" and self._wanted(t) for t in path.targets)
+        how = ("objectives not matched, going by position" if self.steps is None
+               else "go-vias have objectives" if self.vias_counted
+               else "objectives matched" if len(plain) == len(path.steps)
+               else "go-vias have no objectives")
+        self.log(f"Next stop: {path.name} read, {stops} stop{'s' * (stops != 1)}, {vias} go-via{'s' * (vias != 1)}"
+                 f" ({how})"
+                 + ("" if path.signals else "; counted from the last stop: no signal data"))
 
     def _follow(self):
         api = self.api
@@ -278,7 +337,7 @@ class StopTracker(threading.Thread):
         if len(self.paths) > 1 and signal not in self.path.signals:
             other = next((p for p in self.paths if signal in p.signals), None)
             if other is not None:         # you're on the other part of the service
-                self.path, self.position, self.instruction = other, None, None
+                self.path, self.position, self.step_key = other, None, None
                 self._find_objectives()
         path = self.path
 
@@ -290,23 +349,35 @@ class StopTracker(threading.Thread):
             self.fixed = False
         self.clock = clock
 
-        instruction = None
-        if self.offset is not None:
+        order = key = None
+        if self.steps is not None:
             current = api.get_value("Objectives.Current")
             if isinstance(current, (int, float)) and current >= self.offset:
-                instruction = int(current) - self.offset
-        if instruction is not None and self.instruction is not None and instruction > self.instruction:
-            done = next((s for s in path.stops if s.instruction == self.instruction), None)
+                k = int(current) - self.offset
+                if k >= len(self.steps):
+                    order = len(path.steps)          # all done
+                else:
+                    key = self.steps[k]
+                    order = path.order[key] if self.vias_counted else path.first[key[0]]
+        if key is not None and self.step_key is not None and path.order[key] > path.order[self.step_key]:
+            done = next((t for t in path.targets if t.key == self.step_key), None)
             if done is not None and not self.fixed:
-                self.position = done.metres      # no signal to go by: you're at the stop just made
-        self.instruction = instruction
+                self.position = done.metres      # no signal to go by: you're where that objective was met
+        self.step_key = key
 
-        stop = path.next_stop(instruction, self.position)
-        if stop is None:
-            self._say("No more stops" if instruction is not None or self.position is not None
+        target = path.next_target(order, self.position, self._wanted)
+        if target is None:
+            self._say("No more stops" if order is not None or self.position is not None
                       else "Place on the line not known yet")
-        elif self.position is None:
-            self._say("Distance known after the next stop", stop)
+            return
+        then = ""
+        if target.kind == "via":                # say which stop comes after it
+            stop = path.next_target(path.order[target.key] + 1, None, lambda t: t.kind == "stop")
+            if stop is not None:
+                then = stop.label() + ("" if self.position is None
+                                       else " in " + format_distance(stop.metres - self.position))
+        if self.position is None:
+            self._say("Distance known after the next stop", target, then=then)
         else:
-            metres = stop.metres - self.position
-            self._say(format_distance(metres), stop, metres, estimated=not self.fixed)
+            metres = target.metres - self.position
+            self._say(format_distance(metres), target, metres, estimated=not self.fixed, then=then)

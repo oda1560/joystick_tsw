@@ -255,8 +255,8 @@ class Bridge(threading.Thread):
 
 # ---------------------------------------------------------------- next stop readout
 class StopOverlay:
-    """How far the next stop is, over the game near the top of the screen, only while its joystick button is
-    held. It's shown and hidden without ever taking focus from the game, and clicks go through it."""
+    """How far the next stop (or go-via) is, over the game near the top of the screen, only while its joystick
+    button is held. It's shown and hidden without ever taking focus from the game, and clicks go through it."""
     TOP = 0.10                        # gap above it, as a share of the screen height
     EX_STYLE = 0x08000000 | 0x00000080 | 0x00080000 | 0x00000020   # no activate, tool window, layered, click-through
     SHOW = 0x0001 | 0x0002 | 0x0010 | 0x0040    # SetWindowPos: keep size and place, don't activate, show
@@ -279,8 +279,9 @@ class StopOverlay:
         box.pack()
         self.big = tk.Label(box, text="-", bg=PANEL, fg=FG, font=(FONT, 26, "bold"))
         self.big.pack()
-        self.small = tk.Label(box, text="", bg=PANEL, fg=MUTED, font=(FONT, 12))
+        self.small = tk.Label(box, text="", bg=PANEL, fg=FG, font=(FONT, 12))
         self.small.pack()
+        self.extra = tk.Label(box, text="", bg=PANEL, fg=MUTED, font=(FONT, 10))   # the stop after a go-via
         self.shown = False
         self.place = None
         top.update_idletasks()        # Tk makes the window now, and makes it the active one
@@ -305,16 +306,22 @@ class StopOverlay:
     def update(self, state):
         if state["metres"] is not None:
             big = ("≈ " if state["estimated"] else "") + state["text"]
-            small = " · ".join(p for p in (state["name"], state["detail"]) if p)
+            small, extra = state["label"], state["then"]
             color = WARN if state["metres"] < -1 else FG
-        elif state["name"]:
-            big, small, color = state["name"], state["text"], FG
+        elif state["label"]:
+            big, small, extra, color = "-", state["label"], state["text"], MUTED
         else:
-            big, small, color = "-", state["text"], MUTED
+            big, small, extra, color = "-", state["text"], "", MUTED
         if self.big.cget("text") != big or self.big.cget("fg") != color:
             self.big.config(text=big, fg=color)
         if self.small.cget("text") != small:
             self.small.config(text=small)
+        if self.extra.cget("text") != extra:
+            self.extra.config(text=extra)
+            if extra:
+                self.extra.pack()
+            else:
+                self.extra.pack_forget()
         self.top.update_idletasks()
         width = self.top.winfo_reqwidth()
         place = (max(0, (self.root.winfo_screenwidth() - width) // 2),
