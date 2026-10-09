@@ -2,7 +2,8 @@
 Train Sim World 7 route maps - desktop window for tsw_routemap.py.
 
 Pick a route and a journey, or take the service you're driving in the game, and make a printable map of its speed
-limits, stations and signals. The map opens in your browser to print; maps made before are listed to open again.
+limits, stations and signals. The map opens in your browser to print. Maps are saved in a folder you choose
+(route_maps next to this script to begin with), and the ones made before are listed to open again.
 
 Usage:
     pythonw tsw_routemap_ui.py           (or double-click "Route maps.bat")
@@ -14,7 +15,7 @@ import queue
 import threading
 import traceback
 import tkinter as tk
-from tkinter import ttk
+from tkinter import filedialog, ttk
 
 import tsw_joystick as core
 import tsw_paks
@@ -161,6 +162,14 @@ class App:
         self.status.pack(side="left", padx=(14, 0))
         self.progress = ttk.Progressbar(act, mode="indeterminate", length=round(140 * self.k))
         self.progress.pack(side="right")
+        dest = ttk.Frame(mp, style="Panel.TFrame")
+        dest.pack(fill="x", pady=(10, 0))
+        ttk.Label(dest, text="Save to", style="Muted.TLabel").pack(side="left", padx=(0, 8))
+        self.folder_label = ttk.Label(dest, text="", style="Panel.TLabel")
+        self.folder_label.pack(side="left")
+        self.default_btn = ttk.Button(dest, text="Default", command=self.on_default_folder)
+        self.default_btn.pack(side="right")
+        ttk.Button(dest, text="Change...", command=self.on_change_folder).pack(side="right", padx=(0, 6))
         ttk.Label(mp, text="MADE BEFORE  (double-click to open)", style="Section.TLabel").pack(anchor="w",
                                                                                          pady=(10, 4))
         rec = ttk.Frame(mp, style="Panel.TFrame")
@@ -380,25 +389,70 @@ class App:
                 self.select_route(route, then=listed)
         self.run(lambda: driving_service(library), found, "Asking the game what you're driving...")
 
-    def _refresh_recent(self):
+    # ---- the maps folder
+    def _show_folder(self):
+        folder = routemap.map_folder()
+        default = os.path.normcase(folder) == os.path.normcase(routemap.OUT_DIR)
+        text = folder if len(folder) <= 72 else folder[:28] + " ... " + folder[-40:]
+        self.folder_label.config(text=text + ("    (default)" if default else ""))
+        self.default_btn.state(["disabled"] if default else ["!disabled"])
+
+    def on_change_folder(self):
+        current = routemap.map_folder()
+        folder = filedialog.askdirectory(parent=self.root, title="Where to save route maps",
+                                         initialdir=current if os.path.isdir(current) else HERE, mustexist=False)
+        if folder:
+            self._set_folder(folder)
+
+    def on_default_folder(self):
+        self._set_folder(None)
+
+    def _set_folder(self, folder):
         try:
-            files = [f for f in os.listdir(routemap.OUT_DIR) if f.endswith(".html")]
+            routemap.set_map_folder(folder)
+        except OSError as e:
+            self.log(f"Couldn't save the folder setting: {e}")
+            return
+        self.log(f"Maps are saved in {routemap.map_folder()} from now on")
+        self._show_folder()
+        self._refresh_recent()
+
+    def _refresh_recent(self):
+        """The maps in the folder (not other web pages that may be there), newest first."""
+        folder = routemap.map_folder()
+
+        def is_map(name):
+            try:
+                path = os.path.join(folder, name)
+                if os.path.getsize(path) > 4_000_000:
+                    return False
+                with open(path, "rb") as f:
+                    return b"tsw_routemap.py" in f.read()
+            except OSError:
+                return False
+        try:
+            files = [f for f in os.listdir(folder) if f.lower().endswith(".html") and is_map(f)]
+            files.sort(key=lambda f: os.path.getmtime(os.path.join(folder, f)), reverse=True)
         except OSError:
             files = []
-        files.sort(key=lambda f: os.path.getmtime(os.path.join(routemap.OUT_DIR, f)), reverse=True)
-        self.recent = files
+        self.recent_folder, self.recent = folder, files
         self.recent_list.delete(0, "end")
         for f in files:
             self.recent_list.insert("end", f[:-len(".html")])
+        self._show_folder()
 
     def on_open(self):
         sel = self.recent_list.curselection()
         if sel:
-            os.startfile(os.path.join(routemap.OUT_DIR, self.recent[sel[0]]))
+            os.startfile(os.path.join(self.recent_folder, self.recent[sel[0]]))
 
     def on_folder(self):
-        os.makedirs(routemap.OUT_DIR, exist_ok=True)
-        os.startfile(routemap.OUT_DIR)
+        folder = routemap.map_folder()
+        try:
+            os.makedirs(folder, exist_ok=True)
+            os.startfile(folder)
+        except OSError as e:
+            self.log(f"Can't open {folder}: {e.strerror or e}")
 
 
 def main():

@@ -7,3 +7,4 @@ train_check_report.txt
 autostart_error.log
 route_maps/
 routemap_error.log
+routemap_settings.json

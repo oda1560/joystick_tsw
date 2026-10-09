@@ -9,7 +9,9 @@ Checked on Airedale-Wharfedale 2S00: the timetable's AI driver never runs faster
 
     python tsw_routemap.py                    choose a route and a service
     python tsw_routemap.py airedale           list a route's services
-    python tsw_routemap.py airedale 2S00      write the map of one (route_maps/...html) and open it to print
+    python tsw_routemap.py airedale 2S00      write the map of one and open it to print
+
+Maps are saved in the folder chosen in the window (tsw_routemap_ui.py), at first route_maps next to this script.
 
 The limits are those for passenger trains. A board marks where the front of the train meets the limit.
 """
@@ -19,6 +21,7 @@ import datetime
 import functools
 import heapq
 import html
+import json
 import math
 import os
 import re
@@ -28,7 +31,9 @@ import tsw_paks
 import tsw_stops
 from tsw_units import MILE, MPH
 
-OUT_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "route_maps")
+HERE = os.path.dirname(os.path.abspath(__file__))
+OUT_DIR = os.path.join(HERE, "route_maps")                 # where maps go unless another folder is chosen
+SETTINGS_FILE = os.path.join(HERE, "routemap_settings.json")
 DEFAULT_LIMIT = 90 * MPH    # a limit the files leave out is the game's default: the AI runs 90 mph on those
 MATCH_SLACK = 5.0           # metres (+3 %) a path between two data track rows may differ from the rows' distance
 ROUTE_DEFINITION = re.compile(r"^/[^/]+/RouteDefinition/", re.I)
@@ -859,6 +864,22 @@ class MapError(Exception):
     """A map that can't be made, and why."""
 
 
+def map_folder():
+    """Where maps are saved: the folder chosen in the window, or route_maps next to this script."""
+    try:
+        with open(SETTINGS_FILE, encoding="utf-8") as f:
+            folder = json.load(f).get("folder")
+    except (OSError, ValueError, AttributeError):
+        folder = None
+    return os.path.normpath(folder) if isinstance(folder, str) and folder.strip() else OUT_DIR
+
+
+def set_map_folder(folder):
+    """Saves maps in `folder` from now on (None: back to route_maps)."""
+    with open(SETTINGS_FILE, "w", encoding="utf-8") as f:
+        json.dump({"folder": os.path.normpath(folder) if folder else None}, f, indent=2)
+
+
 def make_map(library, route, timetable, service, also=(), say=print):
     """Writes the map of a service; returns its file. `say` is told how it's going."""
     files = library.files
@@ -878,10 +899,16 @@ def make_map(library, route, timetable, service, also=(), say=print):
             "destination": service.destination or (stops[-1] if stops else ""), "route": name,
             "timetable": timetable_name or timetable.rsplit("/", 1)[-1], "also": [s for s in also if s != service.name]}
     units = Units(imperial_limits(prof.limits))
-    os.makedirs(OUT_DIR, exist_ok=True)
+    folder = map_folder()
+    try:
+        os.makedirs(folder, exist_ok=True)
+    except OSError as e:
+        raise MapError(f"Can't save in {folder}: {e.strerror or e}")
     file_name = f"{name} {service.name} {info['origin']} - {info['destination']}"
-    file_name = re.sub(r"\s+", " ", re.sub(r'[\\/:*?"<>|�\x00-\x1f]+', " ", file_name)).strip()
-    path = os.path.join(OUT_DIR, file_name + ".html")
+    # no characters Windows won't have in a file name, nor the replacement character some names in the files hold
+    file_name = re.sub(r'[\\/:*?"<>|\x00-\x1f]+', " ", file_name).replace(chr(0xFFFD), " ")
+    file_name = re.sub(r"\s+", " ", file_name).strip()
+    path = os.path.join(folder, file_name + ".html")
     with open(path, "w", encoding="utf-8") as f:
         f.write(render(info, prof, units))
     say(f"{len(prof.limits)} limits, {len(prof.signals)} signals, {len(prof.stations)} stations"
