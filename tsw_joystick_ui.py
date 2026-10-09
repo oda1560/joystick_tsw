@@ -302,14 +302,20 @@ class Overlay:
     EX_STYLE = 0x08000000 | 0x00000080 | 0x00080000 | 0x00000020   # no activate, tool window, layered, click-through
     SHOW = 0x0001 | 0x0002 | 0x0010 | 0x0040    # SetWindowPos: keep size and place, don't activate, show
     HIDE = 0x0001 | 0x0002 | 0x0004 | 0x0010 | 0x0080
+    RAISE = 0x0001 | 0x0002 | 0x0010
     TOPMOST = wintypes.HWND(-1)
 
     def __init__(self, root, k, top, lines, right=False):
         """`top`: the gap above it, as a share of the screen height; `lines`: font size and bold, line by line;
         `right`: in the top right corner, not centred."""
-        user32 = ctypes.windll.user32
+        user32 = self.user32 = ctypes.windll.user32
         self.set_pos = user32.SetWindowPos
         self.set_pos.argtypes = [wintypes.HWND, wintypes.HWND] + [ctypes.c_int] * 4 + [wintypes.UINT]
+        user32.GetWindow.argtypes = [wintypes.HWND, wintypes.UINT]
+        user32.GetWindow.restype = wintypes.HWND
+        user32.GetWindowRect.argtypes = [wintypes.HWND, ctypes.POINTER(wintypes.RECT)]
+        user32.IsWindowVisible.argtypes = [wintypes.HWND]
+        user32.GetWindowThreadProcessId.argtypes = [wintypes.HWND, ctypes.POINTER(wintypes.DWORD)]
         before = user32.GetForegroundWindow()
         self.root, self.gap, self.k, self.right = root, top, k, right
         self.under = None             # an overlay this one keeps below while both are shown
@@ -358,6 +364,28 @@ class Overlay:
         if self.shown:
             self.set_pos(self.hwnd, None, 0, 0, 0, 0, self.HIDE)
             self.shown = False
+
+    def keep_on_top(self):
+        """Back on top if another program's window has come over it. The game's window is always on top too, so
+        going back to the game from another window puts the game over anything already shown."""
+        if self.shown and self._covered():
+            self.set_pos(self.hwnd, self.TOPMOST, 0, 0, 0, 0, self.RAISE)
+
+    def _covered(self):
+        user32, mine = self.user32, wintypes.RECT()
+        user32.GetWindowRect(self.hwnd, ctypes.byref(mine))
+        other, pid = wintypes.RECT(), wintypes.DWORD()
+        h = user32.GetWindow(self.hwnd, 3)        # GW_HWNDPREV: the window just above, and so on up
+        while h:
+            if user32.IsWindowVisible(h):           # most of the always-on-top windows aren't
+                user32.GetWindowRect(h, ctypes.byref(other))
+                if (other.left < mine.right and mine.left < other.right
+                        and other.top < mine.bottom and mine.top < other.bottom):
+                    user32.GetWindowThreadProcessId(h, ctypes.byref(pid))
+                    if pid.value != os.getpid():
+                        return True
+            h = user32.GetWindow(h, 3)
+        return False
 
     def set(self, *lines):
         """Each line as (text, colour); a line without text is left out."""
@@ -1314,6 +1342,8 @@ class App:
                 self.speed_overlay.show(speeding, self.speed_watch.imperial)
             else:
                 self.speed_overlay.hide()
+            for overlay in (self.dwell_overlay, self.overlay, self.speed_overlay):
+                overlay.keep_on_top()
             self._drain_log()
         except Exception as e:
             self.log(f"UI error: {e}")
