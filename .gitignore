@@ -5,3 +5,5 @@ lever_calibration.json
 handle_speed.json
 train_check_report.txt
 autostart_error.log
+route_maps/
+routemap_error.log

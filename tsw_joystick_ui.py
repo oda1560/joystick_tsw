@@ -77,6 +77,44 @@ CAB_BUTTONS = {"aws_button": "aws", "alerter_button": "alerter",
 LIGHTS = {"aws_button": "AWS", "alerter_button": "Alerter"}    # shown in the live view while held
 
 
+def apply_style(r):
+    """The windows' dark look (the bridge, the route maps)."""
+    r.configure(bg=BG)
+    st = ttk.Style(r)
+    st.theme_use("clam")
+    st.configure(".", background=BG, foreground=FG, fieldbackground=TRACK, font=(FONT, 10),
+                 bordercolor=TRACK, lightcolor=PANEL, darkcolor=PANEL, troughcolor=TRACK)
+    st.configure("TFrame", background=BG)
+    st.configure("Panel.TFrame", background=PANEL)
+    st.configure("Panel.TLabel", background=PANEL, foreground=FG)
+    st.configure("Muted.TLabel", background=PANEL, foreground=MUTED)
+    st.configure("Section.TLabel", background=PANEL, foreground=MUTED, font=(FONT, 8, "bold"))
+    st.configure("Head.TLabel", background=BG, foreground=FG, font=(FONT, 15, "bold"))
+    st.configure("Sub.TLabel", background=BG, foreground=MUTED)
+    st.configure("TButton", background=TRACK, foreground=FG, borderwidth=0, padding=(10, 4))
+    st.map("TButton", background=[("active", "#3a414d"), ("pressed", "#454d5b")])
+    st.configure("Panel.TCheckbutton", background=PANEL, foreground=FG)
+    st.map("Panel.TCheckbutton", background=[("active", PANEL)],
+           indicatorcolor=[("selected", GOOD), ("!selected", TRACK)])
+    st.configure("TCombobox", fieldbackground=TRACK, background=TRACK, foreground=FG,
+                 arrowcolor=FG, selectbackground=TRACK, selectforeground=FG, padding=3)
+    st.map("TCombobox", fieldbackground=[("readonly", TRACK)], foreground=[("readonly", FG)],
+           selectbackground=[("readonly", TRACK)], selectforeground=[("readonly", FG)])
+    st.configure("Horizontal.TScale", background=MUTED, troughcolor=TRACK)
+    r.option_add("*TCombobox*Listbox.background", PANEL)
+    r.option_add("*TCombobox*Listbox.foreground", FG)
+    r.option_add("*TCombobox*Listbox.selectBackground", "#3a414d")
+    r.option_add("*TCombobox*Listbox.selectForeground", FG)
+
+
+def panel(parent, title):
+    """A titled panel, as in the bridge window."""
+    p = ttk.Frame(parent, style="Panel.TFrame", padding=(14, 10))
+    p.pack(fill="x", pady=(0, 10))
+    ttk.Label(p, text=title, style="Section.TLabel").pack(anchor="w", pady=(0, 6))
+    return p
+
+
 def load_settings():
     s = dict(DEFAULTS)
     try:
@@ -419,39 +457,10 @@ class App:
 
     # ---- layout
     def _style(self):
-        r = self.root
-        r.configure(bg=BG)
-        st = ttk.Style(r)
-        st.theme_use("clam")
-        st.configure(".", background=BG, foreground=FG, fieldbackground=TRACK, font=(FONT, 10),
-                     bordercolor=TRACK, lightcolor=PANEL, darkcolor=PANEL, troughcolor=TRACK)
-        st.configure("TFrame", background=BG)
-        st.configure("Panel.TFrame", background=PANEL)
-        st.configure("Panel.TLabel", background=PANEL, foreground=FG)
-        st.configure("Muted.TLabel", background=PANEL, foreground=MUTED)
-        st.configure("Section.TLabel", background=PANEL, foreground=MUTED, font=(FONT, 8, "bold"))
-        st.configure("Head.TLabel", background=BG, foreground=FG, font=(FONT, 15, "bold"))
-        st.configure("Sub.TLabel", background=BG, foreground=MUTED)
-        st.configure("TButton", background=TRACK, foreground=FG, borderwidth=0, padding=(10, 4))
-        st.map("TButton", background=[("active", "#3a414d"), ("pressed", "#454d5b")])
-        st.configure("Panel.TCheckbutton", background=PANEL, foreground=FG)
-        st.map("Panel.TCheckbutton", background=[("active", PANEL)],
-               indicatorcolor=[("selected", GOOD), ("!selected", TRACK)])
-        st.configure("TCombobox", fieldbackground=TRACK, background=TRACK, foreground=FG,
-                     arrowcolor=FG, selectbackground=TRACK, selectforeground=FG, padding=3)
-        st.map("TCombobox", fieldbackground=[("readonly", TRACK)], foreground=[("readonly", FG)],
-               selectbackground=[("readonly", TRACK)], selectforeground=[("readonly", FG)])
-        st.configure("Horizontal.TScale", background=MUTED, troughcolor=TRACK)
-        r.option_add("*TCombobox*Listbox.background", PANEL)
-        r.option_add("*TCombobox*Listbox.foreground", FG)
-        r.option_add("*TCombobox*Listbox.selectBackground", "#3a414d")
-        r.option_add("*TCombobox*Listbox.selectForeground", FG)
+        apply_style(self.root)
 
     def _panel(self, parent, title):
-        p = ttk.Frame(parent, style="Panel.TFrame", padding=(14, 10))
-        p.pack(fill="x", pady=(0, 10))
-        ttk.Label(p, text=title, style="Section.TLabel").pack(anchor="w", pady=(0, 6))
-        return p
+        return panel(parent, title)
 
     def _build(self):
         outer = ttk.Frame(self.root, padding=14)
