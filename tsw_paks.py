@@ -165,6 +165,7 @@ NATIVE_STRUCTS = {
                                                  [round(r.f32(), 6) for _ in range(6)]))),
     "SimpleCurveKey": lambda r, p: {"Time": r.f32(), "Value": r.f32()},
     "FloatRange": lambda r, p: [(r.u8(), r.f32()), (r.u8(), r.f32())],
+    "SpeedQuantity": lambda r, p: round(r.f32(), 5),          # m/s
     "Int32Range": lambda r, p: [(r.u8(), r.i32()), (r.u8(), r.i32())],
 }
 SCALARS = {"Int8Property": "i8", "Int16Property": "i16", "IntProperty": "i32", "Int64Property": "i64",
@@ -231,6 +232,7 @@ class Package:
                                  "size": size, "offset": off})
         self._uexp = uexp
         self._props = {}
+        self._keep = None
 
     def fname(self, r):
         i, n = r.i32(), r.i32()
@@ -266,16 +268,25 @@ class Package:
         e = self.exports[index - 1]
         return self.ref(e["class"]) or ""
 
-    def properties(self, index):
-        """Tagged properties of an export, as {name: value} (nested structs as dicts)."""
+    def properties(self, index, keep=None):
+        """Tagged properties of an export, as {name: value} (nested structs as dicts). `keep` reads only some of
+        them, much faster on big timetables: {name: None for all of it, or a `keep` for its own properties}."""
+        if keep is not None:
+            return self._read(index, keep)
         if index not in self._props:
-            e = self.exports[index - 1]
-            a = e["offset"] - self.header_size
-            try:
-                self._props[index] = self._tagged(Reader(self._uexp[a:a + e["size"]]))
-            except Exception:
-                self._props[index] = {}
+            self._props[index] = self._read(index, None)
         return self._props[index]
+
+    def _read(self, index, keep):
+        e = self.exports[index - 1]
+        a = e["offset"] - self.header_size
+        self._keep = keep
+        try:
+            return self._tagged(Reader(self._uexp[a:a + e["size"]]))
+        except Exception:
+            return {}
+        finally:
+            self._keep = None
 
     # -------- tagged properties
     def _tagged(self, r):
@@ -301,10 +312,17 @@ class Package:
             if r.u8():
                 r.read(16)
             start = r.tell()
+            keep = self._keep
+            if keep is not None and name not in keep:
+                r.seek(start + size)
+                continue
+            self._keep = keep[name] if keep is not None else None
             try:
                 value = self._value(r, typ, tag, size)
             except Exception:
                 value = Raw(typ, size)
+            finally:
+                self._keep = keep
             if r.tell() != start + size:
                 r.seek(start + size)
                 if not isinstance(value, Raw) and typ not in ("BoolProperty",):

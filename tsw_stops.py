@@ -110,18 +110,27 @@ class ServicePath:
 
 
 # ---------------------------------------------------------------- reading the timetable files
-def _load(files, path):
+def _load(files, path, keep=None):
+    """Settings of the asset a timetable or data track file holds: the export named like the file (not always
+    the first one: Goblin, Bakerloo, Mittenwald... put a service data class first). `keep`: only these
+    (tsw_paks.Package.properties)."""
     pak = files.where[path + ".uasset"]
     package = tsw_paks.Package("/" + path, pak.read(path + ".uasset"), pak.read(path + ".uexp"))
-    return package.properties(1)
+    return package.properties(package.export(path.rsplit("/", 1)[-1]) or 1, keep)
 
 
-@functools.lru_cache(maxsize=4)        # reading a route's timetable takes several seconds
+# what's read of a timetable's services: the rest is most of a big timetable (80 MB on Frankfurt-Fulda)
+SERVICE_FIELDS = {"Name": None, "ServiceNumber": None, "bIsPlayerDrivable": None, "MapPointA": None,
+                  "MapPointB": None, "Instructions": {"InstructionType": None, "bIsStopping": None,
+                                                      "Destination": {"Name": None}, "GoVias": {"Name": None}}}
+
+
+@functools.lru_cache(maxsize=4)        # reading a route's timetable takes seconds
 def timetable_services(files, path):
     """{service name: (service number, player drivable, instructions)} for each service in a timetable file, its
     instructions as (type "GoTo" / "LoadUnload" / ..., stopping, destination, (go-via names))."""
     out = {}
-    for s in _load(files, path).get("Services") or []:
+    for s in _load(files, path, {"Services": SERVICE_FIELDS}).get("Services") or []:
         instructions = []
         for ins in s.get("Instructions") or []:
             kind = str(ins.get("InstructionType", "")).split("::")[-1]
@@ -149,6 +158,11 @@ def timetable_files(files, timetable_id):
     return out
 
 
+def named_in(header, service):
+    """Whether a file's header may name a service: it keeps a name like '245_18' as '245' and a number."""
+    return re.sub(r"_(0|[1-9][0-9]*)$", "", service).encode("latin-1", "replace") in header
+
+
 def service_path(files, timetable_id, service):
     """ServicePaths for the service the game names (several when only its number matches: 2T02 -> 2T02-1 and
     2T02-2), or [] when its timetable files can't be found or read."""
@@ -160,7 +174,7 @@ def service_path(files, timetable_id, service):
                  [n for n, v in services.items() if v[0] == service])
         for track in tracks:
             pak = files.where[track + ".uasset"]
-            if not any(n.encode("latin-1", "replace") in pak.read(track + ".uasset") for n in names):
+            if not any(named_in(pak.read(track + ".uasset"), n) for n in names):
                 continue
             data = dict(_load(files, track).get("ServiceDataTracks") or [])
             for name in names:
