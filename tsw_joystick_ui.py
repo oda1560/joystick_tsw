@@ -2,7 +2,8 @@
 Train Sim World 7 joystick bridge - desktop window.
 
 Shows joystick / game / train status, live stick and lever gauges, and settings. While its joystick button is
-held, it shows over the game how far the next stop is (tsw_stops.py).
+held, it shows over the game how far the next stop is (tsw_stops.py), and while you're over the speed limit, the
+limit (tsw_speed.py).
 The bridge itself (game API, lever detection, emergency exclusion) lives in tsw_joystick.py.
 
 Usage:
@@ -27,7 +28,9 @@ from tkinter import ttk
 
 import tsw_autostart as autostart
 import tsw_joystick as core   # sets SDL env vars before pygame is imported
+import tsw_speed
 import tsw_stops
+import tsw_units
 import pygame
 
 try:
@@ -38,7 +41,7 @@ except ImportError:
 HERE = os.path.dirname(os.path.abspath(__file__))
 SETTINGS_FILE = os.path.join(HERE, "settings.json")
 DEFAULTS = {"axis": core.Y_AXIS, "invert": core.INVERT_Y, "deadzone": core.DEADZONE,
-            "toggle_button": None, "on_top": False, "joystick": "",
+            "toggle_button": None, "on_top": False, "speed_popup": True, "joystick": "",
             "rev_enabled": core.USE_REVERSER, "rev_axis": core.REVERSER_AXIS,
             "rev_invert": core.REVERSER_INVERT, "aws_button": core.AWS_BUTTON,
             "alerter_button": core.ALERTER_BUTTON,
@@ -253,82 +256,113 @@ class Bridge(threading.Thread):
             self.drop_train()
 
 
-# ---------------------------------------------------------------- next stop readout
-class StopOverlay:
-    """How far the next stop (or go-via) is, over the game near the top of the screen, only while its joystick
-    button is held. It's shown and hidden without ever taking focus from the game, and clicks go through it."""
-    TOP = 0.10                        # gap above it, as a share of the screen height
+# ---------------------------------------------------------------- popups over the game
+class Overlay:
+    """A small panel over the game, centred near the top of the screen. It's shown and hidden without ever taking
+    focus from the game, and clicks go through it."""
     EX_STYLE = 0x08000000 | 0x00000080 | 0x00080000 | 0x00000020   # no activate, tool window, layered, click-through
     SHOW = 0x0001 | 0x0002 | 0x0010 | 0x0040    # SetWindowPos: keep size and place, don't activate, show
     HIDE = 0x0001 | 0x0002 | 0x0004 | 0x0010 | 0x0080
     TOPMOST = wintypes.HWND(-1)
 
-    def __init__(self, root, k):
+    def __init__(self, root, k, top, lines):
+        """`top`: the gap above it, as a share of the screen height; `lines`: font size and bold, line by line."""
         user32 = ctypes.windll.user32
         self.set_pos = user32.SetWindowPos
         self.set_pos.argtypes = [wintypes.HWND, wintypes.HWND] + [ctypes.c_int] * 4 + [wintypes.UINT]
         before = user32.GetForegroundWindow()
-        self.root = root
-        top = self.top = tk.Toplevel(root)
-        top.overrideredirect(True)
-        top.attributes("-topmost", True)
-        top.attributes("-alpha", 0.0)
-        top.geometry("+-10000+-10000")
-        top.configure(bg=PANEL)
-        box = tk.Frame(top, bg=PANEL, padx=round(22 * k), pady=round(8 * k))
+        self.root, self.gap = root, top
+        win = self.win = tk.Toplevel(root)
+        win.overrideredirect(True)
+        win.attributes("-topmost", True)
+        win.attributes("-alpha", 0.0)
+        win.geometry("+-10000+-10000")
+        win.configure(bg=PANEL)
+        box = tk.Frame(win, bg=PANEL, padx=round(22 * k), pady=round(8 * k))
         box.pack()
-        self.big = tk.Label(box, text="-", bg=PANEL, fg=FG, font=(FONT, 26, "bold"))
-        self.big.pack()
-        self.small = tk.Label(box, text="", bg=PANEL, fg=FG, font=(FONT, 12))
-        self.small.pack()
-        self.extra = tk.Label(box, text="", bg=PANEL, fg=MUTED, font=(FONT, 10))   # the stop after a go-via
+        self.labels = [tk.Label(box, text="", bg=PANEL, fg=FG, font=(FONT, size, "bold") if bold else (FONT, size))
+                       for size, bold in lines]
+        self.lines = [None] * len(lines)
         self.shown = False
         self.place = None
-        top.update_idletasks()        # Tk makes the window now, and makes it the active one
-        self.hwnd = int(top.wm_frame(), 16)
+        win.update_idletasks()        # Tk makes the window now, and makes it the active one
+        self.hwnd = int(win.wm_frame(), 16)
         user32.SetWindowLongW(self.hwnd, -20, user32.GetWindowLongW(self.hwnd, -20) | self.EX_STYLE)
         self.set_pos(self.hwnd, None, 0, 0, 0, 0, self.HIDE)
-        top.attributes("-alpha", 0.92)
+        win.attributes("-alpha", 0.92)
         if before and user32.GetForegroundWindow() != before:
             user32.SetForegroundWindow(before)    # give back the focus it took
 
-    def show(self, state):
-        self.update(state)
-        self.top.update_idletasks()
-        self.set_pos(self.hwnd, self.TOPMOST, 0, 0, 0, 0, self.SHOW)
-        self.shown = True
+    def show(self):
+        if not self.shown:
+            self.win.update_idletasks()
+            self.set_pos(self.hwnd, self.TOPMOST, 0, 0, 0, 0, self.SHOW)
+            self.shown = True
 
     def hide(self):
         if self.shown:
             self.set_pos(self.hwnd, None, 0, 0, 0, 0, self.HIDE)
             self.shown = False
 
-    def update(self, state):
-        if state["metres"] is not None:
-            big = ("≈ " if state["estimated"] else "") + state["text"]
-            small, extra = state["label"], state["then"]
-            color = WARN if state["metres"] < -1 else FG
-        elif state["label"]:
-            big, small, extra, color = "-", state["label"], state["text"], MUTED
-        else:
-            big, small, extra, color = "-", state["text"], "", MUTED
-        if self.big.cget("text") != big or self.big.cget("fg") != color:
-            self.big.config(text=big, fg=color)
-        if self.small.cget("text") != small:
-            self.small.config(text=small)
-        if self.extra.cget("text") != extra:
-            self.extra.config(text=extra)
-            if extra:
-                self.extra.pack()
-            else:
-                self.extra.pack_forget()
-        self.top.update_idletasks()
-        width = self.top.winfo_reqwidth()
-        place = (max(0, (self.root.winfo_screenwidth() - width) // 2),
-                 round(self.root.winfo_screenheight() * self.TOP))
+    def set(self, *lines):
+        """Each line as (text, colour); a line without text is left out."""
+        if list(lines) == self.lines:
+            return
+        if [bool(t) for t, _ in lines] != [bool(old and old[0]) for old in self.lines]:
+            for label in self.labels:
+                label.pack_forget()
+            for label, (text, _) in zip(self.labels, lines):
+                if text:
+                    label.pack()
+        for label, line, old in zip(self.labels, lines, self.lines):
+            if line != old:
+                label.config(text=line[0], fg=line[1])
+        self.lines = list(lines)
+        self.win.update_idletasks()
+        place = (max(0, (self.root.winfo_screenwidth() - self.win.winfo_reqwidth()) // 2),
+                 round(self.root.winfo_screenheight() * self.gap))
         if place != self.place:          # keep it centred as the text changes width
             self.place = place
-            self.top.geometry(f"+{place[0]}+{place[1]}")
+            self.win.geometry(f"+{place[0]}+{place[1]}")
+
+
+class StopOverlay(Overlay):
+    """How far the next stop (or go-via) is, while its joystick button is held."""
+
+    def __init__(self, root, k):
+        super().__init__(root, k, 0.10, [(26, True), (12, False), (10, False)])
+
+    def show(self, state, imperial):
+        self.update(state, imperial)
+        super().show()
+
+    def update(self, state, imperial):
+        then = state["then"]
+        if then and state["then_metres"] is not None:
+            then += " in " + tsw_units.distance(state["then_metres"], imperial)
+        if state["metres"] is not None:
+            big = ("≈ " if state["estimated"] else "") + tsw_units.distance(state["metres"], imperial)
+            self.set((big, WARN if state["metres"] < -1 else FG), (state["label"], FG), (then, MUTED))
+        elif state["label"]:
+            self.set(("-", MUTED), (state["label"], FG), (state["text"], MUTED))
+        else:
+            self.set(("-", MUTED), (state["text"], FG), ("", MUTED))
+
+
+class SpeedOverlay(Overlay):
+    """The speed limit, for as long as you're over it: amber while within the game's tolerance, red once the game
+    counts it as speeding. Sits below the next stop readout."""
+
+    def __init__(self, root, k):
+        super().__init__(root, k, 0.20, [(9, True), (26, True), (11, False)])
+
+    def show(self, state, imperial):
+        limit, you = (tsw_units.speed(state[k], imperial) for k in ("limit", "speed"))
+        if you == limit:                  # just over: "you 60 mph" under "60 mph" would look wrong
+            you = tsw_units.speed(state["speed"], imperial, 1)
+        color = BAD if state["counted"] else WARN
+        self.set(("SPEED LIMIT", color), (limit, color), ("you " + you, FG))
+        super().show()
 
 
 # ---------------------------------------------------------------- window
@@ -345,6 +379,7 @@ class App:
         self.bridge.enabled = not start_paused
         self.look = core.LookController(self.log)
         self.tracker = tsw_stops.StopTracker(self.log)
+        self.speed_watch = tsw_speed.SpeedWatch()
         self.look_raw = 0.0           # twist position, +1 = full right
         self.stick = None
         self.next_stick_try = 0.0
@@ -364,8 +399,9 @@ class App:
         pygame.init()
         self._style()
         self._build()
-        root.update_idletasks()       # shows this window first, so the overlay hands the focus back to it
+        root.update_idletasks()       # shows this window first, so the overlays hand the focus back to it
         self.overlay = StopOverlay(root, self.k)
+        self.speed_overlay = SpeedOverlay(root, self.k)
         self._refresh_toggle()
         self._refresh_button_label()
         root.attributes("-topmost", bool(self.s["on_top"]))
@@ -373,6 +409,7 @@ class App:
         self.bridge.start()
         self.look.start()
         self.tracker.start()
+        self.speed_watch.start()
         self.log("Bridge started" + (" (paused)" if start_paused else ""))
         self.tick()
         if with_game:
@@ -576,6 +613,9 @@ class App:
         self.top_var = tk.BooleanVar(value=bool(self.s["on_top"]))
         ttk.Checkbutton(bottom, text="Keep this window on top", variable=self.top_var,
                         style="Panel.TCheckbutton", command=self.on_top).pack(side="left")
+        self.speed_var = tk.BooleanVar(value=bool(self.s["speed_popup"]))
+        ttk.Checkbutton(bottom, text="Show the limit when speeding", variable=self.speed_var,
+                        style="Panel.TCheckbutton", command=self.on_speed_popup).pack(side="left", padx=(16, 0))
         ttk.Button(bottom, text="Re-detect train", command=self.on_redetect).pack(side="right")
 
         # log
@@ -742,6 +782,10 @@ class App:
         self.root.attributes("-topmost", self.s["on_top"])
         save_settings(self.s)
 
+    def on_speed_popup(self):
+        self.s["speed_popup"] = bool(self.speed_var.get())
+        save_settings(self.s)
+
     def on_redetect(self):
         self.bridge.force_detect = True
         self.log("Re-detecting train controls...")
@@ -761,6 +805,7 @@ class App:
         self.bridge.join(timeout=3)   # lets go of any handle it's holding
         self.look.running = False
         self.tracker.running = False
+        self.speed_watch.running = False
         pygame.quit()
         self.root.destroy()
 
@@ -803,7 +848,7 @@ class App:
     def _show_stop(self, down):
         self.tracker.shown = down
         if down:
-            self.overlay.show(self.tracker.state)
+            self.overlay.show(self.tracker.state, self.speed_watch.imperial)
         else:
             self.overlay.hide()
 
@@ -1159,7 +1204,12 @@ class App:
             self._update_status()
             self._draw()
             if self.overlay.shown:
-                self.overlay.update(self.tracker.state)
+                self.overlay.update(self.tracker.state, self.speed_watch.imperial)
+            speeding = self.speed_watch.state if self.s["speed_popup"] else None
+            if speeding:
+                self.speed_overlay.show(speeding, self.speed_watch.imperial)
+            else:
+                self.speed_overlay.hide()
             self._drain_log()
         except Exception as e:
             self.log(f"UI error: {e}")

@@ -13,7 +13,8 @@ took the stop. About 4 in 10 route timetables name no signals. There the place i
 stop on, by adding up the speed over the game's own clock (it runs slower than the wall clock).
 
     tracker = StopTracker(); tracker.start()
-    tracker.state      # {"text": ..., "label": ..., "then": ..., "metres": ..., "estimated": ...}
+    tracker.state      # {"text": message, "label": "Stop at ...", "metres": to go, "estimated": ...,
+                       #  "then": the stop after a go-via, "then_metres": to go}
 """
 
 import functools
@@ -43,18 +44,6 @@ def split_platform(destination):
     """'Cuxton Platform 1' -> ('Cuxton', 'Platform 1')."""
     m = PLATFORM.match(destination.strip())
     return (m.group(1), m.group(2)) if m and m.group(1) else (destination.strip(), "")
-
-
-def format_distance(metres):
-    if metres is None:
-        return "-"
-    if metres < -1:
-        return f"{-metres:.0f} m past"
-    if metres < 10:
-        return f"{max(metres, 0.0):.1f} m"
-    if metres < 1000:
-        return f"{metres:.0f} m"
-    return f"{metres / 1000:.2f} km"
 
 
 class Target:
@@ -219,7 +208,7 @@ class StopTracker(threading.Thread):
         self.log = log or (lambda msg: None)
         self.running = True
         self.shown = False
-        self.state = {"text": "Starting...", "label": "", "then": "", "metres": None, "estimated": False}
+        self._say("Starting...")
         self._reset(None)
         self.last_service_check = 0.0
 
@@ -235,9 +224,9 @@ class StopTracker(threading.Thread):
         self.clock = None             # game seconds at the last poll
         self.step_key = None          # (instruction, go-via) the game is on
 
-    def _say(self, text, target=None, metres=None, estimated=False, then=""):
-        self.state = {"text": text, "label": target.label() if target else "", "then": then,
-                      "metres": metres, "estimated": estimated}
+    def _say(self, text, target=None, metres=None, estimated=False, then=None, then_metres=None):
+        self.state = {"text": text, "label": target.label() if target else "", "metres": metres,
+                      "estimated": estimated, "then": then.label() if then else "", "then_metres": then_metres}
 
     def _wanted(self, target):
         """Go-vias without a name are only shown when the game makes objectives of them (they may only be there
@@ -370,14 +359,11 @@ class StopTracker(threading.Thread):
             self._say("No more stops" if order is not None or self.position is not None
                       else "Place on the line not known yet")
             return
-        then = ""
+        then = None
         if target.kind == "via":                # say which stop comes after it
-            stop = path.next_target(path.order[target.key] + 1, None, lambda t: t.kind == "stop")
-            if stop is not None:
-                then = stop.label() + ("" if self.position is None
-                                       else " in " + format_distance(stop.metres - self.position))
+            then = path.next_target(path.order[target.key] + 1, None, lambda t: t.kind == "stop")
         if self.position is None:
             self._say("Distance known after the next stop", target, then=then)
         else:
-            metres = target.metres - self.position
-            self._say(format_distance(metres), target, metres, estimated=not self.fixed, then=then)
+            self._say("", target, target.metres - self.position, estimated=not self.fixed, then=then,
+                      then_metres=then.metres - self.position if then else None)
