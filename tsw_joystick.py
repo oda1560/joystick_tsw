@@ -72,6 +72,7 @@ HANDLE_SECONDS = 0.0             # seconds for the handle to go from Off to full
 HANDLE_SECONDS_MAX = 4.0
 POLL_HZ = 30
 TRAIN_CHECK_SECONDS = 2.0        # how often to check whether you changed train
+REDETECTS = 5                    # times to look at a train again when the game didn't answer for a handle found
 
 USE_REVERSER = True
 REVERSER_AXIS = 3                # Extreme 3D Pro base slider: + end Forward, middle Neutral, - end Reverse
@@ -782,10 +783,16 @@ class Lever:
         return 0.0, 1.0
 
     def works(self):
-        try:
-            return self.api.get_value(self.path) is not None
-        except Exception:
-            return False
+        """Whether the game answers for the lever. A read can fail now and then (the game drops a connection),
+        and one that did made the bridge drive a Class 331 with no reverser; so it's tried a few times."""
+        for attempt in range(3):
+            try:
+                if self.api.get_value(self.path) is not None:
+                    return True
+            except Exception:
+                pass
+            time.sleep(0.1)
+        return False
 
     def value_between(self, start, end, frac):
         """Value frac (0..1) of the way from start to end, never outside the safe range."""
@@ -1764,6 +1771,7 @@ class TrainControls:
         self.throttle = self.brake = self.reverser = self.aws = self.alerter = None
         self.door_open_left = self.door_open_right = self.door_close_left = self.door_close_right = None
         self.from_files = False           # the train's controls were found in the game files
+        self.missing = []                 # handles found that the game didn't answer for (see detect)
         self.cab = None                   # on a train with a cab at each end: the one used, "Front" / "Back"
         self.cab_known = False            # and the game said it's in use (else the front one is assumed)
 
@@ -1884,6 +1892,7 @@ class TrainControls:
         self.from_files = bool(handles)
         names = self._this_cab(listed, handles)
         self.throttle = self.brake = self.reverser = self.aws = self.alerter = None
+        self.missing = []                 # handles found that the game didn't answer for: look again later
         self.door_open_left = self.door_open_right = self.door_close_left = self.door_close_right = None
         ids = self._identifiers(names)
 
@@ -1909,6 +1918,8 @@ class TrainControls:
         if r:
             rev = Reverser(self.api, r, dict(ids).get(r, ""), train=self.train_id, model=handles.get(r))
             self.reverser = rev if rev.lever.works() else None
+            if self.reverser is None:
+                self.missing.append(r)
 
         def is_lever(n):
             # some trains give push buttons a driving-lever identifier (Class 375 "BrakeHold" button
@@ -1935,10 +1946,14 @@ class TrainControls:
         if t:
             lever = Lever(self.api, t, id_of.get(t, ""), train=self.train_id, model=handles.get(t))
             self.throttle = lever if lever.works() else None
+            if self.throttle is None:
+                self.missing.append(t)
         if b:
             lever = Lever(self.api, b, id_of.get(b, ""), train=self.train_id, role="brake",
                           model=handles.get(b))
             self.brake = lever if lever.works() else None
+            if self.brake is None:
+                self.missing.append(b)
         return names, ids
 
     def buttons(self):

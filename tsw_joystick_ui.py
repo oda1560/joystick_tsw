@@ -179,6 +179,7 @@ class Bridge(threading.Thread):
         self.enabled = True
         self.y = None                 # latest stick value from the UI thread, None = no joystick
         self.force_detect = False
+        self.redetects = 0            # times the train was looked at again for a handle the game didn't answer for
         self.running = True
         self.last_sent = None
         self.last_check = 0.0
@@ -258,7 +259,14 @@ class Bridge(threading.Thread):
                 self.drop_train()
                 return
             self.set_game("ok", "Connected")
-            if train != self.train or force or (self.controls is not None and self.controls.cab_changed()):
+            again = (train == self.train and not force and self.controls is not None and self.controls.missing
+                     and self.redetects < core.REDETECTS)
+            if train != self.train or force or again or (self.controls is not None and self.controls.cab_changed()):
+                if again:
+                    self.redetects += 1
+                    self.log(f"No answer from {', '.join(self.controls.missing)} - looking at the train again")
+                else:
+                    self.redetects = 0
                 if self.controls is not None:
                     self.controls.let_go()
                 controls = core.TrainControls(self.api, log=self.log)

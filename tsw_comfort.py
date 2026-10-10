@@ -45,7 +45,8 @@ import urllib.parse
 import tsw_joystick as core
 
 G = 9.81
-POLL_SECONDS = 0.02            # between polls; each waits for the game's next tick (~65 ms)
+POLL_SECONDS = 1 / 15          # a poll this often at most (each waits for the game's next tick, 30-65 ms);
+                               # each is a connection of its own, so not every tick
 SUBSCRIPTION = 31              # the API subscription number used here
 RESUBSCRIBE_SECONDS = 5.0      # with no train to read, how often to subscribe again
 COUNT_SECONDS = 5.0            # how often the passengers are counted while stopped (they don't change on the move)
@@ -320,40 +321,39 @@ class Judge:
 
 
 class Feed:
-    """Readings by an API subscription: all of them in one request, answered at the game's next tick, over one
-    connection kept open. read() gives {name: values}, None where the game has nothing (not in a cab)."""
+    """Readings by an API subscription: all of them in one request, answered at the game's next tick. read()
+    gives {name: values}, None where the game has nothing (not in a cab). Each request has a connection of its
+    own: the game aborts connections kept open every second or so (seen live), and here that made the
+    subscription start over each time, so the readings hardly ever came."""
 
     def __init__(self, paths, number=SUBSCRIPTION, address=None):
         self.paths, self.number = dict(paths), number
         url = urllib.parse.urlparse(address or core.API_URL)
         self.host, self.port = url.hostname, url.port
-        self.conn = None
         self.key = None
         self.subscribed = False
 
     def _req(self, method, path):
         url = "/" + urllib.parse.quote(path, safe="/().") + "?" + urllib.parse.urlencode({"Subscription": self.number})
         for attempt in range(2):
-            if self.conn is None:
-                self.conn = http.client.HTTPConnection(self.host, self.port, timeout=2)
+            conn = http.client.HTTPConnection(self.host, self.port, timeout=2)
             try:
-                self.conn.request(method, url, headers={"DTGCommKey": self.key or ""})
-                r = self.conn.getresponse()
-                body = r.read()
+                conn.request(method, url, headers={"DTGCommKey": self.key or "", "Connection": "close"})
+                body = conn.getresponse().read()
                 break
             except (OSError, http.client.HTTPException):
-                self.close()
-                if attempt:                         # the game closed the connection, say: try a new one once
+                if attempt:                         # the game dropped the connection, say: try once more
                     raise
+            finally:
+                conn.close()
         try:
             return json.loads(body.decode("utf-8") or "{}")
         except ValueError:
             return {}
 
     def close(self):
-        if self.conn is not None:
-            self.conn.close()
-        self.conn, self.subscribed = None, False
+        """Subscribe again before the next read (the game may have been started again)."""
+        self.subscribed = False
 
     def subscribe(self):
         self._req("DELETE", "subscription")         # one left over from before
@@ -373,12 +373,12 @@ class Feed:
         return {name: got.get(path) for name, path in self.paths.items()}
 
     def unsubscribe(self):
-        try:
-            if self.conn is not None:
+        if self.subscribed:
+            try:
                 self._req("DELETE", "subscription")
-        except (OSError, http.client.HTTPException):
-            pass
-        self.close()
+            except (OSError, http.client.HTTPException):
+                pass
+        self.subscribed = False
 
 
 def _first(values):
@@ -432,13 +432,14 @@ class ComfortWatch(threading.Thread):
 
     def run(self):
         while self.running:
+            started = time.monotonic()
             try:
                 self.step()
             except Exception:             # game not running, or a dropped connection
                 self._gone()
                 self.feed.close()
                 time.sleep(1)
-            time.sleep(POLL_SECONDS)
+            time.sleep(max(0.0, POLL_SECONDS - (time.monotonic() - started)))
         self.feed.unsubscribe()
 
     def _gone(self):
