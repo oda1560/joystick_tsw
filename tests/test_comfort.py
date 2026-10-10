@@ -80,8 +80,16 @@ class LoggedDrive(unittest.TestCase):
         kinds = [e[0] for _, e in self.said]
         self.assertEqual(kinds, ["harsh", "stop"])
 
-    def test_nobody_aboard_nothing_shown(self):
+    def test_an_empty_passenger_train_is_judged_too(self):
+        # a 331 on 2V04 had nobody aboard and showed nothing when it was only for trains with passengers
         judge, panels, said = replay(passengers=0)
+        self.assertEqual([ph for _, ph, _, _ in panels if ph], ["firm", "harsh", "ease", "stopped"])
+        self.assertEqual(next(p for _, ph, _, p in panels if ph == "harsh")["passengers"], 0)
+        r = judge.report("1M56")
+        self.assertEqual((r["stop"], r["passengers"], r["rides"]), ("jolt", 0, 1))
+
+    def test_not_a_passenger_train_nothing_shown(self):
+        judge, panels, said = replay(passengers=None)
         self.assertEqual([ph for _, ph, _, _ in panels if ph], [])
         self.assertIsNone(judge.report("1M56"))
 

@@ -507,7 +507,8 @@ class DwellOverlay(Overlay):
             parts.append("jolt at a stop on the way" if ride["jolts"] == 1
                          else f"{ride['jolts']} jolts at stops on the way")
         smooth = ride["stop"] != "jolt" and not ride["harsh"] and not ride["jolts"]
-        tally = f"{ride['passengers']} passenger{'s' * (ride['passengers'] != 1)}"
+        n = ride["passengers"]
+        tally = f"{n} passenger{'s' * (n != 1)}" if n else "no passengers aboard"
         if ride["rides"]:
             tally += f"  ·  smooth rides {ride['smooth']} of {ride['rides']} this service"
         return ("  ·  ".join(parts), GOOD if smooth else BAD), (tally, MUTED)
@@ -670,7 +671,8 @@ class SummaryOverlay(ScheduleOverlay):
         if run.get("rides"):
             row("Smooth rides", "smooth", lambda r: f"{r['smooth']} of {r['rides']}",
                 lambda a, b: a["smooth"] / a["rides"] > b["smooth"] / max(b.get("rides") or 0, 1))
-        row("Passengers", "passengers", lambda r: f"up to {r['passengers']}")
+        if run.get("passengers"):
+            row("Passengers", "passengers", lambda r: f"up to {r['passengers']}")
         footer = []
         if run["worst_late"] > tsw_history.ON_TIME:
             footer.append(f"Latest {minutes(run['worst_late'])} behind time at a stop")
@@ -723,7 +725,7 @@ class ComfortOverlay(Overlay):
             what = "BRAKING" if coach["kind"] == "brake" else "ACCELERATION"
             if phase == "harsh":
                 n = coach["passengers"]
-                note = f"{n} passenger{'s' * (n != 1)} aboard"
+                note = f"{n} passenger{'s' * (n != 1)} aboard" if n else "no passengers aboard"
             else:
                 note = "ease off a step" if coach["kind"] == "brake" else "ease off the power"
             self.set((f"{phase.upper()} {what}", colour), (f"{coach['felt']:.1f} m/s²", colour), (note, FG))

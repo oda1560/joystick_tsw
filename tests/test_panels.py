@@ -34,6 +34,10 @@ class RideLines(unittest.TestCase):
         self.assertEqual(line, "Smooth stop  ·  jolt at a stop on the way")
         self.assertEqual(tally, "1 passenger")
 
+    def test_an_empty_train(self):
+        _, (tally, _) = ui.DwellOverlay.ride_lines(dict(RIDE, passengers=0))
+        self.assertEqual(tally, "no passengers aboard  ·  smooth rides 2 of 3 this service")
+
     def test_nothing_to_say(self):
         self.assertEqual(ui.DwellOverlay.ride_lines(None), (("", ui.FG), ("", ui.MUTED)))
 
@@ -62,6 +66,10 @@ class Summary(unittest.TestCase):
         title, rows, footer, times = ui.SummaryOverlay.summary_for(dict(RUN, worst_late=10.0), None, 1)
         self.assertEqual(rows[0], (("", ui.MUTED, True), ("THIS RUN", ui.MUTED, True)))
         self.assertEqual(footer, "First run of 1M56 kept")
+
+    def test_no_passengers_row_for_an_empty_train(self):
+        title, rows, footer, times = ui.SummaryOverlay.summary_for(dict(RUN, passengers=0), None, 1)
+        self.assertNotIn("Passengers", [r[0][0] for r in rows])
 
 
 if __name__ == "__main__":

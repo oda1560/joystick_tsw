@@ -20,16 +20,17 @@ Stopping on full service, that train braked harder and harder as it slowed, 1.8 
 then nothing within a second: the jolt. Easing the brake off in the last few seconds avoids it. How long before
 the stop the warning comes depends on how quickly the train's brake eases off: that's measured each time you step
 the brake down while braking (no power, nothing else moved), kept per train (brake_ease.json), and 3 s until then.
-Everything here only counts with passengers aboard.
+All this on passenger trains (a car has passenger doors), empty ones too: a 331 on 2V04 had nobody aboard, and
+showed nothing when it was only for trains with passengers. Freight and light engines are left out.
 
     watch = ComfortWatch(); watch.start()
     watch.coach              # None, or what the comfort panel says:
                              #   {"phase": "ease", "seconds": to the stop (wall clock), "braking": m/s²}
                              #   {"phase": "stopped", "jolt": bool, "braking": m/s² as it stopped}
                              #   {"phase": "firm" / "harsh", "kind": "brake" / "power", "felt": m/s², "passengers"}
-    watch.report(service)    # the ride since the last station, None with nobody aboard: {"stop": None / "smooth" /
+    watch.report(service)    # the ride since the last station, None off passenger trains: {"stop": None / "smooth" /
                              #   "jolt" (the stop you're at), "braking": as it stopped, "harsh": [["brake" / "power",
-                             #   worst m/s²]], "jolts": at stops on the way (signals), "passengers": aboard,
+                             #   worst m/s²]], "jolts": at stops on the way (signals), "passengers": most aboard,
                              #   "smooth": rides this service without a jolt or a harsh moment, "rides": of them}
     watch.service(service)   # this service so far: {"rides", "smooth", "passengers": most aboard}
     watch.new_leg(service)   # on leaving a station: that ride is done
@@ -78,7 +79,7 @@ PATHS = {"speed": A + "Function.HUD_GetSpeed", "acc": A + "Function.HUD_GetAccel
 
 
 def _leg():
-    return {"stop": None, "braking": None, "harsh": [], "jolts": 0, "passengers": 0}
+    return {"stop": None, "braking": None, "harsh": [], "jolts": 0, "passengers": 0, "judged": False}
 
 
 def _smooth(leg):
@@ -192,7 +193,8 @@ class Judge:
 
     def feed(self, now, speed, acc, gradient, passengers, clock=None, brake=None, power=False):
         """`now`: wall clock seconds; `speed`: m/s, signed; `acc`: the change of speed in m/s² (the game's sign);
-        `gradient`: percent; `passengers`: aboard, None if not known; `clock`: game seconds; `brake`: the brake
+        `gradient`: percent; `passengers`: aboard (0 on an empty passenger train), None if not a passenger train or
+        not known; `clock`: game seconds; `brake`: the brake
         handle, None if not known; `power`: under power. What happened, for the log: [("stop", jolt, braking),
         ("harsh", kind, worst) once a harsh moment is over, ("ease", seconds) the brake was timed easing off]."""
         self.accs.append(acc)
@@ -201,7 +203,7 @@ class Judge:
         along = acc if speed >= 0 else -acc       # speeding up: positive
         braking = -along
         felt = along + G * gradient / 100
-        aboard = bool(passengers)
+        judged = passengers is not None          # a passenger train
         said = []
         self._time(now, clock)
         game = clock if clock is not None else now
@@ -212,8 +214,9 @@ class Judge:
             self.coach = None
         if v > MOVING:
             self.moved = True
-            if aboard:
-                self.leg["passengers"] = passengers
+            if judged:
+                self.leg["judged"] = True
+                self.leg["passengers"] = max(self.leg["passengers"], passengers)
                 self.most = max(self.most, passengers)
 
         if v >= STOPPED:
@@ -226,7 +229,7 @@ class Judge:
                 easing = braking > EASE_OFF and seconds < self.lead() + 1.0
             else:
                 easing = braking > EASE_ON and seconds < self.lead()
-            if aboard and self.moved and easing:
+            if judged and self.moved and easing:
                 self.coach = {"phase": "ease", "seconds": seconds / self.ratio, "braking": braking}
             elif self.coach and self.coach["phase"] == "ease":
                 self.coach = None
@@ -234,7 +237,7 @@ class Judge:
         elif self.moved:                            # it has just stopped
             hardest = self.approach if self.approach is not None else max(self.braking, 0.0)
             jolt = hardest > JOLT
-            if aboard:
+            if judged:
                 self.coach = {"phase": "stopped", "jolt": jolt, "braking": hardest}
                 self.coach_until = now + RESULT_SECONDS
                 if self.leg["stop"] == "jolt":     # at a stop on the way (a signal, say)
@@ -245,8 +248,8 @@ class Judge:
                 self.coach = None
             self.moved, self.approach = False, None
 
-        self._alert(now, v, felt, passengers if aboard else None)
-        if aboard and v >= STOPPED and abs(felt) > (HARSH_OFF if self.harsh_since is not None else HARSH):
+        self._alert(now, v, felt, passengers)
+        if judged and v >= STOPPED and abs(felt) > (HARSH_OFF if self.harsh_since is not None else HARSH):
             if self.harsh_since is None:
                 self.harsh_since, self.worst = now, 0.0
             self.worst = max(self.worst, abs(felt))
@@ -278,7 +281,7 @@ class Judge:
         """Firm (amber) or harsh (red), braking or speeding up, held for a moment after."""
         size, was = abs(felt), self.alert["phase"] if self.alert else None
         level = None
-        if passengers and v >= STOPPED:
+        if passengers is not None and v >= STOPPED:
             if size > HARSH or (was == "harsh" and size > HARSH_OFF):
                 level = "harsh"
             elif size > FIRM or (was is not None and size > FIRM_OFF):
@@ -287,12 +290,12 @@ class Judge:
             self.alert = {"phase": level, "kind": "brake" if felt < 0 else "power", "felt": size,
                           "passengers": passengers}
             self.alert_until = now + HOLD_SECONDS
-        elif self.alert and (now > self.alert_until or not passengers or v < STOPPED):
+        elif self.alert and (now > self.alert_until or passengers is None or v < STOPPED):
             self.alert = None
 
     def report(self, service):
         leg = self.leg
-        if not leg["passengers"] or (leg["stop"] is None and not leg["harsh"] and not leg["jolts"]):
+        if not leg["judged"] or (leg["stop"] is None and not leg["harsh"] and not leg["jolts"]):
             return None
         smooth, rides = (self.smooth, self.rides) if service == self.service else (0, 0)
         if leg["stop"] is not None:
@@ -306,7 +309,7 @@ class Judge:
             done = {"rides": 0, "smooth": 0, "passengers": leg["passengers"]}
         else:
             done = {"rides": self.rides, "smooth": self.smooth, "passengers": max(self.most, leg["passengers"])}
-        if leg["passengers"] and leg["stop"] is not None:
+        if leg["judged"] and leg["stop"] is not None:
             done["rides"] += 1
             done["smooth"] += _smooth(leg)
         return done
@@ -315,7 +318,7 @@ class Judge:
         leg = self.leg
         if service != self.service:
             self.service, self.smooth, self.rides, self.most = service, 0, 0, leg["passengers"]
-        if leg["passengers"] and leg["stop"] is not None:
+        if leg["judged"] and leg["stop"] is not None:
             self.smooth += _smooth(leg)
             self.rides += 1
         self.leg = _leg()

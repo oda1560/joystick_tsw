@@ -52,7 +52,7 @@ class History:
                "train": stop.get("train") or "", "points": points.get("points"), "stops": len(stops),
                "on_time": sum(s <= ON_TIME for s in late), "worst_late": round(max(late), 1),
                "accuracy": round(sum(abs(off) for _, off in stops) / len(stops), 1)}
-        if comfort and comfort.get("passengers"):
+        if comfort and comfort.get("rides"):        # a passenger train (empty ones too) judged at a stop
             run.update(passengers=comfort["passengers"], rides=comfort["rides"], smooth=comfort["smooth"])
         elif old:                              # the comfort part from before (the bridge started again here)
             run.update({k: old[k] for k in ("passengers", "rides", "smooth") if k in old})

@@ -96,5 +96,53 @@ class Detect(unittest.TestCase):
             controls.detect()
 
 
+class DoorDesk:
+    """A cab's door buttons: `off` are switched off, `silent` don't answer."""
+    key = "key"
+    NAMES = ["DoorRelease_L", "DoorRelease_R", "DoorsClose_L", "DoorsClose_R"]
+
+    def __init__(self, off=(), silent=()):
+        self.off, self.silent = set(off), set(silent)
+
+    def _name(self, path):
+        return path.split("/")[1].split(".")[0]
+
+    def get_value(self, path):
+        n = self._name(path)
+        if n in self.silent:
+            raise ConnectionAbortedError("aborted")
+        if path.endswith(".ObjectClass"):
+            return "PushButtonComponent"
+        if path.endswith(".bInputEnabled"):
+            return n not in self.off
+        return None
+
+    def get(self, path):
+        if self._name(path) in self.silent:
+            raise ConnectionAbortedError("aborted")
+        return {"Values": {"componentName": "DriverEnvironment"}}
+
+
+class Doors(unittest.TestCase):
+    def doors(self, api):
+        controls = core.TrainControls(api)
+        controls._detect_doors(DoorDesk.NAMES)
+        names = {k: getattr(controls, f"door_{k}") for k in ("open_left", "open_right", "close_left", "close_right")}
+        return {k: b.name if b else None for k, b in names.items()}, controls.missing
+
+    def test_the_far_side_switched_off_at_a_platform_is_kept(self):
+        doors, missing = self.doors(DoorDesk(off={"DoorRelease_R"}))
+        self.assertEqual(doors["open_right"], "DoorRelease_R")
+
+    def test_all_switched_off_none_used(self):
+        doors, missing = self.doors(DoorDesk(off=set(DoorDesk.NAMES)))
+        self.assertEqual(set(doors.values()), {None})
+
+    def test_a_button_that_doesnt_answer_has_the_train_looked_at_again(self):
+        doors, missing = self.doors(DoorDesk(silent={"DoorRelease_R"}))
+        self.assertIsNone(doors["open_right"])
+        self.assertEqual(missing, ["DoorRelease_R"])
+
+
 if __name__ == "__main__":
     unittest.main()

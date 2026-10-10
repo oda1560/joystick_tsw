@@ -1876,20 +1876,33 @@ class TrainControls:
             found.append(("open" if opens else "close", side, n))
 
         def rank(n):
-            # 0 = driver's position, 1 = somewhere else in the cab, 2 = not wired up; None = not a button
+            # 0 = driver's position, 1 = somewhere else in the cab, 2 = not wired up, 3 = switched off (used only
+            # with nothing else for that side, the game may switch it on again: on a Class 331 at a platform the
+            # far side's door release was off, and went missing for the whole drive); None = not a button
             path = f"CurrentDrivableActor/{n}"
-            try:
-                if "button" not in str(self.api.get_value(path + ".ObjectClass") or "").lower():
-                    return None                      # e.g. the doors themselves
-                env = self.api.get(path + ".Property.InteractionEnvironmentComponent").get("Values") or {}
-            except Exception:
+            for attempt in range(3):
+                try:
+                    cls = self.api.get_value(path + ".ObjectClass")
+                    env = self.api.get(path + ".Property.InteractionEnvironmentComponent").get("Values") or {}
+                    if cls is not None:
+                        break
+                except Exception:                    # the game drops a connection now and then
+                    pass
+                time.sleep(0.1)
+            else:
+                self.missing.append(n)               # no answer: the train is looked at again
                 return None
+            if "button" not in str(cls).lower():
+                return None                          # e.g. the doors themselves
             if not self._enabled(n):
-                return None
+                return 3
             env = str(env.get("componentName") or "None").lower()
             return 0 if "driver" in env else 2 if env == "none" else 1
 
         ranks = {n: rank(n) for _, _, n in found}
+        if not any(r is not None and r < 3 for r in ranks.values()):
+            # every door button switched off: the doors aren't the driver's (SBD Metrolink cab car), none used
+            ranks = {n: None if r == 3 else r for n, r in ranks.items()}
         for action in ("open", "close"):
             for side in ("left", "right"):
                 group = [(ranks[n], n) for a, s, n in found if a == action and s in (side, None)
