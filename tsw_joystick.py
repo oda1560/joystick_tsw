@@ -131,8 +131,9 @@ REVERSER_LABELS = {"forward": ["forward", "fwd", "fw", "f", "ahead"],
                    "neutral": ["neutral", "n", "mid", "centre", "center"],
                    "reverse": ["reverse", "rev", "r", "backward", "back"]}
 # used for Neutral on reversers that have none, in order of preference: positions with no traction, and the
-# engine kept running first (on BR diesels Off stops the engine, Engine Only is their neutral)
-NEUTRAL_STAND_INS = ["engine only", "on", "0", "off"]
+# engine kept running first (on BR diesels Off stops the engine, Engine Only is their neutral). Class 710:
+# Reverse, Recovery, Secure, Forward, Shutdown - Secure is its neutral (Recovery is for being rescued)
+NEUTRAL_STAND_INS = ["engine only", "secure", "on", "0", "off"]
 EXCLUDE = ["dynamic", "independent", "loco", "emergency", "park", "handbrake", "release", "snow",
            "bail", "reverser", "horn", "light", "wiper", "door", "sander", "pantograph",
            # circuit breakers, isolation switches, covers etc. are not the driving levers
@@ -1082,7 +1083,7 @@ class Reverser:
     def _stand_in_neutral(self):
         """For a reverser with no Neutral, the notch used instead: one with no traction (NEUTRAL_STAND_INS),
         preferably between Reverse and Forward (BR diesels: Off, Reverse, Engine Only, Forward; Class 08:
-        Reverse, Off, Forward), else anywhere (Class 101: Off, Forward, Reverse). With none, the unnamed notch
+        Reverse, Off, Forward; Class 710: Reverse, Recovery, Secure, Forward, Shutdown), else anywhere (Class 101: Off, Forward, Reverse). With none, the unnamed notch
         between Reverse and Forward (BR 363)."""
         f, r = self.notches["forward"], self.notches["reverse"]
         lo, hi, middle = min(f, r), max(f, r), (f + r) / 2
