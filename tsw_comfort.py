@@ -10,8 +10,10 @@ What the game gives (seen on a Class 150, Cardiff valleys 1M56):
 - DriverAid.Data gradient: percent, negative downhill in the direction of travel. Along the car, passengers feel
   the change of speed plus g x the gradient: coasting downhill they feel nothing.
 - PassengerCargoModel.Function.GetPassengerCount on each passenger car (a car with passenger doors).
-- HUD_GetTrainBrakeHandle {"HandlePosition": 0..1} (steps of a third on the 150) and HUD_GetPowerHandle
-  {"Power": notch, "IsNegative"}, for when the brake is eased.
+- HUD_GetTrainBrakeHandle {"HandlePosition": 0..1, "IsActive"} (steps of a third on the 150; on the Class 331's
+  power / brake handle the brake side, smoothly) and HUD_GetPowerHandle {"Power", "IsNegative"} (notches on the
+  150; on the 331 percent of the effort, negative while braking), for when the brake is eased. Both read
+  IsActive false until the cab is in use.
 All of these but the passengers come in one request a game tick, by an API subscription.
 
 Stopping on full service, that train braked harder and harder as it slowed, 1.8 m/s² just before it stopped,
@@ -471,8 +473,10 @@ class ComfortWatch(threading.Thread):
         gradient = (got["aid"] or {}).get("gradient") or 0.0
         brake, power = got["brake"] or {}, got["power"] or {}
         demand = brake.get("HandlePosition") if brake.get("IsActive") else None
-        if power.get("IsNegative"):                 # a power / brake handle on the brake side
-            demand = max(demand or 0.0, abs(power.get("Power") or 0.0))
+        if demand is None and power.get("IsActive"):
+            # no train brake reading: the power handle on its brake side (Power in percent there). Where there is
+            # one it's the handle; on the Class 331 Power follows the braking effort, a moment behind the handle
+            demand = abs(power.get("Power") or 0.0) / 100 if power.get("IsNegative") else 0.0
         power_on = bool(power.get("IsActive")) and not power.get("IsNegative") and (power.get("Power") or 0) > 0
         if self.cars is None or (abs(speed) < STOPPED and now - self.counted > COUNT_SECONDS):
             self._count()
@@ -509,12 +513,18 @@ class ComfortWatch(threading.Thread):
         api = self.api
         self.counted = time.monotonic()
         n = int(api.get_value("CurrentFormation.FormationLength") or 0)
+        if n == 0:                                  # no answer: count next time round
+            self.cars = self.passengers = None
+            return
         if self.cars is None or n != self.formation:
-            self.formation, self.cars = n, []
+            cars, answered = [], True
             for i in range(min(n, MAX_CARS)):
                 names = core.node_names(api.list(f"CurrentFormation/{i}"))
+                answered = answered and bool(names)
                 if "PassengerCargoModel" in names and any(name.startswith("PassengerDoor_") for name in names):
-                    self.cars.append(f"CurrentFormation/{i}/PassengerCargoModel")
+                    cars.append(f"CurrentFormation/{i}/PassengerCargoModel")
+            # a car that didn't answer is looked at again at the next count, not left out for good
+            self.cars, self.formation = cars, n if answered else None
         counts = [api.get_value(car + ".Function.GetPassengerCount") for car in self.cars]
         counts = [c for c in counts if isinstance(c, (int, float))]
         self.passengers = int(sum(counts)) if counts else None

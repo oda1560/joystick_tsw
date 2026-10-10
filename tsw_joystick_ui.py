@@ -48,6 +48,8 @@ except ImportError:
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 SETTINGS_FILE = os.path.join(HERE, "settings.json")
+LOG_FILE = os.path.join(HERE, "bridge.log")    # the log, to read after; the one before kept as bridge.log.1
+LOG_MAX = 1_000_000                            # bytes: past this the log starts a new file
 DEFAULTS = {"axis": core.Y_AXIS, "invert": core.INVERT_Y, "deadzone": core.DEADZONE,
             "toggle_button": None, "on_top": False, "speed_popup": True, "stop_panel": True, "comfort": True,
             "joystick": "", "rev_enabled": core.USE_REVERSER, "rev_axis": core.REVERSER_AXIS,
@@ -800,6 +802,7 @@ class App:
         self.s = load_settings()
         self.logq = queue.Queue()
         self.last_log = None
+        self.log_file = None          # bridge.log, opened with the first line
         self.bridge = Bridge(self.log)
         self.bridge.enabled = not start_paused
         self.look = core.LookController(self.log)
@@ -1239,6 +1242,10 @@ class App:
         self.tracker.running = False
         self.speed_watch.running = False
         self.comfort.running = False
+        self.log("Bridge closed")
+        self._drain_log()
+        if self.log_file is not None:
+            self.log_file.close()
         pygame.quit()
         self.root.destroy()
 
@@ -1401,6 +1408,7 @@ class App:
                 break
         if not lines:
             return
+        self._write_log(lines)
         t = self.logtext
         t.config(state="normal")
         for line in lines:
@@ -1410,6 +1418,23 @@ class App:
             t.delete("1.0", f"{excess + 1}.0")
         t.see("end")
         t.config(state="disabled")
+
+    def _write_log(self, lines):
+        """The log also goes to bridge.log, so what happened can be read after (the window keeps 200 lines)."""
+        try:
+            if self.log_file is None:
+                if os.path.exists(LOG_FILE) and os.path.getsize(LOG_FILE) > LOG_MAX:
+                    os.replace(LOG_FILE, LOG_FILE + ".1")
+                self.log_file = open(LOG_FILE, "a", encoding="utf-8")
+                self.log_file.write(f"--- {time.strftime('%Y-%m-%d %H:%M:%S')}  bridge started\n")
+            for line in lines:
+                self.log_file.write(line + "\n")
+            self.log_file.flush()
+            if self.log_file.tell() > LOG_MAX:
+                self.log_file.close()
+                self.log_file = None          # the next line starts a new file
+        except OSError:
+            self.log_file = None
 
     # ---- gauges
     def _draw(self):

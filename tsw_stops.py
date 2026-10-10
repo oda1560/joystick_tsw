@@ -48,6 +48,8 @@ DEPARTED = 1.0                 # m/s: faster than this, it has left the stop
 KEEP_SECONDS = 30.0            # what to do at a stop stays up this long after moving off (as "departed")
 CLOSE_DOORS_SECONDS = 30.0     # the doors are to be shut this long before the departure time
 DOOR_SECONDS = 1.0             # how often the doors are looked at while at a stop
+MATCH_TRIES = 5                # times to match the game's objectives to the timetable again when they don't ...
+MATCH_SECONDS = 10.0           # ... this long apart
 MAX_CARS = 16
 DANGER = {"Stop", "Danger"}    # signal aspects to wait at
 DANGER_METRES = 400.0          # ... when the signal is this close
@@ -329,6 +331,8 @@ class StopTracker(threading.Thread):
         self.offset = None            # objective number of the service's first step
         self.steps = None             # the steps the game makes objectives for, None: not matched
         self.vias_counted = False     # the game makes go-vias objectives of their own
+        self.match_tries = 0          # times the objectives were matched and didn't
+        self.match_again = None       # when to try matching them again
         self.position = None          # metres along the path
         self.fixed = False            # position from a signal (else counted on from the last stop)
         self.clock = None             # game seconds at the last poll
@@ -380,7 +384,11 @@ class StopTracker(threading.Thread):
                 return
             if service != self.service:
                 self._reset(service)
-                self._load(service)
+                try:
+                    self._load(service)
+                except Exception:
+                    self._reset(None)         # the game didn't answer: read it again next time round,
+                    raise                     # rather than follow the service with no stops
         if not self.paths:
             return
         self._follow()
@@ -424,6 +432,12 @@ class StopTracker(threading.Thread):
                     break
         except Exception:
             pass
+        if self.steps is None and self.match_tries < MATCH_TRIES:
+            # a read that failed looks the same as objectives that don't match: try again in a while
+            self.match_tries += 1
+            self.match_again = time.monotonic() + MATCH_SECONDS
+        else:
+            self.match_again = None
         stops = sum(t.kind == "stop" for t in path.targets)
         vias = sum(t.kind == "via" and self._wanted(t) for t in path.targets)
         how = ("objectives not matched, going by position" if self.steps is None
@@ -436,6 +450,8 @@ class StopTracker(threading.Thread):
 
     def _follow(self):
         api = self.api
+        if self.match_again is not None and time.monotonic() > self.match_again:
+            self._find_objectives()
         aid = api.get("DriverAid.Data").get("Values") or {}
         signal = (aid.get("nextSignalProperty") or {}).get("propertyReference")
         to_signal = (aid.get("distanceToSignal") or 0.0) / 100
@@ -547,12 +563,19 @@ class StopTracker(threading.Thread):
         self.doors_read = time.monotonic()
         api = self.api
         if self.door_nodes is None:
-            self.door_nodes = []
-            for i in range(MAX_CARS):
+            # kept only once every car has answered: a car that didn't (the game drops a connection now and
+            # then) would have left its doors out for the rest of the service
+            count = api.get_value("CurrentFormation.FormationLength")
+            known = isinstance(count, (int, float)) and count > 0
+            nodes = []
+            for i in range(min(int(count), MAX_CARS) if known else MAX_CARS):
                 names = core.node_names(api.list(f"CurrentFormation/{i}"))
                 if not names:
+                    if known:
+                        return self.doors_open        # look again next time
                     break
-                self.door_nodes += [f"CurrentFormation/{i}/{n}" for n in names if n.startswith("PassengerDoor_")]
+                nodes += [f"CurrentFormation/{i}/{n}" for n in names if n.startswith("PassengerDoor_")]
+            self.door_nodes = nodes
         self.doors_open = any((api.get_value(n + ".Function.GetCurrentOutputValue") or 0.0) > 0.05
                               for n in self.door_nodes)
         return self.doors_open

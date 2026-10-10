@@ -72,7 +72,7 @@ HANDLE_SECONDS = 0.0             # seconds for the handle to go from Off to full
 HANDLE_SECONDS_MAX = 4.0
 POLL_HZ = 30
 TRAIN_CHECK_SECONDS = 2.0        # how often to check whether you changed train
-REDETECTS = 5                    # times to look at a train again when the game didn't answer for a handle found
+REDETECTS = 5                    # times to look at a train again when the game didn't answer for a control found
 
 USE_REVERSER = True
 REVERSER_AXIS = 3                # Extreme 3D Pro base slider: + end Forward, middle Neutral, - end Reverse
@@ -1449,12 +1449,19 @@ class ReverserSync:
             return
         if zone == self.last:
             return
-        self.last = zone
-        speed = controls.speed()
-        if speed is not None and abs(speed) > REVERSER_MAX_SPEED:
-            self.log(f"Reverser NOT moved to {zone}: train is moving ({abs(speed) * 3.6:.0f} km/h)")
+        before, self.last = self.last, zone
+        try:
+            speed = controls.speed()
+            if speed is not None and abs(speed) > REVERSER_MAX_SPEED:
+                self.log(f"Reverser NOT moved to {zone}: train is moving ({abs(speed) * 3.6:.0f} km/h)")
+                return
+            rev.set(zone)
+        except Exception as e:
+            # the game dropped a connection, say: try again next time round, rather than leave the reverser
+            # somewhere other than the slider until the slider is moved again
+            self.last = before
+            self.log(f"Reverser not moved to {zone} ({e}) - trying again")
             return
-        rev.set(zone)
         self.log(f"Reverser -> {zone}")
         self.verify = (now + 0.7, zone)
 
@@ -1771,7 +1778,7 @@ class TrainControls:
         self.throttle = self.brake = self.reverser = self.aws = self.alerter = None
         self.door_open_left = self.door_open_right = self.door_close_left = self.door_close_right = None
         self.from_files = False           # the train's controls were found in the game files
-        self.missing = []                 # handles found that the game didn't answer for (see detect)
+        self.missing = []                 # controls found that the game didn't answer for (see detect)
         self.cab = None                   # on a train with a cab at each end: the one used, "Front" / "Back"
         self.cab_known = False            # and the game said it's in use (else the front one is assumed)
 
@@ -1829,15 +1836,22 @@ class TrainControls:
                           and not any(x in n.lower() for x in ALERTER_NAME_SKIP))
                       or resets(n)]
 
+        unread = []
+
         def ident(n):
-            try:
-                v = self.api.get(f"CurrentDrivableActor/{n}.Property.InputIdentifier").get("Values") or {}
-                return n, str(v.get("identifier") or "")
-            except Exception:
-                return n, ""
+            for attempt in range(3):
+                try:
+                    v = self.api.get(f"CurrentDrivableActor/{n}.Property.InputIdentifier").get("Values") or {}
+                    return n, str(v.get("identifier") or "")
+                except Exception:          # the game drops a connection now and then
+                    time.sleep(0.1)
+            unread.append(n)               # no answer: the train is looked at again (see missing)
+            return n, ""
 
         with ThreadPoolExecutor(max_workers=16) as pool:
-            return [(n, i) for n, i in pool.map(ident, candidates) if i and i != "None"]
+            found = [(n, i) for n, i in pool.map(ident, candidates) if i and i != "None"]
+        self.missing += unread
+        return found
 
     def _enabled(self, n):
         # some trains carry a spare copy of a control that the game has switched off
@@ -1888,11 +1902,13 @@ class TrainControls:
 
     def detect(self):
         listed = node_names(self.api.list("CurrentDrivableActor"))
+        if not listed:                    # every cab has controls: the game didn't answer, so try again
+            raise IOError("the game listed no controls for the train")
         handles = train_handles(self.train_id, listed)
         self.from_files = bool(handles)
         names = self._this_cab(listed, handles)
         self.throttle = self.brake = self.reverser = self.aws = self.alerter = None
-        self.missing = []                 # handles found that the game didn't answer for: look again later
+        self.missing = []                 # controls found that the game didn't answer for: look again later
         self.door_open_left = self.door_open_right = self.door_close_left = self.door_close_right = None
         ids = self._identifiers(names)
 
