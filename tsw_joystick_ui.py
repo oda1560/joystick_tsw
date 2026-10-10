@@ -3,8 +3,9 @@ Train Sim World 7 joystick bridge - desktop window.
 
 Shows joystick / game / train status, live stick and lever gauges, and settings. While its joystick button is
 held, it shows over the game how far the next stop is (tsw_stops.py) and the speed limit now; while you're stopped
-at a stop, whether to wait, shut the doors or go, with the times and your points (tsw_score.py); and while you're
-over the speed limit, the limit (tsw_speed.py).
+at a stop, whether to wait, shut the doors or go, with the times, your points (tsw_score.py) and how the ride felt
+to the passengers; while you're over the speed limit, the limit (tsw_speed.py); and in the last seconds of a hard
+stop, to ease the brake off before the train stops (tsw_comfort.py).
 The bridge itself (game API, lever detection, emergency exclusion) lives in tsw_joystick.py.
 
 Usage:
@@ -16,6 +17,7 @@ Usage:
 import ctypes
 import ctypes.wintypes as wintypes
 import json
+import math
 import os
 import queue
 import re
@@ -29,6 +31,7 @@ from tkinter import ttk
 
 import tsw_autostart as autostart
 import tsw_joystick as core   # sets SDL env vars before pygame is imported
+import tsw_comfort
 import tsw_speed
 import tsw_stops
 import tsw_units
@@ -42,8 +45,8 @@ except ImportError:
 HERE = os.path.dirname(os.path.abspath(__file__))
 SETTINGS_FILE = os.path.join(HERE, "settings.json")
 DEFAULTS = {"axis": core.Y_AXIS, "invert": core.INVERT_Y, "deadzone": core.DEADZONE,
-            "toggle_button": None, "on_top": False, "speed_popup": True, "stop_panel": True, "joystick": "",
-            "rev_enabled": core.USE_REVERSER, "rev_axis": core.REVERSER_AXIS,
+            "toggle_button": None, "on_top": False, "speed_popup": True, "stop_panel": True, "comfort": True,
+            "joystick": "", "rev_enabled": core.USE_REVERSER, "rev_axis": core.REVERSER_AXIS,
             "rev_invert": core.REVERSER_INVERT, "aws_button": core.AWS_BUTTON,
             "alerter_button": core.ALERTER_BUTTON,
             "door_open_left_button": core.DOOR_OPEN_LEFT_BUTTON,
@@ -318,7 +321,7 @@ class Overlay:
         user32.GetWindowThreadProcessId.argtypes = [wintypes.HWND, ctypes.POINTER(wintypes.DWORD)]
         before = user32.GetForegroundWindow()
         self.root, self.gap, self.k, self.right = root, top, k, right
-        self.under = None             # an overlay this one keeps below while both are shown
+        self.under = ()               # overlays this one keeps below while they're shown
         win = self.win = tk.Toplevel(root)
         win.overrideredirect(True)
         win.attributes("-topmost", True)
@@ -348,12 +351,12 @@ class Overlay:
             self.shown = True
 
     def _place(self):
-        """Centred (or at the right), `gap` from the top of the screen, and below the overlay above while that's
+        """Centred (or at the right), `gap` from the top of the screen, and below the overlays above while they're
         shown."""
         top = round(self.root.winfo_screenheight() * self.gap)
-        above = self.under
-        if above is not None and above.shown and above.place is not None:
-            top = max(top, above.place[1] + above.win.winfo_reqheight() + round(6 * self.k))
+        for above in self.under:
+            if above.shown and above.place is not None:
+                top = max(top, above.place[1] + above.win.winfo_reqheight() + round(6 * self.k))
         spare = self.root.winfo_screenwidth() - self.win.winfo_reqwidth()
         place = (max(0, spare - round(24 * self.k) if self.right else spare // 2), top)
         if place != self.place:          # keep it in place as the text changes width
@@ -455,22 +458,48 @@ def minutes(seconds):
 
 class DwellOverlay(Overlay):
     """While you're stopped at a stop, in the top right corner: whether to wait, shut the doors or go, the time
-    now and the departure time, and your points (tsw_stops.StopTracker.stop). Once you can go, also how far the
-    next stop or go-via is, and that stays up for a while after you move off."""
+    now and the departure time, your points (tsw_stops.StopTracker.stop) and how the ride here felt to the
+    passengers (tsw_comfort.py). Once you can go, also how far the next stop or go-via is, and that stays up for a
+    while after you move off."""
     PHASES = {"wait": ("WAIT", FG), "close": ("SHUT THE DOORS", WARN), "depart": ("DEPART", GOOD),
               "signal": ("WAIT FOR THE SIGNAL", WARN), "end": ("END OF SERVICE", FG), "departed": ("DEPARTED", GOOD)}
 
     def __init__(self, root, k):
-        super().__init__(root, k, 0.03, [(24, True), (13, True), (12, False), (11, False), (12, True), (10, False)],
-                         right=True)
+        super().__init__(root, k, 0.03, [(24, True), (13, True), (12, False), (11, False), (12, True), (10, False),
+                                         (11, False), (10, False)], right=True)
 
-    def show(self, stop, state, imperial):
-        """`state`: the tracker's next stop readout (tsw_stops.StopTracker.state)."""
-        self.set(*self.lines_for(stop, state, imperial))
+    def show(self, stop, state, imperial, ride=None):
+        """`state`: the tracker's next stop readout (tsw_stops.StopTracker.state); `ride`: the ride report
+        (tsw_comfort.ComfortWatch.report)."""
+        self.set(*self.lines_for(stop, state, imperial, ride))
         super().show()
 
+    @staticmethod
+    def ride_lines(ride):
+        """'Jolt on stopping, 1.9 m/s²  ·  1 harsh brake' (red, else green) and '15 passengers  ·  smooth rides 2
+        of 3 this service'."""
+        if not ride:
+            return ("", FG), ("", MUTED)
+        parts = []
+        if ride["stop"] == "jolt":
+            parts.append(f"Jolt on stopping, {ride['braking']:.1f} m/s²")
+        elif ride["stop"] == "smooth":
+            parts.append("Smooth stop")
+        for kind, word in (("brake", "harsh brake"), ("power", "harsh acceleration")):
+            n = sum(k == kind for k, _ in ride["harsh"])
+            if n:
+                parts.append(f"{n} {word}{'s' * (n != 1)}")
+        if ride["jolts"]:
+            parts.append("jolt at a stop on the way" if ride["jolts"] == 1
+                         else f"{ride['jolts']} jolts at stops on the way")
+        smooth = ride["stop"] != "jolt" and not ride["harsh"] and not ride["jolts"]
+        tally = f"{ride['passengers']} passenger{'s' * (ride['passengers'] != 1)}"
+        if ride["rides"]:
+            tally += f"  ·  smooth rides {ride['smooth']} of {ride['rides']} this service"
+        return ("  ·  ".join(parts), GOOD if smooth else BAD), (tally, MUTED)
+
     @classmethod
-    def lines_for(cls, stop, state=None, imperial=False):
+    def lines_for(cls, stop, state=None, imperial=False, ride=None):
         action, colour = cls.PHASES[stop["phase"]]
         goal = ""
         if state and state["label"] and stop["phase"] in ("depart", "signal", "departed"):  # the game has let the
@@ -503,7 +532,8 @@ class DwellOverlay(Overlay):
             arrival = ("arrived on time" if abs(late) < 1 else
                        f"arrived {minutes(late)} {'late' if late > 0 else 'early'}")
             arrival += f", {points['off']:.1f} m from the marker"
-        return (action, colour), (goal, FG), (where, FG), (now, MUTED), (score, FG), (arrival, MUTED)
+        return ((action, colour), (goal, FG), (where, FG), (now, MUTED), (score, FG), (arrival, MUTED),
+                *cls.ride_lines(ride))
 
 
 def short_time(seconds):
@@ -609,6 +639,23 @@ class SpeedOverlay(Overlay):
         super().show()
 
 
+class ComfortOverlay(Overlay):
+    """In the last seconds of a hard stop, to ease the brake off before the train stops; then how the stop went
+    (tsw_comfort.ComfortWatch.coach). Below the speeding popup."""
+
+    def __init__(self, root, k):
+        super().__init__(root, k, 0.20, [(10, True), (24, True), (12, False)])
+
+    def show(self, coach):
+        if coach["phase"] == "ease":
+            self.set((f"STOPPING IN {max(1, math.ceil(coach['seconds']))} s", WARN), ("EASE OFF THE BRAKE", WARN),
+                     (f"braking {coach['braking']:.1f} m/s²", FG))
+        else:
+            self.set(("", FG), ("JOLT ON STOPPING", BAD) if coach["jolt"] else ("SMOOTH STOP", GOOD),
+                     (f"braking {coach['braking']:.1f} m/s² as it stopped", MUTED))
+        super().show()
+
+
 # ---------------------------------------------------------------- window
 class App:
     CW, CH = 560, 290    # canvas size at 96 dpi
@@ -624,6 +671,9 @@ class App:
         self.look = core.LookController(self.log)
         self.tracker = tsw_stops.StopTracker(self.log)
         self.speed_watch = tsw_speed.SpeedWatch()
+        self.comfort = tsw_comfort.ComfortWatch(self.log)
+        self.at_station = None        # service you're stopped at a station of, for the ride report
+        self.ride = None              # ride report for that station
         self.look_raw = 0.0           # twist position, +1 = full right
         self.stick = None
         self.next_stick_try = 0.0
@@ -646,10 +696,12 @@ class App:
         root.update_idletasks()       # shows this window first, so the overlays hand the focus back to it
         self.dwell_overlay = DwellOverlay(root, self.k)
         self.schedule_overlay = ScheduleOverlay(root, self.k)
-        self.schedule_overlay.under = self.dwell_overlay
+        self.schedule_overlay.under = (self.dwell_overlay,)
         self.overlay = StopOverlay(root, self.k)
         self.speed_overlay = SpeedOverlay(root, self.k)
-        self.speed_overlay.under = self.overlay
+        self.speed_overlay.under = (self.overlay,)
+        self.comfort_overlay = ComfortOverlay(root, self.k)
+        self.comfort_overlay.under = (self.overlay, self.speed_overlay)
         self._refresh_toggle()
         self._refresh_button_label()
         root.attributes("-topmost", bool(self.s["on_top"]))
@@ -658,6 +710,7 @@ class App:
         self.look.start()
         self.tracker.start()
         self.speed_watch.start()
+        self.comfort.start()
         self.log("Bridge started" + (" (paused)" if start_paused else ""))
         self.tick()
         if with_game:
@@ -839,6 +892,11 @@ class App:
         ttk.Checkbutton(bottom, text="Show what to do at stops", variable=self.stop_panel_var,
                         style="Panel.TCheckbutton", command=self.on_stop_panel).pack(side="left", padx=(16, 0))
         ttk.Button(bottom, text="Re-detect train", command=self.on_redetect).pack(side="right")
+        bottom2 = ttk.Frame(setp, style="Panel.TFrame")
+        bottom2.pack(fill="x", pady=(4, 0))
+        self.comfort_var = tk.BooleanVar(value=bool(self.s["comfort"]))
+        ttk.Checkbutton(bottom2, text="Show passenger comfort", variable=self.comfort_var,
+                        style="Panel.TCheckbutton", command=self.on_comfort).pack(side="left")
 
         # log
         lp = self._panel(outer, "LOG")
@@ -1012,6 +1070,10 @@ class App:
         self.s["stop_panel"] = bool(self.stop_panel_var.get())
         save_settings(self.s)
 
+    def on_comfort(self):
+        self.s["comfort"] = bool(self.comfort_var.get())
+        save_settings(self.s)
+
     def on_redetect(self):
         self.bridge.force_detect = True
         self.log("Re-detecting train controls...")
@@ -1032,6 +1094,7 @@ class App:
         self.look.running = False
         self.tracker.running = False
         self.speed_watch.running = False
+        self.comfort.running = False
         pygame.quit()
         self.root.destroy()
 
@@ -1422,6 +1485,17 @@ class App:
                               fill=mark, outline="")
 
     # ---- main loop
+    def _ride(self, stop):
+        """The ride report for the station you're stopped at (tsw_stops.StopTracker.stop): it follows the ride as
+        the judging catches up with the stop, and stays as it was once you've left; leaving starts the next ride."""
+        if stop and stop["phase"] != "departed":
+            self.at_station = stop["service"]
+            self.ride = self.comfort.report(stop["service"])
+        elif self.at_station is not None:
+            self.comfort.new_leg(self.at_station)
+            self.at_station = None
+        return self.ride if stop else None
+
     def tick(self):
         self.frame += 1
         try:
@@ -1429,9 +1503,12 @@ class App:
             self._poll_joystick()
             self._update_status()
             self._draw()
-            at_stop = self.tracker.stop if self.s["stop_panel"] else None
+            stop = self.tracker.stop
+            ride = self._ride(stop)
+            at_stop = stop if self.s["stop_panel"] else None
             if at_stop:
-                self.dwell_overlay.show(at_stop, self.tracker.state, self.speed_watch.imperial)
+                self.dwell_overlay.show(at_stop, self.tracker.state, self.speed_watch.imperial,
+                                        ride if self.s["comfort"] else None)
                 self.schedule_overlay.show(at_stop)          # after it: it goes under that panel
             else:
                 self.dwell_overlay.hide()
@@ -1443,7 +1520,13 @@ class App:
                 self.speed_overlay.show(speeding, self.speed_watch.imperial)
             else:
                 self.speed_overlay.hide()
-            for overlay in (self.dwell_overlay, self.schedule_overlay, self.overlay, self.speed_overlay):
+            coach = self.comfort.coach if self.s["comfort"] else None
+            if coach:
+                self.comfort_overlay.show(coach)             # after the speeding popup: it goes under that
+            else:
+                self.comfort_overlay.hide()
+            for overlay in (self.dwell_overlay, self.schedule_overlay, self.overlay, self.speed_overlay,
+                            self.comfort_overlay):
                 overlay.keep_on_top()
             self._drain_log()
         except Exception as e:
