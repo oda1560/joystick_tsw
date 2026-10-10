@@ -325,7 +325,7 @@ class Overlay:
         win.attributes("-alpha", 0.0)
         win.geometry("+-10000+-10000")
         win.configure(bg=PANEL)
-        box = tk.Frame(win, bg=PANEL, padx=round(22 * k), pady=round(8 * k))
+        box = self.box = tk.Frame(win, bg=PANEL, padx=round(22 * k), pady=round(8 * k))
         box.pack()
         self.labels = [tk.Label(box, text="", bg=PANEL, fg=FG, font=(FONT, size, "bold") if bold else (FONT, size))
                        for size, bold in lines]
@@ -506,6 +506,93 @@ class DwellOverlay(Overlay):
         return (action, colour), (goal, FG), (where, FG), (now, MUTED), (score, FG), (arrival, MUTED)
 
 
+def short_time(seconds):
+    """'15:33' from seconds after midnight, or '08:36:30' where the seconds aren't 0."""
+    return clock_time(seconds) if int(seconds) % 60 else clock_time(seconds)[:5]
+
+
+class ScheduleOverlay(Overlay):
+    """The service's schedule from the stop you're at, as the game's own (T) lists it: that stop and the next
+    few, with their platforms and times. Under the what-to-do panel, for as long as that's shown."""
+    STOPS = 5                 # the stop you're at and the next four
+    TITLE, FOOT = (10, True), (9, False)      # font size, bold
+    HEAD, ROW = 8, 11
+
+    def __init__(self, root, k):
+        super().__init__(root, k, 0.03, [], right=True)
+        self.table = None
+        self.content = None
+
+    def show(self, stop):
+        if not stop.get("schedule"):
+            self.hide()
+            return
+        content = self.content_for(stop)
+        if content != self.content:
+            self._build(content)
+        super().show()
+
+    @classmethod
+    def content_for(cls, stop):
+        """(title, rows, footer, times) for tsw_stops.StopTracker.stop. Each row is cells of (text, colour, bold):
+        a mark, the station, its platform, the arrival and departure times. The first row is a heading; a column
+        nothing is known for is left out. `times`: which columns are times (set to the right)."""
+        stops = stop.get("schedule") or []
+        shown, rest = stops[:cls.STOPS], stops[cls.STOPS:]
+        left = stop["phase"] == "departed"
+        rows = []
+        for n, (station, platform, arrives, departs) in enumerate(shown):
+            mark, colour, bold = "", FG, False
+            if n == 0:
+                mark, colour, bold = ("✓", MUTED, False) if left else ("▸", FG, True)
+            elif n == 1 and left:
+                mark, bold = "▸", True                     # where you're going now
+            rows.append([(mark, GOOD if mark == "✓" else colour, bold), (station, colour, bold),
+                         ((platform.split()[-1].lstrip("0") or "0") if platform else "", MUTED, False),
+                         (short_time(arrives) if arrives is not None else "", colour, bold),
+                         (short_time(departs) if departs is not None else "", colour, bold)])
+        keep = [c for c in range(5) if c < 2 or any(r[c][0] for r in rows)]
+        heading = [("", MUTED, True), ("STATION", MUTED, True), ("PLAT", MUTED, True), ("ARR", MUTED, True),
+                   ("DEP", MUTED, True)]
+        rows = [tuple(r[c] for c in keep) for r in [heading] + rows]
+        footer = ""
+        if rest:
+            station, _, arrives, _ = rest[-1]
+            footer = f"+ {len(rest)} more stop{'s' * (len(rest) != 1)} to {station}"
+            if arrives is not None:
+                footer += f", arr {short_time(arrives)}"
+        title = "SCHEDULE" + (f"  ·  {stop['service']}" if stop.get("service") else "")
+        times = tuple(c >= 3 for c in keep)
+        return title, tuple(rows), footer, times
+
+    def _build(self, content):
+        """Lays the table out again (only when it changes: once a stop or so)."""
+        self.content = content
+        title, rows, footer, times = content
+        if self.table is not None:
+            self.table.destroy()
+        k = self.k
+        table = self.table = tk.Frame(self.box, bg=PANEL)
+        table.pack()
+
+        def label(text, colour, size, bold, **grid):
+            tk.Label(table, text=text, bg=PANEL, fg=colour,
+                     font=(FONT, size, "bold") if bold else (FONT, size)).grid(**grid)
+
+        last = len(rows[0]) - 1
+        label(title, FG, *self.TITLE, row=0, column=0, columnspan=last + 1, sticky="w", pady=(0, round(4 * k)))
+        for r, cells in enumerate(rows, start=1):
+            size = self.HEAD if r == 1 else self.ROW
+            for c, (text, colour, bold) in enumerate(cells):
+                label(text, colour, size, bold, row=r, column=c, sticky="e" if times[c] else "w",
+                      padx=(0, 0 if c == last else round((6 if c == 0 else 14) * k)))
+        if footer:
+            label(footer, MUTED, *self.FOOT, row=len(rows) + 1, column=0, columnspan=last + 1, sticky="w",
+                  pady=(round(4 * k), 0))
+        self.win.update_idletasks()
+        self._place()
+
+
 class SpeedOverlay(Overlay):
     """The speed limit, for as long as you're over it: amber while within the game's tolerance, red once the game
     counts it as speeding. Sits below the next stop readout, moving down while that's shown if it needs to."""
@@ -558,6 +645,8 @@ class App:
         self._build()
         root.update_idletasks()       # shows this window first, so the overlays hand the focus back to it
         self.dwell_overlay = DwellOverlay(root, self.k)
+        self.schedule_overlay = ScheduleOverlay(root, self.k)
+        self.schedule_overlay.under = self.dwell_overlay
         self.overlay = StopOverlay(root, self.k)
         self.speed_overlay = SpeedOverlay(root, self.k)
         self.speed_overlay.under = self.overlay
@@ -1343,8 +1432,10 @@ class App:
             at_stop = self.tracker.stop if self.s["stop_panel"] else None
             if at_stop:
                 self.dwell_overlay.show(at_stop, self.tracker.state, self.speed_watch.imperial)
+                self.schedule_overlay.show(at_stop)          # after it: it goes under that panel
             else:
                 self.dwell_overlay.hide()
+                self.schedule_overlay.hide()
             if self.overlay.shown:
                 self.overlay.update(self.tracker.state, self.speed_watch)
             speeding = self.speed_watch.state if self.s["speed_popup"] else None
@@ -1352,7 +1443,7 @@ class App:
                 self.speed_overlay.show(speeding, self.speed_watch.imperial)
             else:
                 self.speed_overlay.hide()
-            for overlay in (self.dwell_overlay, self.overlay, self.speed_overlay):
+            for overlay in (self.dwell_overlay, self.schedule_overlay, self.overlay, self.speed_overlay):
                 overlay.keep_on_top()
             self._drain_log()
         except Exception as e:

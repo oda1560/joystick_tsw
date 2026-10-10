@@ -24,8 +24,9 @@ at the first stop.
     tracker.stop       # while stopped at a stop, else None: {"phase": "wait" / "close" (the doors) / "depart" /
                        #  "signal" (wait for it) / "end" (of the service), "station": name, "now", "departs" (game
                        #  seconds after midnight; departs None if not timed), "left": seconds to departure,
-                       #  "doors": open, "points": tsw_score.Points.read()}; for a while after moving off, phase
-                       #  "departed" and "moved": when the train moved off
+                       #  "doors": open, "points": tsw_score.Points.read(), "service": its name, "schedule": this
+                       #  stop and the rest (ServicePath.stops)}; for a while after moving off, phase "departed"
+                       #  and "moved": when the train moved off
 """
 
 import functools
@@ -66,6 +67,12 @@ def split_platform(destination):
     return (m.group(1), m.group(2)) if m and m.group(1) else (destination.strip(), "")
 
 
+def map_point(name):
+    """A timetable map point's name spelt out: 'BarkingRiverside' -> 'Barking Riverside'."""
+    name = name.replace("_", " ")
+    return name if " " in name else re.sub(r"(?<=[a-z])(?=[A-Z0-9])", " ", name)
+
+
 class Target:
     """A place the service stops at or goes via, from the timetable."""
 
@@ -103,6 +110,7 @@ class ServicePath:
         self.instructions = instructions  # [(type, stopping, destination, go-vias)] from the timetable
         self.times = (schedule or {}).get("times") or [(None, None)] * len(instructions)
         self.origin = (schedule or {}).get("origin") or ""
+        self.end = (schedule or {}).get("end") or ""
         self.order = {key: k for k, key in enumerate(steps)}
         self.first = {}                   # instruction -> order of its first step
         for k, (i, _) in enumerate(steps):
@@ -111,10 +119,42 @@ class ServicePath:
     def station(self, instruction):
         """The name of the stop a LoadUnload instruction is at: the place the service went to before it, or
         where it starts."""
+        return self.stop_place(instruction)[0]
+
+    def stop_place(self, instruction):
+        """(station, platform) of the stop a LoadUnload instruction is at: where the GoTo before it went, or
+        where the service starts. A GoTo with no destination is a stop at a marker (Airedale 2H33 waits at one
+        outside Leeds), or at the end of the service, where it ends (Southeastern 1F05: St Pancras)."""
         for kind, _, dest, _ in reversed(self.instructions[:instruction]):
-            if kind == "GoTo" and dest and dest != "None":
-                return split_platform(dest)[0]
-        return self.origin
+            if kind == "GoTo":
+                if dest and dest != "None":
+                    return split_platform(dest)
+                last = not any(k == "GoTo" for k, *_ in self.instructions[instruction:])
+                return split_platform(map_point(self.end)) if last and self.end else ("Stop marker", "")
+        return split_platform(map_point(self.origin))
+
+    def stops(self, start=0):
+        """The stops from the one the LoadUnload instruction `start` is at on: [(station, platform, arrival,
+        departure)], the times in seconds after midnight, None where the timetable has none (GOBLIN gives only
+        arrivals). Steps with no GoTo between them are one stop (Airedale 2P27 has two at Shipley, where it
+        reverses, the second without times): its arrival is from the first, its departure from the last."""
+        while start > 0 and self.instructions[start - 1][0] != "GoTo":
+            start -= 1
+        out, at_stop = [], False
+        for i in range(start, len(self.instructions)):
+            kind, stopping = self.instructions[i][:2]
+            if kind == "GoTo":
+                at_stop = False
+            elif kind == "LoadUnload" and stopping:
+                arrives, departs = self.times[i]
+                if at_stop:
+                    station, platform, first, last = out[-1]
+                    out[-1] = (station, platform, first if first is not None else arrives,
+                               departs if departs is not None else last)
+                else:
+                    out.append((*self.stop_place(i), arrives, departs))
+                    at_stop = True
+        return out
 
     def place(self, signal, to_signal, near=None):
         """Where the train is, from its next signal and the distance to it (metres), or None if that signal
@@ -169,8 +209,8 @@ def _time_of_day(ticks, scheduled):
 def timetable_services(files, path):
     """{service name: (service number, player drivable, instructions, schedule)} for each service in a timetable
     file, its instructions as (type "GoTo" / "LoadUnload" / ..., stopping, destination, (go-via names)), and its
-    schedule as {"origin": where it starts, "times": [(arrival, departure) per instruction, in seconds after
-    midnight, None where not scheduled]}: a stop's times are on its LoadUnload."""
+    schedule as {"origin": where it starts, "end": where it ends (map points), "times": [(arrival, departure) per
+    instruction, in seconds after midnight, None where not scheduled]}: a stop's times are on its LoadUnload."""
     out = {}
     for s in _load(files, path, {"Services": SERVICE_FIELDS}).get("Services") or []:
         instructions, times = [], []
@@ -181,7 +221,8 @@ def timetable_services(files, path):
             instructions.append((kind, bool(ins.get("bIsStopping")), dest, vias))
             times.append((_time_of_day(ins.get("ArrivalTime"), ins.get("bHasScheduledArrivalTime")),
                           _time_of_day(ins.get("CompletionTime"), ins.get("bHasScheduledCompletionTime"))))
-        schedule = {"origin": str(s.get("MapPointA") or ""), "times": tuple(times)}
+        schedule = {"origin": str(s.get("MapPointA") or ""), "end": str(s.get("MapPointB") or ""),
+                    "times": tuple(times)}
         out[s.get("Name")] = (s.get("ServiceNumber"), bool(s.get("bIsPlayerDrivable")), tuple(instructions), schedule)
     return out
 
@@ -484,7 +525,8 @@ class StopTracker(threading.Thread):
         else:
             phase = "wait"
         self.stop = {"phase": phase, "station": path.station(self.dwell), "now": now, "departs": departs,
-                     "left": left, "doors": doors, "points": self.points.read({self.service, path.name}, clock)}
+                     "left": left, "doors": doors, "points": self.points.read({self.service, path.name}, clock),
+                     "service": self.service, "schedule": path.stops(self.dwell)}
 
     def _doors_open(self):
         """Whether any passenger door of the train is open (looked at once a second)."""
