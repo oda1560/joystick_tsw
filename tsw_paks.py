@@ -5,8 +5,8 @@ Only as much of Unreal Engine 4.26's formats as is needed to find a rail vehicle
 settings: pak archives (version 11, unencrypted, Zlib) and cooked packages with tagged properties.
 
     files = GameFiles()                                  # finds the TSW7 install through Steam
-    for cls in files.vehicle_classes(): ...              # "RVM_..._C" names, as the game reports them
-    comps = files.components("RVM_AWL_NT_Class331_DMS_C")   # {name: Component} incl. inherited ones
+    for cls, packages in files.vehicle_classes().items(): ...   # "RVM_..._C" names, as the game reports them
+    comps = files.components(cls, packages[0])           # {name: Component} incl. inherited ones
 """
 
 import glob
@@ -481,7 +481,9 @@ class GameFiles:
         return self._packages[package]
 
     def vehicle_classes(self):
-        """{'RVM_..._C': package name} for every rail vehicle blueprint in the game files."""
+        """{'RVM_..._C': [package name, ...]} for every rail vehicle blueprint in the game files. A few names
+        are used by more than one pack, for trains that differ (RVM_TFW_Class150_DMSL_C is Cardiff City
+        Commuter's Class 150 and the TfW Class 142 pack's, with different reversers): those list each one."""
         out = {}
         for name in self.where:
             m = re.search(r"/(RVM_[^/]+)\.uasset$", name)
@@ -489,8 +491,17 @@ class GameFiles:
                 continue
             for pkg, root in self.roots.items():
                 if name.startswith(root):
-                    out[m.group(1) + "_C"] = f"/{pkg}/{name[len(root):-len('.uasset')]}"
+                    out.setdefault(m.group(1) + "_C", []).append(f"/{pkg}/{name[len(root):-len('.uasset')]}")
         return out
+
+    def matching_package(self, cls, packages, names):
+        """Of the packages a vehicle class is in (vehicle_classes()), the one for the train the game lists with
+        these component names: the one with the fewest components that aren't in both. Where every pack has
+        the same components, their cab controls are the same too (checked for each such name, 2026-10-10)."""
+        if len(packages) == 1 or not names:
+            return packages[0]
+        live = {n.lower() for n in names}
+        return min(packages, key=lambda p: len(live ^ {n.lower() for n in self.components(cls, p)}))
 
     # -------- objects and inheritance
     def resolve(self, ref):

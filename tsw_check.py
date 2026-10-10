@@ -552,7 +552,8 @@ def write_report(results, files, seconds):
     for r in results:
         by_pack[r.pack].append(r)
     counts = {v: sum(r.verdict == v for r in results) for v in ("OK", "CHECK", "PROBLEM")}
-    vehicles, two_cabs = len({r.train for r in results}), len({r.train for r in results if r.cab})
+    vehicles = len({(r.train, r.pack) for r in results})
+    two_cabs = len({(r.train, r.pack) for r in results if r.cab})
     out = ["Joystick bridge check against the installed trains",
            f"{real_time.strftime('%Y-%m-%d %H:%M')}, {vehicles} drivable vehicles in {len(by_pack)} packs, "
            f"{seconds:.0f} s",
@@ -589,7 +590,7 @@ def write_report(results, files, seconds):
             out.append(f"\n## {pack}")
             for key in sorted(groups, key=lambda k: (order[k[0]], groups[k][0].name)):
                 verdict, problems, doubts, lines = key
-                names = ", ".join(r.name for r in groups[key])
+                names = ", ".join(dict.fromkeys(r.name for r in groups[key]))   # a pack may have one twice
                 out.append(f"\n[{verdict}] {names}")
                 out += [f"  ! {p}" for p in problems] + [f"  ? {d}" for d in doubts]
                 out += [f"  {line}" for line in lines]
@@ -607,11 +608,13 @@ def check_all(filters, use_files=True):
         tj.USE_GAME_FILES = False
     for name, err in files.errors:
         print(f"  couldn't read {name}: {err}")
-    trains = files.vehicle_classes()
+    # a train of the same name in more than one pack is checked in each
+    trains = sorted((train, package) for train, packages in files.vehicle_classes().items()
+                    for package in packages)
     if filters:
-        trains = {k: v for k, v in trains.items() if any(f.lower() in k.lower() for f in filters)}
+        trains = [(k, p) for k, p in trains if any(f.lower() in k.lower() for f in filters)]
     results = []
-    for i, (train, package) in enumerate(sorted(trains.items()), 1):
+    for i, (train, package) in enumerate(trains, 1):
         print(f"\r  {i}/{len(trains)} {short(train)[:60]:<60}", end="", flush=True)
         try:
             if not is_driven(files, train, package):
@@ -632,7 +635,8 @@ def check_all(filters, use_files=True):
     print("\r" + " " * 80 + "\r", end="")
     write_report(results, files, real_time.time() - start)
     counts = {v: sum(r.verdict == v for r in results) for v in ("OK", "CHECK", "PROBLEM")}
-    print(f"{len({r.train for r in results})} drivable vehicles, {len(results)} cabs: OK {counts['OK']}, "
+    vehicles = len({(r.train, r.pack) for r in results})
+    print(f"{vehicles} drivable vehicles, {len(results)} cabs: OK {counts['OK']}, "
           f"CHECK {counts['CHECK']}, PROBLEM {counts['PROBLEM']}")
     print(f"Report: {REPORT_FILE}")
 
@@ -680,14 +684,17 @@ def compare_live():
     if train not in trains:
         print("This train isn't in the game files (or isn't a rail vehicle blueprint).")
         return
+    live_names = tj.node_names(live.list("CurrentDrivableActor"))
+    package = files.matching_package(train, trains[train], live_names)
+    if len(trains[train]) > 1:
+        print(f"In {len(trains[train])} packs under this name; the one like this train:", files.pack_of(package))
     tj._calibration = {}
     tj.save_calibration = lambda key, value: None
     cab = tj.TrainControls(live).active_cab()
     if cab:
         print("Cab in use:", cab.lower())
-    model = ModelApi(train, files.components(train, trains[train]), cab)
+    model = ModelApi(train, files.components(train, package), cab)
 
-    live_names = tj.node_names(live.list("CurrentDrivableActor"))
     model_names = list(model.controls)
     lower = {n.lower() for n in live_names}
     missing = [n for n in model_names if n.lower() not in lower]

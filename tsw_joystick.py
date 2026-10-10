@@ -296,7 +296,7 @@ def save_handle_seconds(train, seconds):
         pass
 
 
-_game_files = None   # Future of (tsw_paks.GameFiles, {train class: package}), read in the background
+_game_files = None   # Future of (tsw_paks.GameFiles, {train class: [package, ...]}), read in the background
 
 
 def load_game_files():
@@ -321,18 +321,20 @@ def use_game_files(files):
     _game_files.set_result((files, files.vehicle_classes()))
 
 
-def train_handles(train, wait=30.0):
+def train_handles(train, names=None, wait=30.0):
     """{component name: tsw_handles.Control} for a train, from the game files; {} when they can't be read
-    (game not found, files still loading after `wait` seconds, or the train isn't in them)."""
+    (game not found, files still loading after `wait` seconds, or the train isn't in them). names: its
+    components as the game lists them, to tell trains of the same name in different packs apart (Cardiff City
+    Commuter's Class 150 has its Forward at 0.75, the TfW Class 142 pack's at the end of the handle)."""
     future = load_game_files()
     if future is None or not train:
         return {}
     try:
         files, classes = future.result(timeout=wait)
-        package = classes.get(train)
-        if package is None:
+        packages = classes.get(train)
+        if not packages:
             return {}
-        comps = files.components(train, package)
+        comps = files.components(train, files.matching_package(train, packages, names))
         sides = tsw_handles.cab_sides(comps)
         return {name: tsw_handles.Control(c, sides.get(name)) for name, c in comps.items()}
     except Exception:
@@ -1877,9 +1879,10 @@ class TrainControls:
                             buttons[0] if len(buttons) == 1 else ButtonGroup(buttons))
 
     def detect(self):
-        handles = train_handles(self.train_id)
+        listed = node_names(self.api.list("CurrentDrivableActor"))
+        handles = train_handles(self.train_id, listed)
         self.from_files = bool(handles)
-        names = self._this_cab(node_names(self.api.list("CurrentDrivableActor")), handles)
+        names = self._this_cab(listed, handles)
         self.throttle = self.brake = self.reverser = self.aws = self.alerter = None
         self.door_open_left = self.door_open_right = self.door_close_left = self.door_close_right = None
         ids = self._identifiers(names)
