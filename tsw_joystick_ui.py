@@ -455,26 +455,36 @@ def minutes(seconds):
 
 class DwellOverlay(Overlay):
     """While you're stopped at a stop, in the top right corner: whether to wait, shut the doors or go, the time
-    now and the departure time, and your points (tsw_stops.StopTracker.stop)."""
+    now and the departure time, and your points (tsw_stops.StopTracker.stop). Once you can go, also how far the
+    next stop or go-via is, and that stays up for a while after you move off."""
     PHASES = {"wait": ("WAIT", FG), "close": ("SHUT THE DOORS", WARN), "depart": ("DEPART", GOOD),
-              "signal": ("WAIT FOR THE SIGNAL", WARN), "end": ("END OF SERVICE", FG)}
+              "signal": ("WAIT FOR THE SIGNAL", WARN), "end": ("END OF SERVICE", FG), "departed": ("DEPARTED", GOOD)}
 
     def __init__(self, root, k):
-        super().__init__(root, k, 0.03, [(24, True), (12, False), (11, False), (12, True), (10, False)], right=True)
+        super().__init__(root, k, 0.03, [(24, True), (13, True), (12, False), (11, False), (12, True), (10, False)],
+                         right=True)
 
-    def show(self, stop):
-        self.set(*self.lines_for(stop))
+    def show(self, stop, state, imperial):
+        """`state`: the tracker's next stop readout (tsw_stops.StopTracker.state)."""
+        self.set(*self.lines_for(stop, state, imperial))
         super().show()
 
     @classmethod
-    def lines_for(cls, stop):
+    def lines_for(cls, stop, state=None, imperial=False):
         action, colour = cls.PHASES[stop["phase"]]
+        goal = ""
+        if state and state["label"] and stop["phase"] in ("depart", "signal", "departed"):  # the game has let the
+            goal = state["label"]                                   # train go: the readout is on to the next
+            if state["metres"] is not None:
+                goal += " in " + ("≈ " if state["estimated"] else "") + tsw_units.distance(state["metres"], imperial)
         left, departs = stop["left"], stop["departs"]
         if stop["phase"] == "close" and left is not None and left < 0:
             colour = BAD                                  # it's past the departure time
         where = stop["station"]
         if stop["phase"] == "end":
             where += "  ·  terminates here"
+        elif stop["phase"] == "departed":
+            where += "  ·  left " + clock_time(stop["moved"])
         elif departs is not None:
             where += "  ·  departs " + clock_time(departs)
         now = "now " + clock_time(stop["now"])
@@ -493,7 +503,7 @@ class DwellOverlay(Overlay):
             arrival = ("arrived on time" if abs(late) < 1 else
                        f"arrived {minutes(late)} {'late' if late > 0 else 'early'}")
             arrival += f", {points['off']:.1f} m from the marker"
-        return (action, colour), (where, FG), (now, MUTED), (score, FG), (arrival, MUTED)
+        return (action, colour), (goal, FG), (where, FG), (now, MUTED), (score, FG), (arrival, MUTED)
 
 
 class SpeedOverlay(Overlay):
@@ -1332,7 +1342,7 @@ class App:
             self._draw()
             at_stop = self.tracker.stop if self.s["stop_panel"] else None
             if at_stop:
-                self.dwell_overlay.show(at_stop)
+                self.dwell_overlay.show(at_stop, self.tracker.state, self.speed_watch.imperial)
             else:
                 self.dwell_overlay.hide()
             if self.overlay.shown:

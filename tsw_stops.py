@@ -24,7 +24,8 @@ at the first stop.
     tracker.stop       # while stopped at a stop, else None: {"phase": "wait" / "close" (the doors) / "depart" /
                        #  "signal" (wait for it) / "end" (of the service), "station": name, "now", "departs" (game
                        #  seconds after midnight; departs None if not timed), "left": seconds to departure,
-                       #  "doors": open, "points": tsw_score.Points.read()}
+                       #  "doors": open, "points": tsw_score.Points.read()}; for a while after moving off, phase
+                       #  "departed" and "moved": when the train moved off
 """
 
 import functools
@@ -43,6 +44,7 @@ PASSED_METRES = 20.0           # without objectives, a stop counts as passed thi
 NO_GUID = "0" * 32
 STOPPED = 0.3                  # m/s: slower than this the train is stopped
 DEPARTED = 1.0                 # m/s: faster than this, it has left the stop
+KEEP_SECONDS = 30.0            # what to do at a stop stays up this long after moving off (as "departed")
 CLOSE_DOORS_SECONDS = 30.0     # the doors are to be shut this long before the departure time
 DOOR_SECONDS = 1.0             # how often the doors are looked at while at a stop
 MAX_CARS = 16
@@ -284,6 +286,7 @@ class StopTracker(threading.Thread):
         self.step_key = None          # (instruction, go-via) the game is on
         self.dwell = None             # the LoadUnload instruction of the stop you're stopped at
         self.stop = None              # what to do there (see the module's notes)
+        self.departed = None          # (self.stop as you moved off, monotonic time to stop showing it)
         self.door_nodes = None        # API paths of the passenger doors
         self.doors_open = False
         self.doors_read = 0.0
@@ -305,7 +308,7 @@ class StopTracker(threading.Thread):
                 self._say(f"Not available: {e}")     # the game drops a connection now and then: carry on
                 self.stop = None
                 time.sleep(1)
-            time.sleep(SHOWN_POLL_SECONDS if self.shown else POLL_SECONDS)
+            time.sleep(SHOWN_POLL_SECONDS if self.shown or self.departed else POLL_SECONDS)
 
     def step(self):
         api = self.api
@@ -439,8 +442,9 @@ class StopTracker(threading.Thread):
 
     def _at_stop(self, key, order, speed, clock, aid, waiting=False):
         """Sets self.stop while you're stopped at a stop: from when the game is on its LoadUnload step until the
-        train moves off. `waiting`: the game is on a wait of its own before the service's first step (on Airedale
-        2P27, a wait for a time of day at Bradford Forster Square): you're at the first stop."""
+        train moves off, and as "departed" for KEEP_SECONDS after. `waiting`: the game is on a wait of its own
+        before the service's first step (on Airedale 2P27, a wait for a time of day at Bradford Forster Square):
+        you're at the first stop."""
         path = self.path
         if key is not None:
             instruction = key[0]
@@ -449,18 +453,24 @@ class StopTracker(threading.Thread):
         else:
             instruction = 0 if waiting else None
         if instruction is None or clock is None:
-            self.dwell = self.stop = None
+            self.dwell = self.stop = self.departed = None
             return
+        now = clock % DAY
         if instruction < len(path.instructions) and path.instructions[instruction][0] == "LoadUnload" \
                 and path.instructions[instruction][1] and speed < STOPPED:
             self.dwell = instruction
         if self.dwell is not None and (speed > DEPARTED or instruction < self.dwell):
+            if speed > DEPARTED and self.stop is not None and self.stop["phase"] != "end":
+                self.departed = (dict(self.stop, phase="departed", left=None, moved=now),
+                                 time.monotonic() + KEEP_SECONDS)
             self.dwell = None
         if self.dwell is None:
-            self.stop = None
+            if self.departed is not None and time.monotonic() > self.departed[1]:
+                self.departed = None
+            self.stop = None if self.departed is None else dict(self.departed[0], now=now)
             return
+        self.departed = None
         _, departs = path.times[self.dwell]
-        now = clock % DAY
         left = None if departs is None else (departs - now + DAY / 2) % DAY - DAY / 2
         doors = self._doors_open()
         if not any(kind == "GoTo" for kind, *_ in path.instructions[self.dwell + 1:]):
