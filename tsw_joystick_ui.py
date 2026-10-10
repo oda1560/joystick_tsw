@@ -4,8 +4,10 @@ Train Sim World 7 joystick bridge - desktop window.
 Shows joystick / game / train status, live stick and lever gauges, and settings. While its joystick button is
 held, it shows over the game how far the next stop is (tsw_stops.py) and the speed limit now; while you're stopped
 at a stop, whether to wait, shut the doors or go, with the times, your points (tsw_score.py) and how the ride felt
-to the passengers; while you're over the speed limit, the limit (tsw_speed.py); and in the last seconds of a hard
-stop, to ease the brake off before the train stops (tsw_comfort.py).
+to the passengers, and at the end of a service how the run went against your best before (tsw_history.py, all
+runs in the Service history window); while you're over the speed limit, the limit (tsw_speed.py); and while
+braking or speeding up is firm or harsh for the passengers, and in the last seconds of a hard stop to ease the
+brake off before the train stops (tsw_comfort.py).
 The bridge itself (game API, lever detection, emergency exclusion) lives in tsw_joystick.py.
 
 Usage:
@@ -16,6 +18,7 @@ Usage:
 
 import ctypes
 import ctypes.wintypes as wintypes
+import datetime
 import json
 import math
 import os
@@ -32,6 +35,7 @@ from tkinter import ttk
 import tsw_autostart as autostart
 import tsw_joystick as core   # sets SDL env vars before pygame is imported
 import tsw_comfort
+import tsw_history
 import tsw_speed
 import tsw_stops
 import tsw_units
@@ -606,7 +610,7 @@ class ScheduleOverlay(Overlay):
         table.pack()
 
         def label(text, colour, size, bold, **grid):
-            tk.Label(table, text=text, bg=PANEL, fg=colour,
+            tk.Label(table, text=text, bg=PANEL, fg=colour, justify="left",
                      font=(FONT, size, "bold") if bold else (FONT, size)).grid(**grid)
 
         last = len(rows[0]) - 1
@@ -621,6 +625,55 @@ class ScheduleOverlay(Overlay):
                   pady=(round(4 * k), 0))
         self.win.update_idletasks()
         self._place()
+
+
+class SummaryOverlay(ScheduleOverlay):
+    """At the end of a service, under the what-to-do panel in place of the schedule: how the run went against the
+    best run of the same service before (tsw_history.py), where it's better in green."""
+
+    def show(self, run, best, count):
+        content = self.summary_for(run, best, count)
+        if content != self.content:
+            self._build(content)
+        Overlay.show(self)
+
+    @staticmethod
+    def summary_for(run, best, count):
+        """(title, rows, footer, times) as ScheduleOverlay.content_for has them."""
+        rows = [[("", MUTED, True), ("THIS RUN", MUTED, True)] + ([("BEST BEFORE", MUTED, True)] if best else [])]
+
+        def row(label, key, text, better=None):
+            if run.get(key) is None:
+                return
+            had = best is not None and best.get(key) is not None
+            colour = GOOD if had and better and better(run, best) else FG
+            cells = [(label, MUTED, False), (text(run), colour, True)]
+            if best:
+                cells.append((text(best) if had else "-", FG, False))
+            rows.append(cells)
+
+        row("Points", "points", lambda r: f"{r['points']:,}", lambda a, b: a["points"] > b["points"])
+        row("On time", "on_time", lambda r: f"{r['on_time']} of {r['stops']} stops",
+            lambda a, b: a["on_time"] / a["stops"] > b["on_time"] / b["stops"])
+        row("Stop accuracy", "accuracy", lambda r: f"{r['accuracy']:.1f} m off",
+            lambda a, b: a["accuracy"] < b["accuracy"])
+        if run.get("rides"):
+            row("Smooth rides", "smooth", lambda r: f"{r['smooth']} of {r['rides']}",
+                lambda a, b: a["smooth"] / a["rides"] > b["smooth"] / max(b.get("rides") or 0, 1))
+        row("Passengers", "passengers", lambda r: f"up to {r['passengers']}")
+        footer = []
+        if run["worst_late"] > tsw_history.ON_TIME:
+            footer.append(f"Latest {minutes(run['worst_late'])} behind time at a stop")
+        if best:
+            line = f"Best before on {best['finished'][:10]}"
+            if best.get("train") and best["train"] != run.get("train"):
+                line += f" with the {pretty_train(best['train'])}"
+            footer.append(line + f"  ·  {count} runs of {run['service']} kept")
+        else:
+            footer.append(f"First run of {run['service']} kept")
+        title = f"SERVICE COMPLETE  ·  {run['service']}" + (f"  ·  {run['route']}" if run.get("route") else "")
+        times = tuple(c > 0 for c in range(len(rows[0])))
+        return title, tuple(tuple(r) for r in rows), "\n".join(footer), times
 
 
 class SpeedOverlay(Overlay):
@@ -640,23 +693,96 @@ class SpeedOverlay(Overlay):
 
 
 class ComfortOverlay(Overlay):
-    """In the last seconds of a hard stop, to ease the brake off before the train stops; then how the stop went
+    """In the last seconds of a hard stop, to ease the brake off before the train stops; then how the stop went;
+    else while braking or speeding up is firm (amber) or harsh (red) for the passengers
     (tsw_comfort.ComfortWatch.coach). Below the speeding popup."""
 
     def __init__(self, root, k):
         super().__init__(root, k, 0.20, [(10, True), (24, True), (12, False)])
 
     def show(self, coach):
-        if coach["phase"] == "ease":
+        phase = coach["phase"]
+        if phase == "ease":
             self.set((f"STOPPING IN {max(1, math.ceil(coach['seconds']))} s", WARN), ("EASE OFF THE BRAKE", WARN),
                      (f"braking {coach['braking']:.1f} m/s²", FG))
-        else:
+        elif phase == "stopped":
             self.set(("", FG), ("JOLT ON STOPPING", BAD) if coach["jolt"] else ("SMOOTH STOP", GOOD),
                      (f"braking {coach['braking']:.1f} m/s² as it stopped", MUTED))
+        else:
+            colour = BAD if phase == "harsh" else WARN
+            what = "BRAKING" if coach["kind"] == "brake" else "ACCELERATION"
+            if phase == "harsh":
+                n = coach["passengers"]
+                note = f"{n} passenger{'s' * (n != 1)} aboard"
+            else:
+                note = "ease off a step" if coach["kind"] == "brake" else "ease off the power"
+            self.set((f"{phase.upper()} {what}", colour), (f"{coach['felt']:.1f} m/s²", colour), (note, FG))
         super().show()
 
 
 # ---------------------------------------------------------------- window
+class HistoryWindow:
+    """The services you've driven to the end (tsw_history.py), newest first, each service's best run in green."""
+    COLUMNS = (("finished", "Finished", 125, "w"), ("route", "Route", 150, "w"), ("service", "Service", 70, "w"),
+               ("train", "Train", 150, "w"), ("points", "Points", 65, "e"), ("on_time", "On time", 65, "e"),
+               ("accuracy", "From marker", 85, "e"), ("smooth", "Smooth rides", 90, "e"),
+               ("passengers", "Passengers", 80, "e"))
+
+    def __init__(self, root, k, history):
+        win = self.win = tk.Toplevel(root)
+        win.title("Service history")
+        win.configure(bg=BG)
+        st = ttk.Style(root)
+        st.configure("History.Treeview", background=PANEL, fieldbackground=PANEL, foreground=FG, borderwidth=0,
+                     rowheight=round(22 * k))
+        st.configure("History.Treeview.Heading", background=TRACK, foreground=MUTED, font=(FONT, 9, "bold"),
+                     borderwidth=0, relief="flat")
+        st.map("History.Treeview", background=[("selected", "#3a414d")], foreground=[("selected", FG)])
+        st.map("History.Treeview.Heading", background=[("active", TRACK)])
+        outer = ttk.Frame(win, padding=(16, 12))
+        outer.pack(fill="both", expand=True)
+        ttk.Label(outer, text="Services driven to the end", style="Head.TLabel").pack(anchor="w")
+        ttk.Label(outer, text="Points, on time and the distance from the marker come from the game's own save; "
+                              "smooth rides and passengers from the passenger comfort watch. Each service's best "
+                              "run is in green.", style="Sub.TLabel", wraplength=round(860 * k),
+                  justify="left").pack(anchor="w", pady=(2, 10))
+        frame = ttk.Frame(outer)
+        frame.pack(fill="both", expand=True)
+        tree = ttk.Treeview(frame, columns=[c[0] for c in self.COLUMNS], show="headings", style="History.Treeview",
+                            height=18)
+        for key, title, width, anchor in self.COLUMNS:
+            tree.heading(key, text=title, anchor=anchor)
+            tree.column(key, width=round(width * k), anchor=anchor, stretch=key in ("route", "train"))
+        bar = ttk.Scrollbar(frame, orient="vertical", command=tree.yview)
+        tree.configure(yscrollcommand=bar.set)
+        tree.pack(side="left", fill="both", expand=True)
+        bar.pack(side="right", fill="y")
+        tree.tag_configure("best", foreground=GOOD)
+        best = {}
+        for run in history.runs:
+            if run.get("points") is not None and run["points"] > best.get(run["service"], (None, -1))[1]:
+                best[run["service"]] = (run["id"], run["points"])
+        for run in reversed(history.runs):
+            tree.insert("", "end", values=self.cells(run),
+                        tags=("best",) if best.get(run["service"], (None,))[0] == run["id"] else ())
+        if not history.runs:
+            ttk.Label(outer, text="None yet: a service is kept here once you reach its last stop.",
+                      style="Sub.TLabel").pack(anchor="w", pady=(8, 0))
+
+    @staticmethod
+    def cells(run):
+        def when(text):
+            try:
+                return datetime.datetime.fromisoformat(text).strftime("%d %b %Y %H:%M")
+            except (TypeError, ValueError):
+                return text or ""
+        return (when(run.get("finished")), run.get("route", ""), run["service"], pretty_train(run.get("train")),
+                "-" if run.get("points") is None else f"{run['points']:,}", f"{run['on_time']} of {run['stops']}",
+                f"{run['accuracy']:.1f} m",
+                f"{run['smooth']} of {run['rides']}" if run.get("rides") else "-",
+                run.get("passengers", "-"))
+
+
 class App:
     CW, CH = 560, 290    # canvas size at 96 dpi
     GH = 250             # height of the gauge area; the look bar sits below it
@@ -674,6 +800,8 @@ class App:
         self.comfort = tsw_comfort.ComfortWatch(self.log)
         self.at_station = None        # service you're stopped at a station of, for the ride report
         self.ride = None              # ride report for that station
+        self.history = tsw_history.History()
+        self.history_window = None
         self.look_raw = 0.0           # twist position, +1 = full right
         self.stick = None
         self.next_stick_try = 0.0
@@ -697,6 +825,8 @@ class App:
         self.dwell_overlay = DwellOverlay(root, self.k)
         self.schedule_overlay = ScheduleOverlay(root, self.k)
         self.schedule_overlay.under = (self.dwell_overlay,)
+        self.summary_overlay = SummaryOverlay(root, self.k)
+        self.summary_overlay.under = (self.dwell_overlay,)
         self.overlay = StopOverlay(root, self.k)
         self.speed_overlay = SpeedOverlay(root, self.k)
         self.speed_overlay.under = (self.overlay,)
@@ -897,6 +1027,7 @@ class App:
         self.comfort_var = tk.BooleanVar(value=bool(self.s["comfort"]))
         ttk.Checkbutton(bottom2, text="Show passenger comfort", variable=self.comfort_var,
                         style="Panel.TCheckbutton", command=self.on_comfort).pack(side="left")
+        ttk.Button(bottom2, text="Service history", command=self.on_history).pack(side="right")
 
         # log
         lp = self._panel(outer, "LOG")
@@ -1073,6 +1204,11 @@ class App:
     def on_comfort(self):
         self.s["comfort"] = bool(self.comfort_var.get())
         save_settings(self.s)
+
+    def on_history(self):
+        if self.history_window is not None and self.history_window.win.winfo_exists():
+            self.history_window.win.destroy()           # open it again with the runs kept since
+        self.history_window = HistoryWindow(self.root, self.k, self.history)
 
     def on_redetect(self):
         self.bridge.force_detect = True
@@ -1505,14 +1641,22 @@ class App:
             self._draw()
             stop = self.tracker.stop
             ride = self._ride(stop)
+            run = self.history.finish(stop, self.comfort.service(stop["service"])) \
+                if stop and stop["phase"] == "end" else None
             at_stop = stop if self.s["stop_panel"] else None
             if at_stop:
                 self.dwell_overlay.show(at_stop, self.tracker.state, self.speed_watch.imperial,
                                         ride if self.s["comfort"] else None)
-                self.schedule_overlay.show(at_stop)          # after it: it goes under that panel
+                if run:                                      # after it: these go under that panel
+                    self.summary_overlay.show(run, self.history.best_before(run), self.history.count(run["service"]))
+                    self.schedule_overlay.hide()
+                else:
+                    self.schedule_overlay.show(at_stop)
+                    self.summary_overlay.hide()
             else:
                 self.dwell_overlay.hide()
                 self.schedule_overlay.hide()
+                self.summary_overlay.hide()
             if self.overlay.shown:
                 self.overlay.update(self.tracker.state, self.speed_watch)
             speeding = self.speed_watch.state if self.s["speed_popup"] else None
@@ -1525,8 +1669,8 @@ class App:
                 self.comfort_overlay.show(coach)             # after the speeding popup: it goes under that
             else:
                 self.comfort_overlay.hide()
-            for overlay in (self.dwell_overlay, self.schedule_overlay, self.overlay, self.speed_overlay,
-                            self.comfort_overlay):
+            for overlay in (self.dwell_overlay, self.schedule_overlay, self.summary_overlay, self.overlay,
+                            self.speed_overlay, self.comfort_overlay):
                 overlay.keep_on_top()
             self._drain_log()
         except Exception as e:

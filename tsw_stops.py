@@ -25,8 +25,8 @@ at the first stop.
                        #  "signal" (wait for it) / "end" (of the service), "station": name, "now", "departs" (game
                        #  seconds after midnight; departs None if not timed), "left": seconds to departure,
                        #  "doors": open, "points": tsw_score.Points.read(), "service": its name, "schedule": this
-                       #  stop and the rest (ServicePath.stops)}; for a while after moving off, phase "departed"
-                       #  and "moved": when the train moved off
+                       #  stop and the rest (ServicePath.stops), "route": the route's name, "train": its class};
+                       #  for a while after moving off, phase "departed" and "moved": when the train moved off
 """
 
 import functools
@@ -65,6 +65,12 @@ def split_platform(destination):
     """'Cuxton Platform 1' -> ('Cuxton', 'Platform 1')."""
     m = PLATFORM.match(destination.strip())
     return (m.group(1), m.group(2)) if m and m.group(1) else (destination.strip(), "")
+
+
+def route_name(timetable_id):
+    """'Medway Valley' from the game's timetable ID ('/MedwayValley/Map/...:PersistentLevel...')."""
+    first = (timetable_id or "").strip("/").split("/", 1)[0].split(":", 1)[0]
+    return re.sub(r"(?<=[a-z])(?=[A-Z0-9])", " ", first.replace("_", " "))
 
 
 def map_point(name):
@@ -316,6 +322,8 @@ class StopTracker(threading.Thread):
 
     def _reset(self, service):
         self.service = service        # name the game gives the service you're driving
+        self.route = ""               # route it's on
+        self.train = None             # train (class) driving it
         self.paths = []               # ServicePath candidates for it
         self.path = None              # the one you're driving
         self.offset = None            # objective number of the service's first step
@@ -383,8 +391,11 @@ class StopTracker(threading.Thread):
             self._say("Reading the game files is turned off")
             return
         self._say(f"Reading the timetable for {service}...")
+        timetable = self.api.get_value("Timetable.VehicleID")
+        self.route = route_name(timetable)
+        self.train = self.api.get_value("CurrentDrivableActor.ObjectClass")
         files, _ = future.result(timeout=120)
-        self.paths = service_path(files, self.api.get_value("Timetable.VehicleID"), service)
+        self.paths = service_path(files, timetable, service)
         if not self.paths:
             self._say(f"No timetable data for {service}")
             self.log(f"Next stop: no timetable data for {service}")
@@ -526,7 +537,8 @@ class StopTracker(threading.Thread):
             phase = "wait"
         self.stop = {"phase": phase, "station": path.station(self.dwell), "now": now, "departs": departs,
                      "left": left, "doors": doors, "points": self.points.read({self.service, path.name}, clock),
-                     "service": self.service, "schedule": path.stops(self.dwell)}
+                     "service": self.service, "schedule": path.stops(self.dwell), "route": self.route,
+                     "train": self.train}
 
     def _doors_open(self):
         """Whether any passenger door of the train is open (looked at once a second)."""

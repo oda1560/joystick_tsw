@@ -9,7 +9,9 @@ leaving on time.
 
     points = Points()
     points.read(services, game_seconds)   # None, or {"points": 1150, "change": 250 (since the save before),
-                                          #           "late": -55.0 (seconds, at the last stop), "off": 6.1 (m)}
+                                          #           "late": -55.0 (seconds, at the last stop), "off": 6.1 (m),
+                                          #           "stops": [(late, off) at each stop made so far],
+                                          #           "first": game seconds when it arrived at the first}
                                           # `services`: the names the service you're driving may go by
 """
 
@@ -162,7 +164,8 @@ class Points:
         if self.before is not None and out["points"] is not None:
             out["change"] = out["points"] - self.before
         stops = [s for st in record.get("ServiceStatistics") or [] for s in st.get("RecordedStops") or []]
+        out["stops"] = [((s["ArrivalTime"] - s["DueTime"]) / 1e7, s.get("StopAccuracy", 0) / 100) for s in stops]
+        out["first"] = stops[0]["ArrivalTime"] / 1e7 if stops else None
         if stops:
-            out["late"] = (stops[-1]["ArrivalTime"] - stops[-1]["DueTime"]) / 1e7
-            out["off"] = stops[-1].get("StopAccuracy", 0) / 100
+            out["late"], out["off"] = out["stops"][-1]
         return out
