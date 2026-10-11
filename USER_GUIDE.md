@@ -14,7 +14,7 @@ It also shows small panels over the game while you drive:
 - **Passenger comfort**: a warning on firm or harsh braking and acceleration, and a prompt to ease off the brake just before you stop.
 - **End of service**: how the run went against your best before.
 
-Two tools work without driving: **Route maps** prints a speed-limit map for any service, and the **train checker** tests the bridge against every train you own.
+Two tools work without driving: **Route maps** prints a speed-limit map for any service or a whole route, and the **train checker** tests the bridge against every train you own.
 
 The bridge never uses the emergency brake, and it only sends values when you move the stick, so the keyboard and mouse keep working alongside it.
 
@@ -197,9 +197,11 @@ Two tools read the game's files directly and work with the game closed: route ma
 
 A route map is a printable A4 landscape page set for one service: an overview map and route card, then strip diagrams of the line with its speed profile, limit boards, platforms, signals and distances. Use it to learn a route the way a real driver would, instead of relying on the game's speed limit hints.
 
+A **whole-route map** covers every line the route's passenger journeys use, for any service, in a few pages (Airedale & Wharfedale: 6). Each strip shows both ways: above the track the limits going left to right (▶), below it going right to left (◀), each with its own boards and signals. The first page has a map of the sections and which page each is on; a numbered circle on the track marks where another section joins or leaves. It leaves out what isn't a passenger line (depot moves, freight-only track, crossovers and other short bits), and where there's more than one track each way it shows the one most journeys use, so a service taking another platform road can meet a limit the map doesn't show. Your own stops aren't marked; the stop tracker (button 11) gives the next one in the game.
+
 1. Double-click **Route maps.bat**.
 2. Pick a **Route**, then a **Journey**. Journeys are grouped by where they start and stop; tick **Short moves** to list depot and other short moves too.
-3. Pick a **Service** if the journey has several, then click **MAKE MAP**.
+3. Pick a **Service** if the journey has several, then click **MAKE MAP**. Or click **WHOLE ROUTE** for the whole-route map (it takes a few seconds more).
 4. The map opens in your browser, ready to print.
 
 In a cab, click **Map the service I'm driving** to map the service you're on now. Maps are saved in the folder shown under **Save to** (at first `route_maps` in the project folder); **Change…** picks another and **Default** goes back. Maps made before are listed: double-click one to open it again.
@@ -208,6 +210,12 @@ From a text prompt, **Print a route map.bat** does the same, or:
 
 ```bash
 python tsw_routemap.py airedale 2S00
+```
+
+For the whole route:
+
+```bash
+python tsw_routemap.py airedale all
 ```
 
 The limits are those for passenger trains. A limit board marks where the front of the train meets the limit.

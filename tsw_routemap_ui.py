@@ -2,8 +2,9 @@
 Train Sim World 7 route maps - desktop window for tsw_routemap.py.
 
 Pick a route and a journey, or take the service you're driving in the game, and make a printable map of its speed
-limits, stations and signals. The map opens in your browser to print. Maps are saved in a folder you choose
-(route_maps next to this script to begin with), and the ones made before are listed to open again.
+limits, stations and signals; or map the whole route, every line its journeys use with the limits both ways. The
+map opens in your browser to print. Maps are saved in a folder you choose (route_maps next to this script to begin
+with), and the ones made before are listed to open again.
 
 Usage:
     pythonw tsw_routemap_ui.py           (or double-click "Route maps.bat")
@@ -113,8 +114,8 @@ class App:
                                    relief="flat", bd=0, cursor="hand2", font=(FONT, 10, "bold"), padx=14, pady=5,
                                    bg=TRACK, fg=FG, activebackground=SELECTED, activeforeground=FG)
         self.drive_btn.pack(side="right")
-        ttk.Label(outer, text="Printable maps of the speed limits along a service, from the game's own route files.",
-                  style="Sub.TLabel").pack(anchor="w", pady=(2, 10))
+        ttk.Label(outer, text="Printable maps of the speed limits along a service or a whole route, from the game's "
+                              "own route files.", style="Sub.TLabel").pack(anchor="w", pady=(2, 10))
 
         # route and journey side by side
         pick = ttk.Frame(outer)
@@ -158,6 +159,9 @@ class App:
         self.make_btn = tk.Button(act, text="MAKE MAP", command=self.on_make, relief="flat", bd=0, cursor="hand2",
                                   font=(FONT, 11, "bold"), padx=18, pady=5)
         self.make_btn.pack(side="left")
+        self.route_btn = tk.Button(act, text="WHOLE ROUTE", command=self.on_route_map, relief="flat", bd=0,
+                                   cursor="hand2", font=(FONT, 11, "bold"), padx=18, pady=5)
+        self.route_btn.pack(side="left", padx=(10, 0))
         self.status = ttk.Label(act, text="", style="Panel.TLabel")
         self.status.pack(side="left", padx=(14, 0))
         self.progress = ttk.Progressbar(act, mode="indeterminate", length=round(140 * self.k))
@@ -248,6 +252,10 @@ class App:
         self.make_btn.config(state="normal" if can_make else "disabled",
                              bg=GOOD if can_make else TRACK, fg="#0b1a12" if can_make else MUTED,
                              activebackground=GOOD, activeforeground="#0b1a12", disabledforeground=MUTED)
+        can_route = ready and self.route is not None
+        self.route_btn.config(state="normal" if can_route else "disabled", bg=SELECTED if can_route else TRACK,
+                              fg=FG if can_route else MUTED, activebackground=SELECTED, activeforeground=FG,
+                              disabledforeground=MUTED)
         self.drive_btn.config(state="normal" if ready else "disabled", disabledforeground=MUTED)
         if self.busy:
             self.progress.start(12)
@@ -356,6 +364,13 @@ class App:
         library = self.library
         self.run(lambda: routemap.make_map(library, route, timetable, service, also, say=self.say),
                  self._made, f"Making the map of {service.name}...")
+
+    def on_route_map(self):
+        route, library = self.route, self.library
+        if route is None or self.busy or not library:
+            return
+        self.run(lambda: routemap.make_route_map(library, route, say=self.say), self._made,
+                 f"Making the map of {library.names[route]}...")
 
     def _made(self, path):
         self.log(f"Made: {os.path.basename(path)}")
