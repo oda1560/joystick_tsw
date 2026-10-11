@@ -168,14 +168,16 @@ Go more than about 1 km/h over the limit and a panel shows the limit and your sp
 
 ### Passenger comfort
 
-The comfort panel warns when the ride gets rough for passengers. It judges the force passengers feel, corrected for the gradient.
+The comfort panel warns when the ride gets rough for passengers. It judges how hard the train speeds up and slows down. The slope itself isn't counted, so steep lines such as the Bernina don't set it off.
 
 | It says | When | What to do |
 | --- | --- | --- |
-| FIRM BRAKING / FIRM ACCELERATION (amber) | Over 0.9 m/s² | Ease off a step, or ease off the power |
-| HARSH BRAKING / HARSH ACCELERATION (red) | Over 1.2 m/s², with the number of passengers aboard | Ease off now |
+| FIRM BRAKING / FIRM ACCELERATION (amber) | Braking over 0.9 m/s², speeding up over 1.3 m/s² | Ease off a step, or ease off the power |
+| HARSH BRAKING / HARSH ACCELERATION (red) | Braking over 1.2 m/s², speeding up over 1.5 m/s², with the number of passengers aboard | Ease off now |
 | STOPPING IN n s · EASE OFF THE BRAKE | Braking over 0.6 m/s² and about to stop | Ease the brake off before the train stops |
 | SMOOTH STOP or JOLT ON STOPPING | For 6 s after stopping. A jolt is braking over 0.7 m/s² in the last 1 m/s | — |
+
+The limits come from real trains: a modern train's full service brake is 0.9 m/s² and its emergency brake about 1.2, and a Class 331 speeds up at 1.3 m/s² on full power. They're the same for every train.
 
 The ease-off warning comes early enough for you to react and for the brake to release. The bridge times how long each train's brake takes to ease off and uses that from then on; until it has, it allows 3 s.
 

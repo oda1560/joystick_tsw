@@ -7,14 +7,18 @@ What the game gives (seen on a Class 150, Cardiff valleys 1M56):
 - CurrentDrivableActor.Function.HUD_GetAcceleration: the change of speed in m/s², in the game's own time. Working
   it out from the speed by the wall clock doesn't do: the game moves on at most 50 ms a frame, so below 20 fps it
   runs slower than the wall clock (by up to 40% on that drive). TimeOfDay's clock is the game's time.
-- DriverAid.Data gradient: percent, negative downhill in the direction of travel. Along the car, passengers feel
-  the change of speed plus g x the gradient: coasting downhill they feel nothing.
 - PassengerCargoModel.Function.GetPassengerCount on each passenger car (a car with passenger doors).
 - HUD_GetTrainBrakeHandle {"HandlePosition": 0..1, "IsActive"} (steps of a third on the 150; on the Class 331's
   power / brake handle the brake side, smoothly) and HUD_GetPowerHandle {"Power", "IsNegative"} (notches on the
   150; on the 331 percent of the effort, negative while braking), for when the brake is eased. Both read
   IsActive false until the cab is in use.
 All of these but the passengers come in one request a game tick, by an API subscription.
+
+What's judged is how hard the train speeds up and slows down, not the slope: on a hill passengers lean a little all
+the time, which the driver can't help (the Bernina line's 7% would add 0.69 m/s² holding speed downhill). The limits
+come from real trains: a modern train's full service brake is 0.9 m/s² and its emergency brake about 1.2, and
+standing passengers start having to step at about 1.0; speeding up, a Class 331 does 1.3 on full power and up to
+about 1.5 is found acceptable.
 
 Stopping on full service, that train braked harder and harder as it slowed, 1.8 m/s² just before it stopped,
 then nothing within a second: the jolt. Easing the brake off in the last few seconds avoids it. How long before
@@ -47,7 +51,6 @@ import urllib.parse
 
 import tsw_joystick as core
 
-G = 9.81
 POLL_SECONDS = 1 / 15          # a poll this often at most (each waits for the game's next tick, 30-65 ms);
                                # each is a connection of its own, so not every tick
 SUBSCRIPTION = 31              # the API subscription number used here
@@ -64,10 +67,11 @@ REACTION = 1.0                 # s (wall clock) to see the warning and move the 
 DEFAULT_EASE = 3.0             # s (game) a brake takes to ease off, until measured on the train
 LEAD_MIN, LEAD_MAX = 2.0, 6.0  # s (game): the lead is reaction + ease, kept within these
 RESULT_SECONDS = 6.0           # how long how the stop went stays up
-HARSH = 1.2                    # m/s² felt, braking or speeding up, for HARSH_SECONDS: a harsh moment
-HARSH_OFF = 1.0                # ... over until below this
+# m/s² braking / speeding up, (over this, until below this): firm is the warning's amber; harsh its red, and a
+# harsh moment of the ride once it lasts HARSH_SECONDS
+LIMITS = {"brake": {"firm": (0.9, 0.8), "harsh": (1.2, 1.0)},
+          "power": {"firm": (1.3, 1.2), "harsh": (1.5, 1.3)}}
 HARSH_SECONDS = 1.0
-FIRM, FIRM_OFF = 0.9, 0.8      # m/s² felt: firm, the warning's amber
 HOLD_SECONDS = 1.0             # the firm / harsh warning stays this long after
 RATIO_SECONDS = 3.0            # game time against the wall clock over this long
 BRAKE_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "brake_ease.json")
@@ -75,7 +79,7 @@ BRAKE_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "brake_eas
 A = "CurrentDrivableActor."
 PATHS = {"speed": A + "Function.HUD_GetSpeed", "acc": A + "Function.HUD_GetAcceleration",
          "brake": A + "Function.HUD_GetTrainBrakeHandle", "power": A + "Function.HUD_GetPowerHandle",
-         "train": A + "ObjectClass", "aid": "DriverAid.Data", "clock": "TimeOfDay.Data"}
+         "train": A + "ObjectClass", "clock": "TimeOfDay.Data"}
 
 
 def _leg():
@@ -172,7 +176,7 @@ class Judge:
         self.moved = False            # faster than MOVING since the last stop
         self.approach = None          # hardest braking slower than LAST on the way into a stop
         self.braking = 0.0            # braking at the reading before
-        self.harsh_since = None       # when the felt force went over HARSH
+        self.harsh_since = None       # when braking or speeding up went over harsh
         self.harsh = None             # the harsh moment going on, once counted: [kind, worst]
         self.worst = 0.0
         self.learner = BrakeLearner()
@@ -191,18 +195,18 @@ class Judge:
         ease = self.ease if self.ease is not None else DEFAULT_EASE
         return min(max(REACTION * self.ratio + ease, LEAD_MIN), LEAD_MAX)
 
-    def feed(self, now, speed, acc, gradient, passengers, clock=None, brake=None, power=False):
+    def feed(self, now, speed, acc, passengers, clock=None, brake=None, power=False):
         """`now`: wall clock seconds; `speed`: m/s, signed; `acc`: the change of speed in m/s² (the game's sign);
-        `gradient`: percent; `passengers`: aboard (0 on an empty passenger train), None if not a passenger train or
-        not known; `clock`: game seconds; `brake`: the brake
-        handle, None if not known; `power`: under power. What happened, for the log: [("stop", jolt, braking),
-        ("harsh", kind, worst) once a harsh moment is over, ("ease", seconds) the brake was timed easing off]."""
+        `passengers`: aboard (0 on an empty passenger train), None if not a passenger train or not known; `clock`:
+        game seconds; `brake`: the brake handle, None if not known; `power`: under power. What happened, for the
+        log: [("stop", jolt, braking), ("harsh", kind, worst) once a harsh moment is over, ("ease", seconds) the
+        brake was timed easing off]."""
         self.accs.append(acc)
         acc = sorted(self.accs)[len(self.accs) // 2]     # the middle of the last three: a slow frame can read
         v = abs(speed)                                   # one far out (-1.09 between -0.76 and -0.70)
         along = acc if speed >= 0 else -acc       # speeding up: positive
         braking = -along
-        felt = along + G * gradient / 100
+        kind = "brake" if along < 0 else "power"
         judged = passengers is not None          # a passenger train
         said = []
         self._time(now, clock)
@@ -248,13 +252,14 @@ class Judge:
                 self.coach = None
             self.moved, self.approach = False, None
 
-        self._alert(now, v, felt, passengers)
-        if judged and v >= STOPPED and abs(felt) > (HARSH_OFF if self.harsh_since is not None else HARSH):
+        self._alert(now, v, along, kind, passengers)
+        harsh, harsh_off = LIMITS[kind]["harsh"]
+        if judged and v >= STOPPED and abs(along) > (harsh_off if self.harsh_since is not None else harsh):
             if self.harsh_since is None:
                 self.harsh_since, self.worst = now, 0.0
-            self.worst = max(self.worst, abs(felt))
+            self.worst = max(self.worst, abs(along))
             if self.harsh is None and now - self.harsh_since >= HARSH_SECONDS:
-                self.harsh = ["brake" if felt < 0 else "power", self.worst]
+                self.harsh = [kind, self.worst]
                 self.leg["harsh"].append(self.harsh)
             elif self.harsh is not None:
                 self.harsh[1] = self.worst
@@ -277,18 +282,19 @@ class Judge:
         if wall > 1.0 and game > 0:               # not while paused
             self.ratio = min(max(game / wall, 0.1), 1.0)
 
-    def _alert(self, now, v, felt, passengers):
+    def _alert(self, now, v, along, kind, passengers):
         """Firm (amber) or harsh (red), braking or speeding up, held for a moment after."""
-        size, was = abs(felt), self.alert["phase"] if self.alert else None
+        size = abs(along)
+        was = self.alert["phase"] if self.alert and self.alert["kind"] == kind else None
+        (firm, firm_off), (harsh, harsh_off) = LIMITS[kind]["firm"], LIMITS[kind]["harsh"]
         level = None
         if passengers is not None and v >= STOPPED:
-            if size > HARSH or (was == "harsh" and size > HARSH_OFF):
+            if size > harsh or (was == "harsh" and size > harsh_off):
                 level = "harsh"
-            elif size > FIRM or (was is not None and size > FIRM_OFF):
+            elif size > firm or (was is not None and size > firm_off):
                 level = "firm"
         if level:
-            self.alert = {"phase": level, "kind": "brake" if felt < 0 else "power", "felt": size,
-                          "passengers": passengers}
+            self.alert = {"phase": level, "kind": kind, "felt": size, "passengers": passengers}
             self.alert_until = now + HOLD_SECONDS
         elif self.alert and (now > self.alert_until or passengers is None or v < STOPPED):
             self.alert = None
@@ -473,7 +479,6 @@ class ComfortWatch(threading.Thread):
             self.train = train
             self.judge.ease = (self.eases.get(train) or {}).get("ease")
         clock = (got["clock"] or {}).get("LocalTime")
-        gradient = (got["aid"] or {}).get("gradient") or 0.0
         brake, power = got["brake"] or {}, got["power"] or {}
         demand = brake.get("HandlePosition") if brake.get("IsActive") else None
         if demand is None and power.get("IsActive"):
@@ -484,8 +489,7 @@ class ComfortWatch(threading.Thread):
         if self.cars is None or (abs(speed) < STOPPED and now - self.counted > COUNT_SECONDS):
             self._count()
         with self.lock:
-            said = self.judge.feed(now, speed, acc, gradient, self.passengers, clock / 1e7 if clock else None,
-                                   demand, power_on)
+            said = self.judge.feed(now, speed, acc, self.passengers, clock / 1e7 if clock else None, demand, power_on)
         for event in said:
             self._say(event)
 

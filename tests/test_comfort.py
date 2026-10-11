@@ -31,8 +31,8 @@ def replay(passengers=15):
     with open(DRIVE) as f:
         for r in csv.DictReader(f):
             t, v = float(r["t"]), float(r["speed"])
-            said += [(t, e) for e in judge.feed(t, v, float(r["acc"]), float(r["gradient"]), passengers, None,
-                                                float(r["brake"]), float(r["power"]) > 0)]
+            said += [(t, e) for e in judge.feed(t, v, float(r["acc"]), passengers, None, float(r["brake"]),
+                                                float(r["power"]) > 0)]
             p = judge.panel
             phase = p and p["phase"]
             if not panels or panels[-1][1] != phase:
@@ -100,7 +100,7 @@ def stop(decel_at, passengers=20, v=12.0, dt=0.07):
     while t < 60:
         d = decel_at(v) if v > 0.02 else 0.0
         v = max(0.0, v - d * dt) if v > 0.02 else 0.0
-        judge.feed(t, v, -d, 0.0, passengers)
+        judge.feed(t, v, -d, passengers)
         p = judge.panel
         key = p and (p["phase"], p.get("jolt"))
         if key and (not shown or shown[-1] != key):
@@ -129,7 +129,7 @@ class MadeUpStops(unittest.TestCase):
             v, t = 10.0, judge.coach_until + 10
             while v > 0:
                 v = max(0.0, v - decel * 0.07)
-                judge.feed(t, v, -decel if v else 0.0, 0.0, 30)
+                judge.feed(t, v, -decel if v else 0.0, 30)
                 t += 0.07
             judge.new_leg("2P27")
         self.assertEqual(judge.service_so_far("2P27"), {"rides": 3, "smooth": 2, "passengers": 30})
@@ -149,9 +149,41 @@ def brake_drive(steps, lag=0.4, tau=1.0, wall_dt=0.08, game_dt=0.05, power_at=No
         force += (target - force) * (1 - math.exp(-game_dt / tau))
         v = max(0.0, v - force * game_dt)
         power = power_at is not None and power_at <= t < power_at + 3
-        timed += [e[1] for e in judge.feed(wall, v, -force, 0.0, 30, 6e4 + t, demand, power) if e[0] == "ease"]
+        timed += [e[1] for e in judge.feed(wall, v, -force, 30, 6e4 + t, demand, power) if e[0] == "ease"]
         t, wall = t + game_dt, wall + wall_dt
     return timed, judge.ratio
+
+
+def start(acc, seconds=10.0, dt=0.07):
+    """Speeding up from a stand at `acc` m/s²: (panels shown in order, the judge)."""
+    judge, t, v, shown = tsw_comfort.Judge(), 0.0, 0.0, []
+    while t < seconds:
+        v += acc * dt
+        judge.feed(t, v, acc, 20)
+        p = judge.panel
+        key = p and (p["phase"], p["kind"])
+        if key and (not shown or shown[-1] != key):
+            shown.append(key)
+        t += dt
+    return shown, judge
+
+
+class Limits(unittest.TestCase):
+    def test_a_class_331_on_full_power_is_fine(self):
+        # the real Class 331 does 1.3 m/s² on full power
+        self.assertEqual(start(1.25)[0], [])
+
+    def test_speeding_up_firm_over_1_3(self):
+        self.assertEqual(start(1.4)[0], [("firm", "power")])
+
+    def test_speeding_up_harsh_over_1_5(self):
+        shown, judge = start(1.6)
+        self.assertEqual(shown, [("harsh", "power")])
+        self.assertEqual([k for k, _ in judge.report("X")["harsh"]], ["power"])
+
+    def test_braking_as_hard_is_firm(self):
+        self.assertEqual(stop(lambda v: 1.0)[0][0], ("firm", None))
+        self.assertEqual(start(1.0)[0], [])
 
 
 class BrakeTiming(unittest.TestCase):
@@ -243,14 +275,13 @@ class Feed(unittest.TestCase):
         FakeGame.values.clear()
         FakeGame.values.update({A + "Function.HUD_GetSpeed": {"Speed (ms)": 12.5},
                                 A + "Function.HUD_GetAcceleration": {"Acceleration (ms2)": -0.8},
-                                A + "ObjectClass": {"ObjectClass": "RVM_TFW_Class150_DMS_C"},
-                                "DriverAid.Data": {"gradient": -0.25}})
+                                A + "ObjectClass": {"ObjectClass": "RVM_TFW_Class150_DMS_C"}})
         self.feed = tsw_comfort.Feed(tsw_comfort.PATHS, address=self.address)
 
     def test_reads_all_in_one_request(self):
         got = self.feed.read("key")
         self.assertEqual(got["speed"], {"Speed (ms)": 12.5})
-        self.assertEqual(got["aid"]["gradient"], -0.25)
+        self.assertEqual(got["acc"], {"Acceleration (ms2)": -0.8})
         self.assertIsNone(got["clock"])                        # nothing there: None
         self.assertEqual(len(FakeGame.subs[tsw_comfort.SUBSCRIPTION]), len(tsw_comfort.PATHS))
 
