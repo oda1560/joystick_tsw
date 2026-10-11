@@ -230,5 +230,56 @@ class FirstPage(unittest.TestCase):
             self.assertIn(f">{name}<", svg)
 
 
+
+class Landmarks(unittest.TestCase):
+    def line(self):
+        """10 km of line east from (0, 0), run both ways, a station at its middle; and its sections."""
+        net = network(("s", "n1", "n2", (0.0, 0.0), (1.0, 0.0), 10000.0, None, 90))
+        net.ribbons["s"].platforms.append((0.5, 0.505, "Middle Platform 1"))
+        return net, route(net, [(0.0, "s", 0.0, 1.0)], [(0.0, "s", 1.0, 0.0)])
+
+    def test_a_named_tunnel_from_the_track(self):
+        net, sections = self.line()
+        net.markers.append(("Tunnel", "Long Tunnel 1", "s", 0.2, 0.25))
+        lm = rm.route_landmarks(net, (), sections)
+        self.assertEqual([(round(x2 - x1, -1), name) for _, x1, x2, name in lm["tunnels"]], [(510, "Long Tunnel")])
+
+    def test_two_tunnel_ends_are_one_tunnel_unless_a_station_is_between(self):
+        net, sections = self.line()
+        ends = [("tunnel", "BP_Tunnel_C", (x, 2.0), None, 0.0) for x in (1000.0, 2000.0, 4800.0, 5600.0)]
+        lm = rm.route_landmarks(net, ends, sections)
+        lengths = sorted(round(x2 - x1, -1) for _, x1, x2, _ in lm["tunnels"])
+        self.assertEqual(lengths, [20, 20, 1000])          # 4.8 and 5.6 km have the station between them
+
+    def test_scenery_off_the_line_is_left_out(self):
+        net, sections = self.line()
+        objects = [("crossing", "BP_Crossing_Gate_01_C", (3000.0, 5.0), None, 0.0),
+                   ("crossing", "BP_Crossing_Gate_01_C", (3030.0, -6.0), None, 0.0),
+                   ("over", "BP_RoadBridge_C", (7000.0, 400.0), None, 0.0)]
+        lm = rm.route_landmarks(net, objects, sections)
+        self.assertEqual(len(lm["crossings"]), 1)                              # the two gates: one crossing
+        self.assertAlmostEqual(lm["crossings"][0][1], 3005, delta=15)
+        self.assertEqual(lm["over"], [])
+
+    def test_the_sea_only_where_the_route_has_one(self):
+        ground = [(x, 0, x + 250, 250, -20.0, -5.0) for x in range(-1750, 0, 250)] +             [(0, 0, 250, 250, -20.0, -5.0), (250, 0, 500, 250, -3.0, 12.0), (500, 0, 750, 250, 4.0, 30.0),
+             (5000, 0, 5250, 250, -2.0, -1.0)]                 # the last a hollow inland
+        self.assertEqual(rm.sea_cells([], ground), {"sea": [], "coast": []})
+        planes = [("sea", "BP_SeaPlane_01_C", (0, 0), None, z) for z in (0.4, 0.5, 0.6, 17.0)]
+        sea = rm.sea_cells(planes, ground)                  # the level: 0.5, the one up a river left out
+        self.assertEqual(len(sea["sea"]), 8)
+        self.assertNotIn((5000, 0, 5250, 250), sea["sea"])
+        self.assertEqual(sea["coast"], [(250, 0, 500, 250)])
+        self.assertEqual(rm.sea_cells(planes[:2], ground)["sea"], [])     # too few to tell
+
+    def test_road_bridges_close_together_are_left_out(self):
+        net, sections = self.line()
+        objects = [("over", "BP_RoadBridge_C", (x, 0.0), None, 0.0) for x in (2000.0, 2060.0, 8000.0)]
+        lm = rm.route_landmarks(net, objects, sections)
+        units = rm.Units(True)
+        svg, _, _ = rm.route_overview(sections, units, 60, (), rm.route_stations(sections), lm)
+        self.assertEqual(svg.count('class="roadover"'), 1)                 # 60 m apart: neither on the map
+
+
 if __name__ == "__main__":
     unittest.main()

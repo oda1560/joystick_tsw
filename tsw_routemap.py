@@ -11,7 +11,8 @@ A map of the whole route instead puts every line its passenger journeys use on a
 on each: the longest stretch of a journey not yet drawn becomes a section, the track alongside it (the other line,
 or the same track the other way) going with it, and so on until what's left is short. Its first page maps them
 with a board at each place to slow down and every station named, crowded places drawn again larger where the page
-is empty, so it can be printed on its own.
+is empty, so it can be printed on its own; and landmarks from the route's scenery: tunnels, viaducts, roads over the
+line, level crossings, rivers, canals and the sea (where the landscape is below its level).
 
     python tsw_routemap.py                    choose a route and a service
     python tsw_routemap.py airedale           list a route's services
@@ -76,6 +77,7 @@ class TrackNetwork:
         self.at_node = collections.defaultdict(list)
         self.allowed = {}                           # junction node -> {(ribbon, ribbon)} a train can pass between
         self._around = {}                           # ribbon -> ribbons up to two away (leads_on)
+        self.markers = []                           # [(type, name, ribbon, from, to)] other than platforms
         rules = {}
         for path in tiles:
             self._read_tile(files, path, rules)
@@ -193,9 +195,12 @@ class TrackNetwork:
         for j in kids.values():
             if pkg.class_name(j) == "TrackMarkerProperty":
                 q = pkg.properties(j)
+                name = str(q.get("DisplayName") or q.get("MarkerName") or "")
                 if str(q.get("MarkerType", "")).endswith("Platform"):
-                    r.platforms.append((q.get("Start", 0.0), q.get("End", 1.0),
-                                        str(q.get("DisplayName") or q.get("MarkerName") or "")))
+                    r.platforms.append((q.get("Start", 0.0), q.get("End", 1.0), name))
+                else:
+                    self.markers.append((str(q.get("MarkerType", "")).split("::")[-1], name, p.get("RibbonGuid"),
+                                         q.get("Start", 0.0), q.get("End", 1.0)))
         self.ribbons[p.get("RibbonGuid")] = r
 
     @staticmethod
@@ -549,12 +554,13 @@ def esc(text):
     return html.escape(str(text), quote=True)
 
 
-def legend(units, extra):
-    """The colour key, the swatches drawn as lines: a browser leaves background colours out of a print."""
+def legend(units, extra, more=""):
+    """The colour key, the swatches drawn as lines: a browser leaves background colours out of a print. `more`:
+    other swatches after it."""
     swatches = "".join(f'<span><svg class="swatch" viewBox="0 0 24 6" preserveAspectRatio="none"><line x1="0" x2="24" '
                        f'y1="3" y2="3" stroke="{c}" stroke-width="6"/></svg>{esc(label)}</span>'
                        for _, c, label in units.bands)
-    return f'<div class="legend">{swatches}<span>{esc(extra)}</span></div>'
+    return f'<div class="legend">{swatches}<span>{esc(extra)}</span>{more}</div>'
 
 
 def text_width(text, size):
@@ -1548,6 +1554,18 @@ table.index td.sec { font-weight: 700; width: 9mm; }
 .mapboardtext { font-size: 11px; font-weight: 800; fill: #111; }
 .linespeed { font-size: 10px; font-weight: 600; font-style: italic; fill: #5F5E5A; }
 .nameleader { stroke: #777; stroke-width: 0.7; }
+.water { fill: none; stroke: #9cc7e6; stroke-width: 2.4; stroke-linejoin: round; }
+.sea { fill: #cfe3f3; }
+.coast { fill: #e3eef8; }
+.tunnelcase { fill: none; stroke: #111; stroke-width: 7.5; stroke-linejoin: round; }
+.tunneldash { fill: none; stroke: #fff; stroke-width: 1.6; stroke-dasharray: 3 2.5; stroke-linejoin: round; }
+.viaduct { fill: none; stroke: #111; stroke-width: 1.2; stroke-linejoin: round; }
+.roadover { stroke: #333; stroke-width: 1.6; }
+.crossing { fill: none; stroke: #111; stroke-width: 1.8; }
+.landmarkname { font-size: 9px; font-style: italic; fill: #333; }
+.place { fill: #fff; stroke: #666; stroke-width: 1; }
+.placename { font-size: 8.5px; fill: #555; }
+.swatch.tall { height: 2.4mm; }
 .frame { fill: none; stroke: #111; stroke-width: 1; stroke-dasharray: 4 2.5; }
 .insetbox { fill: #fff; stroke: #333; stroke-width: 1.1; }
 .insettag { fill: #111; }
@@ -1573,6 +1591,321 @@ INSET_LAST = 1.5            # the zoom of an inset with no room at the smallest 
 INSET_TITLE = 16.0          # map units: an inset's title bar
 INSET_NARROWEST = 130.0     # map units: an inset's width at least, for its scale bar
 BOARD_REACH = (16, 24, 34, 46, 60, 76, 95)      # map units: how far from its stretch a board is tried
+
+
+# ---------------------------------------------------------------- landmarks
+# Scenery the route's makers built, by what its blueprint is called: (kind, matching, not matching). The names
+# differ from route to route (BP_Crossing_Gate_01, BP_LevelCrossingOld_01, BP_SignalActivatedLevelCrossingLink).
+LANDMARK_KINDS = (
+    ("crossing", r"LevelCrossing|Crossing_?Gate", r"Sign|Floor|Filler|Pedestrian"),
+    ("tunnel", r"Tunnel", r"Wall|Pillar|Block|Light|Seam|Poly|ViewBlocker|Retaining|Hanger|Wire"),
+    ("viaduct", r"Viaduct|BridgeRail|Train_?Bridge|RailBridge|BridgeArched_\dT", r"Support|Pillar|Cover|Siding"),
+    ("over", r"OcclusionUnderBridge|Road_?Bridge|BridgeRoad|Overbridge(?!Support)", r"Support|Pillar|Wall|Rail"),
+    ("water", r"RiverSpline|CanalSpline|WaterRiver|LargeRiver|^BP_River_C$", r"Bed|Reaction"),
+    ("sea", r"SeaPlane|Ocean|^BP_WaterPlane", r"Wall|River|Lake"),
+)
+LANDMARK_WORDS = (b"Tunnel", b"Viaduct", b"Bridge", b"Crossing", b"River", b"Canal", b"SeaPlane", b"Ocean",
+                  b"WaterPlane")
+LANDMARK_DENSE = 9.0        # map units (2.5 mm): road bridges and level crossings closer than this are left out
+SEA_JOINED = 6               # landscape pieces: fewer under the sea's level together than this are a hollow
+PORTALS_APART = (80.0, 2500.0)  # metres: two tunnel ends this far apart, nothing between, are one tunnel
+
+
+def landmark_kind(cls):
+    for kind, yes, no in LANDMARK_KINDS:
+        if re.search(yes, cls, re.I) and not re.search(no, cls, re.I):
+            return kind
+    return None
+
+
+LANDMARK_SWATCHES = (
+    ("tunnels", "tunnel", '<line x1="0" x2="24" y1="5" y2="5" stroke="#111" stroke-width="7.5"/><line x1="0" x2="24" '
+                          'y1="5" y2="5" stroke="#fff" stroke-width="1.6" stroke-dasharray="3 2.5"/>'),
+    ("viaducts", "viaduct, rail bridge", '<line x1="0" x2="24" y1="1.5" y2="1.5" stroke="#111" stroke-width="1.2"/>'
+                                         '<line x1="0" x2="24" y1="8.5" y2="8.5" stroke="#111" stroke-width="1.2"/>'
+                                         '<line x1="0" x2="24" y1="5" y2="5" stroke="#5F5E5A" stroke-width="3"/>'),
+    ("over", "road over", '<line x1="0" x2="24" y1="5" y2="5" stroke="#5F5E5A" stroke-width="3"/><line x1="12" '
+                          'x2="12" y1="0" y2="10" stroke="#333" stroke-width="1.6"/>'),
+    ("crossings", "level crossing", '<line x1="0" x2="24" y1="5" y2="5" stroke="#5F5E5A" stroke-width="3"/><path '
+                                    'd="M8.4,1.4 L15.6,8.6 M8.4,8.6 L15.6,1.4" stroke="#111" stroke-width="1.8"/>'),
+    ("water", "river, canal", '<line x1="0" x2="24" y1="5" y2="5" stroke="#9cc7e6" stroke-width="2.4"/>'),
+    ("sea", "sea", '<rect x="0" y="1" width="24" height="8" fill="#cfe3f3"/>'),
+)
+
+
+def landmark_legend(landmarks):
+    """The key's swatches for the landmarks a route has."""
+    return "".join(f'<span><svg class="swatch tall" viewBox="0 0 24 10">{svg}</svg>{esc(label)}</span>'
+                   for kind, label, svg in LANDMARK_SWATCHES if (landmarks or {}).get(kind))
+
+
+def tile_origin(path):
+    """Where a 1 km map tile 'ST_x-77_y-258' is, in metres: what's in it is placed from there."""
+    m = re.search(r"_x(-?\d+)_y(-?\d+)$", path)
+    return int(m.group(1)) * 1000.0, int(m.group(2)) * 1000.0
+
+
+@functools.lru_cache(maxsize=4)
+def scenery(files, level):
+    """The route's landmarks among its scenery: [(kind, blueprint, (x, y), [points of its spline] or None, half its
+    length along the line or 0)], in metres like the track. Reading every scenery tile takes a while."""
+    path = files.file_of(level)
+    if not path:
+        return ()
+    folder = path.rsplit("/", 1)[0] + "/"
+    out = []
+    for f in sorted(files.where):
+        if not (f.startswith(folder) and f.endswith(".umap") and re.search(r"/(ST|TS)_x-?\d+_y-?\d+\.umap$", f)):
+            continue
+        tile = f[:-len(".umap")]
+        head = files.where[f].read(f)
+        if not any(word in head for word in LANDMARK_WORDS):
+            continue
+        pkg = tsw_paks.Package("/" + tile, head, files.where[tile + ".uexp"].read(tile + ".uexp"))
+        kids = collections.defaultdict(list)
+        for i, e in enumerate(pkg.exports, 1):
+            kids[e["outer"]].append(i)
+        ox, oy = tile_origin(tile)
+        for i in range(1, len(pkg.exports) + 1):
+            cls = pkg.class_name(i).split(".")[-1]
+            kind = None if cls.startswith("Default__") or cls.endswith("Component") else landmark_kind(cls)
+            if not kind:
+                continue
+            root = getattr(pkg.properties(i).get("RootComponent"), "name", None)
+            rp = next((pkg.properties(j) for j in kids[i] if pkg.exports[j - 1]["name"] == root), None)
+            if not rp or not rp.get("RelativeLocation"):
+                continue
+            lx, ly, lz = rp["RelativeLocation"][:3]
+            if kind == "sea":                       # its height: the sea's level
+                out.append((kind, cls, (ox + lx / 100, oy + ly / 100), None, lz / 100))
+                continue
+            yaw = math.radians((rp.get("RelativeRotation") or [0, 0, 0])[1])
+            sx, sy = (rp.get("RelativeScale3D") or [1, 1, 1])[:2]
+            at = (ox + lx / 100, oy + ly / 100)
+
+            def world(px, py):
+                px, py = px * sx, py * sy
+                return (at[0] + (px * math.cos(yaw) - py * math.sin(yaw)) / 100,
+                        at[1] + (px * math.sin(yaw) + py * math.cos(yaw)) / 100)
+            spline, half = None, 0.0
+            for j in kids[i]:
+                c = pkg.class_name(j)
+                if c.endswith("SplineComponent"):
+                    points = ((pkg.properties(j).get("SplineCurves") or {}).get("Position") or {}).get("Points") or []
+                    if len(points) >= 2:
+                        spline = tuple(world(*p["OutVal"][:2]) for p in points)
+                elif c == "BoxComponent":
+                    extent = pkg.properties(j).get("BoxExtent")
+                    if extent:
+                        half = max(abs(extent[0] * sx), abs(extent[1] * sy)) / 100
+            if kind == "water" and not spline:
+                continue
+            out.append((kind, cls, at, spline, half))
+    return tuple(out)
+
+
+@functools.lru_cache(maxsize=4)
+def landscape(files, level):
+    """[(x0, y0, x1, y1, lowest, highest)] in metres of every piece of a route's landscape (about 250 m square),
+    from the heights each keeps of itself (CachedLocalBox): enough to find the sea without the height maps."""
+    path = files.file_of(level)
+    if not path:
+        return ()
+    folder = path.rsplit("/", 1)[0] + "/"
+    out = []
+    for f in sorted(files.where):
+        if not (f.startswith(folder) and re.search(r"/LT_x-?\d+_y-?\d+\.umap$", f)):
+            continue
+        tile = f[:-len(".umap")]
+        pkg = tsw_paks.Package("/" + tile, files.where[f].read(f), files.where[tile + ".uexp"].read(tile + ".uexp"))
+        ox, oy = tile_origin(tile)
+        proxy = None
+        for i in range(1, len(pkg.exports) + 1):
+            if pkg.class_name(i) in ("LandscapeStreamingProxy", "Landscape", "LandscapeProxy"):
+                root = getattr(pkg.properties(i).get("RootComponent"), "name", None)
+                proxy = next((pkg.properties(j) for j, e in enumerate(pkg.exports, 1)
+                              if e["name"] == root and e["outer"] == i), None)
+        if not proxy:
+            continue
+        px, py, pz = proxy.get("RelativeLocation") or [0, 0, 0]
+        sx, sy, sz = proxy.get("RelativeScale3D") or [100, 100, 100]
+        for i in range(1, len(pkg.exports) + 1):
+            if pkg.class_name(i) != "LandscapeComponent":
+                continue
+            c = pkg.properties(i)
+            box = c.get("CachedLocalBox")
+            if not box:
+                continue
+            (bx0, by0, bz0), (bx1, by1, bz1) = box[0][:3], box[1][:3]
+            rx, ry = (c.get("RelativeLocation") or [0, 0, 0])[:2]
+            out.append((ox + (px + (rx + bx0) * sx) / 100, oy + (py + (ry + by0) * sy) / 100,
+                        ox + (px + (rx + bx1) * sx) / 100, oy + (py + (ry + by1) * sy) / 100,
+                        (pz + bz0 * sz) / 100, (pz + bz1 * sz) / 100))
+    return tuple(out)
+
+
+def sea_cells(objects, ground):
+    """{'sea': [(x0, y0, x1, y1)] the landscape's pieces wholly under the sea, 'coast': those it comes up on}. The
+    sea's level: where three or more of its blueprints (`objects`; sea or plain water planes, not rivers' or lakes')
+    lie within 3 m of 0 (the routes' heights are above sea level), their middle one. Nothing on a route without
+    them, so low land away from the sea (a polder) isn't taken for it."""
+    levels = sorted(half for kind, _, _, _, half in objects if kind == "sea" and abs(half) < 3)
+    if len(levels) < 3:
+        return {"sea": [], "coast": []}
+    level = levels[len(levels) // 2]
+    wet = {c[:4]: c[5] < level for c in ground if c[4] < level}
+    # a hollow inland isn't the sea: only pieces joined to SEA_JOINED or more others
+    size = {c: max(abs(c[2] - c[0]), 1.0) for c in wet}
+    key = {c: (round(c[0] / size[c]), round(c[1] / size[c])) for c in wet}
+    at = {k: c for c, k in key.items()}
+    keep, seen = set(), set()
+    for c in wet:
+        if c in seen:
+            continue
+        group, todo = [], [c]
+        seen.add(c)
+        while todo:
+            d = todo.pop()
+            group.append(d)
+            kx, ky = key[d]
+            for n in ((kx + 1, ky), (kx - 1, ky), (kx, ky + 1), (kx, ky - 1)):
+                e = at.get(n)
+                if e is not None and e not in seen:
+                    seen.add(e)
+                    todo.append(e)
+        if len(group) > SEA_JOINED:
+            keep.update(group)
+    return {"sea": [c for c in wet if c in keep and wet[c]], "coast": [c for c in wet if c in keep and not wet[c]]}
+
+
+class RouteIndex:
+    """Points every 10 m along the sections, found by place: where on the route (section, x) something is."""
+    CELL = 50.0
+
+    def __init__(self, sections):
+        self.cells = collections.defaultdict(list)
+        for s in sections:
+            for k in range(int(s.length // 10) + 1):
+                x = min(k * 10.0, s.length)
+                p = s.place(x)
+                self.cells[(int(p[0] // self.CELL), int(p[1] // self.CELL))].append((p, s, x))
+
+    def nearest(self, p, within):
+        """(section, x) of the route nearest p, if it's `within` metres."""
+        best, reach = None, math.ceil(within / self.CELL)
+        cx, cy = int(p[0] // self.CELL), int(p[1] // self.CELL)
+        for i in range(cx - reach, cx + reach + 1):
+            for j in range(cy - reach, cy + reach + 1):
+                for q, s, x in self.cells.get((i, j), ()):
+                    d = math.dist(p, q)
+                    if d <= within and (best is None or d < best[0]):
+                        best = (d, s, x)
+        return best and best[1:]
+
+
+def densify(points, step=10.0):
+    out = []
+    for a, b in zip(points, points[1:]):
+        n = max(1, int(math.dist(a, b) // step))
+        out += [(a[0] + (b[0] - a[0]) * k / n, a[1] + (b[1] - a[1]) * k / n) for k in range(n)]
+    return out + list(points[-1:])
+
+
+def runs(found, gap):
+    """[(section, x1, x2)] of the places [(section, x)] on one section closer than `gap` metres in a row."""
+    by = collections.defaultdict(list)
+    for s, x in found:
+        by[s.number].append((x, s))
+    out = []
+    for xs in by.values():
+        xs.sort(key=lambda t: t[0])
+        start = last = xs[0]
+        for x, s in xs[1:] + [(math.inf, None)]:
+            if x - last[0] > gap:
+                out.append((start[1], start[0], last[0]))
+                start = (x, s)
+            last = (x, s)
+    return out
+
+
+def route_landmarks(network, objects, sections, sea=None):
+    """What the first page shows besides the line: {'tunnels': [(section, x1, x2, name or None)], 'viaducts': ...,
+    'over': [(section, x)] road bridges, 'crossings': [(section, x)] level crossings, 'water': [[(x, y)]] rivers and
+    canals, 'places': [((x, y), name)] junctions and depots}, from the track's markers (named tunnels, viaducts,
+    junctions, depots) and the `objects` of its scenery."""
+    index = RouteIndex(sections)
+    out = {"tunnels": [], "viaducts": [], "over": [], "crossings": [], "water": [], "places": [],
+           "sea": list((sea or {}).get("sea", ())), "coast": list((sea or {}).get("coast", ()))}
+    named = collections.defaultdict(list)
+    places = collections.defaultdict(list)
+    for kind, name, guid, a, b in network.markers:
+        if guid not in network.ribbons:
+            continue
+        n = max(4, int(abs(b - a) * network.ribbons[guid].length // 20))     # every 20 m along it
+        points = [network.position(guid, a + (b - a) * k / n) for k in range(n + 1)]
+        what = "tunnels" if kind == "Tunnel" or re.search(r"tunnel", name, re.I) else \
+            "viaducts" if re.search(r"viadu|bridge|brücke|bruecke", name, re.I) else None
+        if what:
+            base = re.sub(r"\s+(\d+|I+V?|Up|Down|Gleis \d+)$", "", name.strip())
+            named[(what, base)] += [f for f in (index.nearest(p, 15) for p in points) if f]
+            continue
+        m = re.match(r"^(.*?\b(Junction|Jn|Depot|Yard|Works|BW|Bahnbetriebswerk))\b", name)
+        if m:
+            places[m.group(1)].append(points[len(points) // 2])
+    for (what, base), found in named.items():
+        out[what] += [(s, x1 - 5, x2 + 5, base) for s, x1, x2 in runs(found, 120)]
+    out["places"] = [((sum(p[0] for p in pts) / len(pts), sum(p[1] for p in pts) / len(pts)), name)
+                     for name, pts in places.items()]
+    found = collections.defaultdict(list)
+    for kind, cls, at, spline, half in objects:
+        if kind == "sea":
+            continue
+        if kind == "water":
+            out["water"].append(densify(spline, 25))
+        elif kind in ("tunnel", "viaduct"):
+            on = [f for f in (index.nearest(p, 12) for p in (densify(spline, 8) if spline else [at])) if f]
+            if half and not spline and on:          # a box along the line
+                s, x = on[0]
+                on = [(s, max(x - half, 0)), (s, min(x + half, s.length))]
+            found[kind] += on
+        else:
+            f = index.nearest(at, 25 if kind == "crossing" else 18)
+            if f:
+                found[kind].append(f)
+    crossings = runs(found["crossing"], 60)
+    # a tunnel's two ends, with no station or level crossing between them, are one tunnel
+    ends = sorted(runs(found["tunnel"], 60), key=lambda r: (r[0].number, r[1]))
+    tunnels, k = [], 0
+    while k < len(ends):
+        s, a1, a2 = ends[k]
+        if k + 1 < len(ends):
+            t, b1, b2 = ends[k + 1]
+            between = [st for st in s.stations if st[0] < b1 and st[1] > a2] + \
+                [c for c in crossings if c[0] is s and a2 < c[1] < b1]
+            if t is s and PORTALS_APART[0] <= b1 - a2 <= PORTALS_APART[1] and not between:
+                tunnels.append((s, a1, b2))
+                k += 2
+                continue
+        tunnels.append((s, a1, a2))
+        k += 1
+    for what, found_runs in (("tunnels", tunnels), ("viaducts", runs(found["viaduct"], 30))):
+        for s, x1, x2 in found_runs:
+            if x2 - x1 < 15:
+                x1, x2 = x1 - 12, x2 + 12
+            out[what].append((s, max(x1, 0), min(x2, s.length), None))
+        merged = []                                 # those overlapping or nearly meeting: one, keeping a name
+        for s, x1, x2, name in sorted(out[what], key=lambda r: (r[0].number, r[1])):
+            if merged and merged[-1][0] is s and x1 <= merged[-1][2] + 25:
+                m = merged[-1]
+                merged[-1] = (s, m[1], max(m[2], x2), m[3] or name)
+            else:
+                merged.append((s, x1, x2, name))
+        out[what] = merged
+    for s, x1, x2 in runs(found["over"], 15):
+        if not any(t is s and a - 5 < x1 and x2 < b + 5 for t, a, b, _ in out["tunnels"]):
+            out["over"].append((s, (x1 + x2) / 2))
+    out["crossings"] = [(s, (x1 + x2) / 2) for s, x1, x2 in crossings]
+    return out
 
 
 def crossing(a, b, c, d):
@@ -1684,9 +2017,10 @@ class MapView:
     """The route drawn onto a rectangle of the first page's map at one scale, things placed where they don't
     overlap. World (x, y) -> map (x, y) by `at`. `strict`: a name needing a leader counts as finding no room."""
 
-    def __init__(self, scale, ox, oy, x0, y0, rect, strict=False):
+    def __init__(self, scale, ox, oy, x0, y0, rect, strict=False, landmarks=None):
         self.scale, self.ox, self.oy, self.x0, self.y0, self.rect = scale, ox, oy, x0, y0, rect
         self.strict = strict
+        self.landmarks = landmarks or {}            # route_landmarks
         self.taken = Boxes()            # nothing else may go here
         self.solid = Boxes()            # names, boards, dots and circles: no leader runs through these
         self.leaders, self.drawn, self.o = [], [], []
@@ -1716,6 +2050,84 @@ class MapView:
             self.solid.add(box)
 
     def lines(self, sections, units, clip=None):
+        """The line and its landmarks: the sea and rivers and canals under it, tunnels as a dark casing with white dashes,
+        viaducts and rail bridges as a line each side, road bridges as a bar across and level crossings as a cross
+        (those two left out where they're closer than LANDMARK_DENSE to another)."""
+        lm, o = self.landmarks, self.o
+        for kind in ("sea", "coast"):
+            for x0, y0, x1, y1 in lm.get(kind, ()):
+                (a0, b0), (a1, b1) = self.at(x0, y0), self.at(x1, y1)
+                if self.inside(((a0 + a1) / 2, (b0 + b1) / 2), abs(a1 - a0) + 2):
+                    o.append(f'<rect x="{min(a0, a1) - 0.3:.1f}" y="{min(b0, b1) - 0.3:.1f}" '
+                             f'width="{abs(a1 - a0) + 0.6:.1f}" height="{abs(b1 - b0) + 0.6:.1f}" class="{kind}"/>')
+        for line in lm.get("water", ()):
+            points = [self.at(*p) for p in line]
+            if any(self.inside(q, 30) for q in points):
+                o.append(f'<polyline points="{" ".join(f"{a:.1f},{b:.1f}" for a, b in points)}" class="water"/>')
+        tunnels = [self.stretch(s, x1, x2) for s, x1, x2, _ in lm.get("tunnels", ())]
+        tunnels = [pts for pts in tunnels if pts]
+        for points in tunnels:
+            o.append(f'<polyline points="{" ".join(f"{a:.1f},{b:.1f}" for a, b in points)}" class="tunnelcase"/>')
+        self.route_lines(sections, units, clip)
+        for points in tunnels:
+            o.append(f'<polyline points="{" ".join(f"{a:.1f},{b:.1f}" for a, b in points)}" class="tunneldash"/>')
+        for s, x1, x2, _ in lm.get("viaducts", ()):
+            points = self.stretch(s, x1, x2)
+            for side in (1, -1) if points else ():
+                beside = []
+                for k, q in enumerate(points):
+                    a, b = points[max(k - 1, 0)], points[min(k + 1, len(points) - 1)]
+                    d = max(math.dist(a, b), 0.01)
+                    beside.append((q[0] - side * 4.6 * (b[1] - a[1]) / d, q[1] + side * 4.6 * (b[0] - a[0]) / d))
+                o.append(f'<polyline points="{" ".join(f"{a:.1f},{b:.1f}" for a, b in beside)}" class="viaduct"/>')
+        marks = [(self.at(*s.place(x)), s, x, kind) for kind in ("over", "crossings") for s, x in lm.get(kind, ())]
+        marks = [m for m in marks if self.inside(m[0])]
+        for q, s, x, kind in marks:
+            if any(r is not q and math.dist(q, r) < LANDMARK_DENSE for r, *_ in marks):
+                continue
+            if kind == "over":
+                hx, hy = self.heading(s, x)
+                o.append(f'<line x1="{q[0] - hy * 5.5:.1f}" y1="{q[1] + hx * 5.5:.1f}" x2="{q[0] + hy * 5.5:.1f}" '
+                         f'y2="{q[1] - hx * 5.5:.1f}" class="roadover"/>')
+            else:
+                o.append(f'<path d="M{q[0] - 3.6:.1f},{q[1] - 3.6:.1f} L{q[0] + 3.6:.1f},{q[1] + 3.6:.1f} '
+                         f'M{q[0] - 3.6:.1f},{q[1] + 3.6:.1f} L{q[0] + 3.6:.1f},{q[1] - 3.6:.1f}" class="crossing"/>')
+
+    def stretch(self, s, x1, x2):
+        """Map points every 5 m along a stretch of a section, or [] if it's under 5 map units or not here."""
+        if (x2 - x1) * self.scale < 5:
+            return []
+        n = max(2, int((x2 - x1) // 5) + 1)
+        points = [self.at(*s.place(x1 + (x2 - x1) * k / (n - 1))) for k in range(n)]
+        return points if any(self.inside(q, 10) for q in points) else []
+
+    def landmark_names(self):
+        """The names of tunnels and viaducts, and of junctions and depots, where there's room beside them."""
+        lm = self.landmarks
+        for s, x1, x2, name in lm.get("tunnels", []) + lm.get("viaducts", []):
+            ax, ay = self.at(*s.place((x1 + x2) / 2))
+            if not name or not self.inside((ax, ay)) or (x2 - x1) * self.scale < 5:
+                continue
+            found = self.around(ax, ay, text_width(name, 9) + 2, 10.0, (10, 15, 21, 28),
+                                self.heading(s, (x1 + x2) / 2), ring=8, leader=0)
+            if found:
+                box = found[0]
+                self.take(box)
+                self.o.append(f'<text x="{(box[0] + box[2]) / 2:.1f}" y="{box[3] - 2:.1f}" text-anchor="middle" '
+                              f'class="landmarkname">{esc(name)}</text>')
+        for p, name in lm.get("places", ()):
+            q = self.at(*p)
+            if not self.inside(q):
+                continue
+            found = self.around(q[0], q[1], text_width(name, 8.5) + 2, 10.0, (8, 13, 19), ring=8, leader=0)
+            if found:
+                box = found[0]
+                self.take(box, solid=False)
+                self.o.append(f'<rect x="{q[0] - 2:.1f}" y="{q[1] - 2:.1f}" width="4" height="4" class="place"/>'
+                              f'<text x="{(box[0] + box[2]) / 2:.1f}" y="{box[3] - 2:.1f}" text-anchor="middle" '
+                              f'class="placename">{esc(name)}</text>')
+
+    def route_lines(self, sections, units, clip=None):
         """The sections coloured by the lower limit of the two ways, through their points and every place the
         limit changes (so a short stretch shows its colour); the line taken every 3 units."""
         if clip:
@@ -2064,7 +2476,7 @@ def close_together(things, boxes):
     return [b for n, b in sorted(found, key=lambda nb: -nb[0] / max((nb[1][2] - nb[1][0]) * (nb[1][3] - nb[1][1]), 1))]
 
 
-def route_overview(sections, units, key_height, spots=(), stations=()):
+def route_overview(sections, units, key_height, spots=(), stations=(), landmarks=None):
     """The first page's map: the sections filling the page, coloured by the lower limit of the two ways, with the
     long sections' numbers, every one of the `stations` (route_stations) named, a board at each of the `spots`
     (slow_spots) and the limit along long stretches; as large as it can be with a corner left empty for the key
@@ -2078,7 +2490,7 @@ def route_overview(sections, units, key_height, spots=(), stations=()):
     def anchor(view, spot):
         return view.at(*spot.section.place((spot.x1 + spot.x2) / 2))
     # a trial drawing finds the crowded places
-    trial = MapView(scale, ox, oy, x0, y0, page, strict=True)
+    trial = MapView(scale, ox, oy, x0, y0, page, strict=True, landmarks=landmarks)
     trial.lines(sections, units)
     trial.take(key_box)
     trial.section_numbers(sections, units)
@@ -2092,7 +2504,7 @@ def route_overview(sections, units, key_height, spots=(), stations=()):
 
         def boxed(p):
             return any(within(b, p) for b in boxes)
-        main = MapView(scale, ox, oy, x0, y0, page)
+        main = MapView(scale, ox, oy, x0, y0, page, landmarks=landmarks)
         main.lines(sections, units)
         main.take(key_box)
         numbers = main.section_numbers(sections, units)
@@ -2111,7 +2523,8 @@ def route_overview(sections, units, key_height, spots=(), stations=()):
     defs, insets, framed, shown = [], [], [], []
     for b in boxes:
         letter = chr(ord("A") + len(framed))
-        made = inset(sections, units, spots, stations, main, b, empty, letter) if len(framed) < INSETS else None
+        made = inset(sections, units, spots, stations, main, b, empty, letter, landmarks) \
+            if len(framed) < INSETS else None
         if made is None:                    # no room for it: its names and boards go on the map after all
             main.taken.remove(tuple(b))
             main.names([(n, q) for n, q in placed if within(b, q)])
@@ -2137,12 +2550,13 @@ def route_overview(sections, units, key_height, spots=(), stations=()):
                       f'<text x="{tx + 6.5:.1f}" y="{ty + 10:.1f}" text-anchor="middle" class="insettagtext small">'
                       f'{letter}</text>')
     main.line_speeds(sections, units, skip=shown)
+    main.landmark_names()
     main.draw_numbers([n for n in numbers if not any(within(f, n[0]) for f in framed)])
     return (f'<svg viewBox="0 0 {MAP_W:.0f} {MAP_H:.1f}" class="overview full"><defs>{"".join(defs)}</defs>'
             f'{"".join(main.o)}{"".join(insets)}</svg>', corner, scale)
 
 
-def inset(sections, units, spots, stations, main, box, empty, letter):
+def inset(sections, units, spots, stations, main, box, empty, letter, landmarks=None):
     """The box (map units) of the main map drawn larger where the map is empty (`empty`): the smallest of
     INSET_ZOOMS everything fits at, cut down to what's in it. Returns (its frame on the main map, its clip path,
     its svg, its outline) or None if there's no room for it."""
@@ -2157,6 +2571,7 @@ def inset(sections, units, spots, stations, main, box, empty, letter):
         view.names(view.dots(stations))
         view.boards(spots, units)
         view.line_speeds(sections, units)
+        view.landmark_names()
         return view
     best = None
     for zoom in INSET_ZOOMS + (INSET_LAST,):
@@ -2165,7 +2580,7 @@ def inset(sections, units, spots, stations, main, box, empty, letter):
         w, h = (box[2] - box[0]) * zoom, (box[3] - box[1]) * zoom
         if w > 0.75 * MAP_W or h + INSET_TITLE > 0.97 * MAP_H:
             continue
-        view = draw(MapView(main.scale * zoom, 0, 0, world[0], world[1], (0, 0, w, h)))
+        view = draw(MapView(main.scale * zoom, 0, 0, world[0], world[1], (0, 0, w, h), landmarks=landmarks))
         # cut down to what's drawn, keeping room for the title and the scale bar
         shown = [d for d in view.drawn if d[2] > 0 and d[0] < w and d[3] > 0 and d[1] < h]
         if not shown:
@@ -2201,7 +2616,8 @@ def inset(sections, units, spots, stations, main, box, empty, letter):
             title = title[:-1]
         title = title.rstrip() + "…"
     corner = trial.back(c0, c1)
-    view = draw(MapView(main.scale * zoom, px, top, corner[0], corner[1], (px, top, px + cw, top + ch)))
+    view = draw(MapView(main.scale * zoom, px, top, corner[0], corner[1], (px, top, px + cw, top + ch),
+                        landmarks=landmarks))
     # the scale bar: in a free bottom corner, or under the drawing
     bar = max([x for x in (0.1, 0.25, 0.5, 1, 2, 5) if x * units.length * view.scale <= min(cw * 0.35, 90)]
               or [0.1])
@@ -2229,8 +2645,9 @@ def inset(sections, units, spots, stations, main, box, empty, letter):
     return (frame0[0], frame0[1], frame1[0], frame1[1]), clip, svg, outline
 
 
-def render_route(info, sections, units, places=None):
-    """The printable document of a whole route. `places`: {station: [(x, y)]} the journeys run past."""
+def render_route(info, sections, units, places=None, landmarks=None):
+    """The printable document of a whole route. `places`: {station: [(x, y)]} the journeys run past; `landmarks`:
+    route_landmarks."""
     route_line = f'passenger speed limits in {units.speed_unit}, both ways'
     made = datetime.date.today().isoformat()
     names = {s.number: section_title(s, sections) for s in sections}
@@ -2282,10 +2699,10 @@ def render_route(info, sections, units, places=None):
     titles = [f"{a} – {b}" for s in long_ones for a, b in [names[s.number]]]
     if short:
         titles.append(f"{len(short)} short loops and crossovers: " + ", ".join(str(s.number) for s in short))
-    key_height = (9 + 3.5 * math.ceil(len(sub) / 58) + 10 + 7 + 5.5
+    key_height = (9 + 3.5 * math.ceil(len(sub) / 58) + 10 + 7 + 5.5 + (9 if landmarks else 0)
                   + sum(1.4 + 3.5 * math.ceil(len(t) / 28) for t in titles) + 3.3 * math.ceil(len(notes) / 64) + 9)
     overview, corner, scale = route_overview(sections, units, key_height, slow_spots(sections, units),
-                                             route_stations(sections, places))
+                                             route_stations(sections, places), landmarks)
     per_mm = MAP_W / MAP_MM[0]
     bar = max([b for b in (0.25, 0.5, 1, 2, 5, 10, 20, 50, 100) if b * units.length * scale / per_mm <= 32]
               or [0.25])
@@ -2293,7 +2710,7 @@ def render_route(info, sections, units, places=None):
     first_page = (
         f'<div class="mapfull">{overview}<div class="key {corner}">'
         f'<div class="keytitle">{esc(info["route"])}</div><div class="keysub">{esc(sub)}</div>'
-        f'{legend(units, "line: the lower limit of the two ways")}'
+        f'{legend(units, "line: the lower limit of the two ways", landmark_legend(landmarks))}'
         f'<div class="keyscale"><svg width="{bar_mm:.1f}mm" height="2.4mm" viewBox="0 0 {bar_mm:.1f} 2.4" '
         f'preserveAspectRatio="none"><rect x="0" y="0.6" width="{bar_mm:.1f}" height="1.2" fill="#111"/></svg>'
         f'<span>{bar:g} {units.unit}</span><span class="north">▲ N</span></div>'
@@ -2481,7 +2898,12 @@ def make_route_map(library, route, say=print):
     info = {"route": name, "journeys": len(paths), "timetable": ", ".join(timetable_names)}
     units = Units(imperial_limits([(0, v) for s in sections for way in (True, False)
                                    for _, v in s.limits[way] if v is not None]))
-    path = save_map(f"{name} whole route", render_route(info, sections, units, places))
+    say("Finding landmarks...")
+    level = route_details(files, route)[1]
+    objects = scenery(files, level)
+    sea = sea_cells(objects, landscape(files, level)) if any(o[0] == "sea" for o in objects) else None
+    landmarks = route_landmarks(network, objects, sections, sea)
+    path = save_map(f"{name} whole route", render_route(info, sections, units, places, landmarks))
     say(f"{len(sections)} sections, {sum(s.length for s in sections) / units.length:.1f} {units.unit} of line, "
         f"from {len(paths)} journeys")
     return path
