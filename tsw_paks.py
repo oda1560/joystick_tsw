@@ -133,7 +133,10 @@ class Pak:
             for a, b in blocks:
                 f.seek(off + a)             # block offsets are relative to the entry
                 raw.append(f.read(b - a))
-        return b"".join(zlib.decompress(r) for r in raw)
+        try:
+            return b"".join(zlib.decompress(r) for r in raw)
+        except zlib.error:                  # damaged on disk: Steam's "verify integrity" mends it
+            raise ValueError(f"{name} is damaged in {os.path.basename(self.path)}") from None
 
 
 # ---------------------------------------------------------------- cooked packages

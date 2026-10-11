@@ -1658,10 +1658,13 @@ def scenery(files, level):
         if not (f.startswith(folder) and f.endswith(".umap") and re.search(r"/(ST|TS)_x-?\d+_y-?\d+\.umap$", f)):
             continue
         tile = f[:-len(".umap")]
-        head = files.where[f].read(f)
-        if not any(word in head for word in LANDMARK_WORDS):
+        try:
+            head = files.where[f].read(f)
+            if not any(word in head for word in LANDMARK_WORDS):
+                continue
+            pkg = tsw_paks.Package("/" + tile, head, files.where[tile + ".uexp"].read(tile + ".uexp"))
+        except ValueError:                  # a damaged tile: its landmarks are left off
             continue
-        pkg = tsw_paks.Package("/" + tile, head, files.where[tile + ".uexp"].read(tile + ".uexp"))
         kids = collections.defaultdict(list)
         for i, e in enumerate(pkg.exports, 1):
             kids[e["outer"]].append(i)
@@ -1717,7 +1720,11 @@ def landscape(files, level):
         if not (f.startswith(folder) and re.search(r"/LT_x-?\d+_y-?\d+\.umap$", f)):
             continue
         tile = f[:-len(".umap")]
-        pkg = tsw_paks.Package("/" + tile, files.where[f].read(f), files.where[tile + ".uexp"].read(tile + ".uexp"))
+        try:
+            pkg = tsw_paks.Package("/" + tile, files.where[f].read(f),
+                                   files.where[tile + ".uexp"].read(tile + ".uexp"))
+        except ValueError:                  # a damaged tile
+            continue
         ox, oy = tile_origin(tile)
         proxy = None
         for i in range(1, len(pkg.exports) + 1):
