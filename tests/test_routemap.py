@@ -280,6 +280,45 @@ class Landmarks(unittest.TestCase):
         svg, _, _ = rm.route_overview(sections, units, 60, (), rm.route_stations(sections), lm)
         self.assertEqual(svg.count('class="roadover"'), 1)                 # 60 m apart: neither on the map
 
+    def test_every_level_crossing_is_drawn(self):
+        net, sections = self.line()
+        objects = [("crossing", "BP_Crossing_Gate_01_C", (x, 0.0), None, 0.0) for x in (2000.0, 2100.0, 8000.0)] + \
+            [("over", "BP_RoadBridge_C", (2050.0, 0.0), None, 0.0)]
+        lm = rm.route_landmarks(net, objects, sections)
+        svg, _, _ = rm.route_overview(sections, rm.Units(True), 60, (), rm.route_stations(sections), lm)
+        self.assertEqual(svg.count('class="crossing"'), 3)
+        self.assertEqual(svg.count('class="roadover"'), 0)                 # no room between the two crossings
+
+    def test_water_outlines_round_wet_points(self):
+        ring = {(i, j) for i in range(5) for j in range(5)} - {(2, 2)}     # a lake with an island
+        bodies = rm.water_outlines(ring | {(10, 0), (11, 0)}, (100.0, 200.0, 2.0))
+        self.assertEqual(len(bodies), 1)                                    # the two-point puddle left out
+        (x0, y0, x1, y1), rings = bodies[0]
+        self.assertEqual((x0, y0, x1, y1), (99.0, 199.0, 109.0, 209.0))
+        self.assertEqual(sorted(len(r) for r in rings), [4, 4])             # its shore and the island's
+
+    def test_a_mesh_along_a_spline(self):
+        straight = {"StartPos": [0, 0, 0], "StartTangent": [3000, 0, 0], "EndPos": [2990, 0, 50],
+                    "EndTangent": [3000, 0, 0], "StartScale": [2, 2], "EndScale": [2, 2],
+                    "StartOffset": [0, 100], "EndOffset": [0, 100]}                 # the water 1 m up
+        edges = rm.spline_edges(straight, (-500, 500))
+        self.assertEqual(len(edges), 4)                                     # 30 m in 10 m pieces
+        (left, right), (end_left, _) = edges[0], edges[-1]
+        self.assertEqual([round(v) for v in left], [0, -1000, 100])
+        self.assertEqual([round(v) for v in right], [0, 1000, 100])
+        self.assertEqual([round(v) for v in end_left], [2990, -1000, 150])
+
+    def test_canal_pieces_join_end_to_end(self):
+        lines = rm.join_lines([[(10, 0), (20, 0)], [(0, 0), (10, 0)], [(30, 0), (20, 0)], [(50, 5), (60, 5)]])
+        self.assertEqual(sorted(len(line) for line in lines), [2, 4])
+        self.assertIn([(0, 0), (10, 0), (20, 0), (30, 0)], [line if line[0] == (0, 0) else line[::-1]
+                                                            for line in lines])
+
+    def test_the_key_names_lakes_when_there_are_some(self):
+        self.assertIn("river, canal<", rm.landmark_legend({"water": [[(0, 0), (1, 1)]]}))
+        self.assertIn("river, canal, lake<", rm.landmark_legend({"lakes": [((0, 0, 9, 9), [])]}))
+        self.assertNotIn("river", rm.landmark_legend({}))
+
 
 if __name__ == "__main__":
     unittest.main()

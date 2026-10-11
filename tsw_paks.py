@@ -180,9 +180,9 @@ OBJECT_PROPS = ("ObjectProperty", "ClassProperty", "InterfaceProperty", "WeakObj
 class Ref(str):
     """A reference to another object, shown as its name; .package / .name / .outer locate it."""
 
-    def __new__(cls, text, package=None, name=None, outer=None):
+    def __new__(cls, text, package=None, name=None, outer=None, index=None):
         s = super().__new__(cls, text)
-        s.package, s.name, s.outer = package, name, outer
+        s.package, s.name, s.outer, s.index = package, name, outer, index    # index: of an export in its package
         return s
 
 
@@ -254,7 +254,7 @@ class Package:
         """Ref for an import (<0) or export (>0) index, or None."""
         if index > 0:
             e = self.exports[index - 1]
-            return Ref(e["name"], self.name, e["name"], self.ref(e["outer"]) if e["outer"] else None)
+            return Ref(e["name"], self.name, e["name"], self.ref(e["outer"]) if e["outer"] else None, index)
         if index < 0:
             imp = self.imports[-index - 1]
             if imp["class"] == "Package":
@@ -281,15 +281,54 @@ class Package:
         return self._props[index]
 
     def _read(self, index, keep):
-        e = self.exports[index - 1]
-        a = e["offset"] - self.header_size
         self._keep = keep
         try:
-            return self._tagged(Reader(self._uexp[a:a + e["size"]]))
+            return self._tagged(Reader(self.raw(index)))
         except Exception:
             return {}
         finally:
             self._keep = None
+
+    def raw(self, index):
+        """An export's bytes as saved."""
+        e = self.exports[index - 1]
+        a = e["offset"] - self.header_size
+        return self._uexp[a:a + e["size"]]
+
+    def texture(self, index, bulk=b""):
+        """(width, height, pixel format, pixels) of a cooked texture's largest mip, kept in the package or in its
+        .ubulk file (`bulk`), or None."""
+        try:
+            r = Reader(self.raw(index))
+            self._tagged(r)
+            if r.u32():                         # the object's GUID
+                r.read(16)
+            r.read(2 + 2)                       # the texture's and the 2D texture's strip flags
+            if r.u32() != 1:                    # not cooked
+                return None
+            self.fname(r)                       # its pixel format, then where the next platform's data is
+            r.i64()
+            r.i32(), r.i32(), r.u32()           # its size and slices
+            fmt = r.fstr()
+            r.i32()                             # the first mip kept
+            if r.i32() < 1:
+                return None
+            r.u32()                             # the mip is cooked
+            flags = r.u32()
+            wide = flags & 0x2000               # sizes in 64 bits
+            r.i64() if wide else r.i32()
+            size = r.i64() if wide else r.i32()
+            offset = r.i64()
+            if flags & 0x100:                   # in the .ubulk file
+                data = bulk[offset:offset + size]
+            elif flags & 0x1:                   # at the end of the package: not read here
+                return None
+            else:
+                data = r.read(size)
+            width, height = r.i32(), r.i32()
+        except (ValueError, struct.error, IndexError):
+            return None
+        return (width, height, fmt, data) if len(data) == size else None
 
     # -------- tagged properties
     def _tagged(self, r):
