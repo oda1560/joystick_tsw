@@ -8,7 +8,7 @@ The TSW7 Joystick Bridge lets you drive Train Sim World 7 with a flight stick: p
 
 It also shows small panels over the game while you drive:
 
-- **Next stop**: hold a button to see how far the next stop is, and the speed limit now.
+- **Next stop**: hold a button or F6 to see how far the next stop is, and the speed limit now.
 - **At a stop**: whether to wait, shut the doors or depart, with the times, your points and a short ride report.
 - **Speeding**: the limit pops up by itself when you go over it.
 - **Passenger comfort**: a warning on firm or harsh braking and acceleration, and a prompt to ease off the brake just before you stop.
@@ -92,6 +92,7 @@ The stick drives power and brake, the base slider sets the reverser, the twist l
 | Base buttons | 7 / 8 | Open the left / right doors |
 | Base buttons | 9 / 10 | Close the left / right doors |
 | Base button | 11 | Hold to show the next stop (see On-screen panels) |
+| Keyboard | F6 | Hold to show the next stop, like button 11 |
 | Pause button | Not set | Pauses and resumes the bridge |
 
 ### Power and brake
@@ -128,7 +129,7 @@ Five panels appear over the game by themselves, or while you hold a button. They
 
 | Panel | Where | When it shows | Turn off with |
 | --- | --- | --- | --- |
-| Next stop | Top centre | While you hold button 11 | Clear the Next stop button |
+| Next stop | Top centre | While you hold button 11 or F6 | Clear the Next stop button and set Next stop key to Not set |
 | What to do at a stop, with the schedule | Top right | While stopped at a stop, and 30 s after leaving | Show what to do at stops |
 | Speeding | Under the next stop panel | While over the limit | Show the limit when speeding |
 | Passenger comfort | Under the speeding panel | Firm or harsh braking or acceleration, and the last seconds of a stop | Show passenger comfort |
@@ -138,7 +139,7 @@ Distances and speeds follow where the train is: miles, yards and mph in Great Br
 
 ### Next stop
 
-Hold button 11 to see how far the next stop is; let go and it hides.
+Hold button 11 or F6 to see how far the next stop is; let go and it hides. F6 works only while the game (or the bridge window) has the focus, so typing elsewhere doesn't bring it up. To use another key, pick one under **Next stop key** in Settings: the list only offers keys Train Sim World 7 doesn't use (F6, F10, F11, 6, 7, -, =, Num *, Num /, Scroll Lock, Pause).
 
 - **Big number**: distance to the next stop or go-via. It turns amber once you've run past the marker. A "≈" means an estimate: on routes whose timetable data has no signal references, it's counted from the last stop.
 - **Next line**: "Stop at Shipley" or "Go via …".
@@ -197,7 +198,7 @@ Two tools read the game's files directly and work with the game closed: route ma
 
 A route map is a printable A4 landscape page set for one service: an overview map and route card, then strip diagrams of the line with its speed profile, limit boards, platforms, signals and distances. Use it to learn a route the way a real driver would, instead of relying on the game's speed limit hints.
 
-A **whole-route map** covers every line the route's passenger journeys use, for any service, in a few pages (Airedale & Wharfedale: 6). Each strip shows both ways: above the track the limits going left to right (▶), below it going right to left (◀), each with its own boards and signals. The first page has a map of the sections and which page each is on; a numbered circle on the track marks where another section joins or leaves. It leaves out what isn't a passenger line (depot moves, freight-only track, crossovers and other short bits), and where there's more than one track each way it shows the one most journeys use, so a service taking another platform road can meet a limit the map doesn't show. Your own stops aren't marked; the stop tracker (button 11) gives the next one in the game.
+A **whole-route map** covers every line the route's passenger journeys use, for any service, in a few pages (Airedale & Wharfedale: 6). Each strip shows both ways: above the track the limits going left to right (▶), below it going right to left (◀), each with its own boards and signals. The first page has a map of the sections and which page each is on; a numbered circle on the track marks where another section joins or leaves. It leaves out what isn't a passenger line (depot moves, freight-only track, crossovers and other short bits), and where there's more than one track each way it shows the one most journeys use, so a service taking another platform road can meet a limit the map doesn't show. Your own stops aren't marked; the stop tracker (button 11 or F6) gives the next one in the game.
 
 1. Double-click **Route maps.bat**.
 2. Pick a **Route**, then a **Journey**. Journeys are grouped by where they start and stop; tick **Short moves** to list depot and other short moves too.
@@ -248,6 +249,7 @@ Everything is set in the bridge window and saved as soon as you change it. The a
 | Look: Use twist · axis · Invert · angle | Turns twist look on or off, and how far full twist turns the view (±30–150°) |
 | Look smoothing | Quick to Smooth: how gently the view follows the twist |
 | AWS, Alerter, Open / Close doors, Next stop, Pause button | Click **Assign**, then press the joystick button. **Clear** unsets it |
+| Next stop key | The keyboard key that shows the next stop while held (F6), or Not set |
 | Keep this window on top | Keeps the bridge window over other windows |
 | Show the limit when speeding | The speeding panel |
 | Show what to do at stops | The stop, schedule and service complete panels |

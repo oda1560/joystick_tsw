@@ -1,13 +1,13 @@
 """
 Train Sim World 7 joystick bridge - desktop window.
 
-Shows joystick / game / train status, live stick and lever gauges, and settings. While its joystick button is
-held, it shows over the game how far the next stop is (tsw_stops.py) and the speed limit now; while you're stopped
-at a stop, whether to wait, shut the doors or go, with the times, your points (tsw_score.py) and how the ride felt
-to the passengers, and at the end of a service how the run went against your best before (tsw_history.py, all
-runs in the Service history window); while you're over the speed limit, the limit (tsw_speed.py); and while
-braking or speeding up is firm or harsh for the passengers, and in the last seconds of a hard stop to ease the
-brake off before the train stops (tsw_comfort.py).
+Shows joystick / game / train status, live stick and lever gauges, and settings. While its joystick button or
+its key (F6) is held, it shows over the game how far the next stop is (tsw_stops.py) and the speed limit now;
+while you're stopped at a stop, whether to wait, shut the doors or go, with the times, your points (tsw_score.py)
+and how the ride felt to the passengers, and at the end of a service how the run went against your best before
+(tsw_history.py, all runs in the Service history window); while you're over the speed limit, the limit
+(tsw_speed.py); and while braking or speeding up is firm or harsh for the passengers, and in the last seconds of
+a hard stop to ease the brake off before the train stops (tsw_comfort.py).
 The bridge itself (game API, lever detection, emergency exclusion) lives in tsw_joystick.py.
 
 Usage:
@@ -59,7 +59,7 @@ DEFAULTS = {"axis": core.Y_AXIS, "invert": core.INVERT_Y, "deadzone": core.DEADZ
             "door_open_right_button": core.DOOR_OPEN_RIGHT_BUTTON,
             "door_close_left_button": core.DOOR_CLOSE_LEFT_BUTTON,
             "door_close_right_button": core.DOOR_CLOSE_RIGHT_BUTTON,
-            "stop_button": core.STOP_BUTTON,
+            "stop_button": core.STOP_BUTTON, "stop_key": "F6",
             "look_enabled": core.USE_LOOK, "look_axis": core.LOOK_AXIS, "look_invert": core.LOOK_INVERT,
             "look_deadzone": core.LOOK_DEADZONE, "look_angle": core.LOOK_MAX_ANGLE,
             "look_smoothing": core.LOOK_SMOOTHING}
@@ -85,6 +85,12 @@ CAB_BUTTONS = {"aws_button": "aws", "alerter_button": "alerter",
                "door_open_left_button": "door_open_left", "door_open_right_button": "door_open_right",
                "door_close_left_button": "door_close_left", "door_close_right_button": "door_close_right"}
 LIGHTS = {"aws_button": "AWS", "alerter_button": "Alerter"}    # shown in the live view while held
+# keys that can show the next stop while held -> Windows key code. TSW7 binds none of them, in its controls or the
+# engine's (DefaultInput.ini, BaseInput.ini, BaseEngine.ini); F4 / F5 / F9 and the number pad's digits, + and - have
+# debug bindings, ` opens the console, F12 is Steam's screenshot, and Num . is Delete (TPWS / PZB) with Num Lock off
+STOP_KEYS = {"F6": 0x75, "F10": 0x79, "F11": 0x7A, "6": 0x36, "7": 0x37, "-": 0xBD, "=": 0xBB,
+             "Num *": 0x6A, "Num /": 0x6F, "Scroll Lock": 0x91, "Pause": 0x13}
+NO_KEY = "Not set"
 
 
 def apply_style(r):
@@ -138,6 +144,8 @@ def load_settings():
             s[key] = None
         elif s[key] is not None:
             used.add(s[key])
+    if s["stop_key"] not in STOP_KEYS:
+        s["stop_key"] = None
     return s
 
 
@@ -820,6 +828,8 @@ class App:
         self.next_stick_try = 0.0
         self.assigning = None         # settings key waiting for a joystick button press
         self.held = {name: False for name in CAB_BUTTONS.values()}   # cab buttons held down now
+        self.stop_held = set()        # what's holding the next stop up now: "button", "key"
+        self.fg_pid, self.fg_ok = None, False   # process with the focus, and whether the next stop key counts there
         self.raw_y = 0.0
         self.y = 0.0
         self.y_filter = core.AxisFilter()
@@ -1022,6 +1032,17 @@ class App:
                        command=lambda k=key: self.on_assign(k)).pack(side="left", padx=(0, 6))
             ttk.Button(btn_row, text="Clear",
                        command=lambda k=key: self.on_clear_button(k)).pack(side="left")
+        row = 7 + len(BUTTON_ACTIONS)
+        ttk.Label(grid, text="Next stop key", style="Muted.TLabel").grid(row=row, column=0, sticky="w",
+                                                                        pady=3, padx=(0, 14))
+        key_row = ttk.Frame(grid, style="Panel.TFrame")
+        key_row.grid(row=row, column=1, columnspan=3, sticky="w", pady=3)
+        self.stop_key_combo = ttk.Combobox(key_row, state="readonly", width=11, values=[NO_KEY, *STOP_KEYS])
+        self.stop_key_combo.set(self.s["stop_key"] or NO_KEY)
+        self.stop_key_combo.pack(side="left")
+        self.stop_key_combo.bind("<<ComboboxSelected>>", self.on_stop_key)
+        ttk.Label(key_row, text="hold in the game to show the next stop",
+                  style="Muted.TLabel").pack(side="left", padx=(8, 0))
 
         bottom = ttk.Frame(setp, style="Panel.TFrame")
         bottom.pack(fill="x", pady=(8, 0))
@@ -1103,6 +1124,12 @@ class App:
         save_settings(self.s)
         self._refresh_button_label()
         self.log(f"Button {button + 1} now {BUTTON_ACTIONS[key][1]}")
+
+    def on_stop_key(self, _event=None):
+        key = self.stop_key_combo.get()
+        self.s["stop_key"] = key if key in STOP_KEYS else None
+        save_settings(self.s)
+        self.log(f"{key} now shows the next stop while held" if self.s["stop_key"] else "Next stop key cleared")
 
     def on_joystick(self, _event=None):
         self.s["joystick"] = self.joy_combo.get()
@@ -1285,14 +1312,32 @@ class App:
     def _release_all(self):
         for name in self.held:
             self._set_held(name, False)
-        self._show_stop(False)
+        self._show_stop("button", False)
 
-    def _show_stop(self, down):
-        self.tracker.shown = down
+    def _show_stop(self, source, down):
+        """The next stop shows while its joystick button or its key ("button" / "key") is held."""
+        shown = bool(self.stop_held)
         if down:
+            self.stop_held.add(source)
+        else:
+            self.stop_held.discard(source)
+        if bool(self.stop_held) == shown:
+            return
+        self.tracker.shown = bool(self.stop_held)
+        if self.tracker.shown:
             self.overlay.show(self.tracker.state, self.speed_watch)
         else:
             self.overlay.hide()
+
+    def _stop_key_held(self):
+        """The next stop key is down while the game or this window has the focus (not while typing elsewhere)."""
+        vk = STOP_KEYS.get(self.s["stop_key"])
+        if not vk or not ctypes.windll.user32.GetAsyncKeyState(vk) & 0x8000:
+            return False
+        pid = autostart.foreground_pid()
+        if pid != self.fg_pid:
+            self.fg_pid, self.fg_ok = pid, pid == os.getpid() or autostart.is_game(pid)
+        return self.fg_ok
 
     def _poll_joystick(self):
         sid = self.stick.get_instance_id() if self.stick else None
@@ -1311,7 +1356,7 @@ class App:
                 elif cab_button:
                     self._set_held(cab_button, down)
                 elif ev.button == self.s["stop_button"]:
-                    self._show_stop(down)
+                    self._show_stop("button", down)
                 elif down and ev.button == self.s["toggle_button"]:
                     self.toggle()
 
@@ -1672,6 +1717,7 @@ class App:
         try:
             self._sync_handle_speed()
             self._poll_joystick()
+            self._show_stop("key", self._stop_key_held())
             self._update_status()
             self._draw()
             stop = self.tracker.stop

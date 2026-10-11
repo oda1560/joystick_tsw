@@ -1,13 +1,17 @@
 """
 Tests for what the panels over the game say (tsw_joystick_ui.py), without opening any window: the ride lines on
-the stop panel and the end-of-service summary.
+the stop panel, the end-of-service summary, and the button and key that hold up the next stop.
 
     python -m unittest discover tests
 """
 
+import json
 import os
 import sys
+import tempfile
 import unittest
+from types import SimpleNamespace
+from unittest import mock
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 os.environ.setdefault("PYGAME_HIDE_SUPPORT_PROMPT", "1")
@@ -70,6 +74,51 @@ class Summary(unittest.TestCase):
     def test_no_passengers_row_for_an_empty_train(self):
         title, rows, footer, times = ui.SummaryOverlay.summary_for(dict(RUN, passengers=0), None, 1)
         self.assertNotIn("Passengers", [r[0][0] for r in rows])
+
+
+class NextStopHeld(unittest.TestCase):
+    """The next stop panel shows while its joystick button or its key is held."""
+
+    def setUp(self):
+        self.app = SimpleNamespace(stop_held=set(), s={"stop_key": "F6"}, fg_pid=None, fg_ok=False,
+                                   tracker=SimpleNamespace(shown=False, state=None), speed_watch=None,
+                                   overlay=mock.Mock())
+
+    def hold(self, source, down):
+        ui.App._show_stop(self.app, source, down)
+
+    def key_held(self, pressed, foreground):
+        with mock.patch.object(ui.ctypes.windll.user32, "GetAsyncKeyState",
+                               lambda vk: 0x8000 if vk == pressed else 0), \
+                mock.patch.object(ui.autostart, "foreground_pid", lambda: foreground), \
+                mock.patch.object(ui.autostart, "is_game", lambda pid: pid == 4321):
+            return ui.App._stop_key_held(self.app)
+
+    def test_button_and_key_together(self):
+        self.hold("button", True)
+        self.hold("key", True)
+        self.hold("button", False)              # the key still holds it up
+        self.assertTrue(self.app.tracker.shown)
+        self.hold("key", False)
+        self.assertFalse(self.app.tracker.shown)
+        self.assertEqual((self.app.overlay.show.call_count, self.app.overlay.hide.call_count), (1, 1))
+
+    def test_key_counts_in_the_game_and_this_window_only(self):
+        self.assertTrue(self.key_held(0x75, 4321))           # F6 in the game
+        self.assertFalse(self.key_held(0x75, 999))           # typing somewhere else
+        self.assertTrue(self.key_held(0x75, os.getpid()))    # the bridge window
+        self.assertFalse(self.key_held(0x76, 4321))          # F7 is the game's
+        self.app.s["stop_key"] = None
+        self.assertFalse(self.key_held(0x75, 4321))
+
+    def test_only_keys_the_game_leaves_free(self):
+        with tempfile.TemporaryDirectory() as d:
+            path = os.path.join(d, "settings.json")
+            for saved, kept in (("F7", None), ("Num *", "Num *"), (None, None)):
+                with open(path, "w", encoding="utf-8") as f:
+                    json.dump({"stop_key": saved}, f)
+                with mock.patch.object(ui, "SETTINGS_FILE", path):
+                    self.assertEqual(ui.load_settings()["stop_key"], kept)
 
 
 if __name__ == "__main__":
