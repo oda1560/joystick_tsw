@@ -478,6 +478,33 @@ def minutes(seconds):
     return f"{s // 60}:{s % 60:02d}"
 
 
+def whole(x):
+    """A comfort mark or score as it's shown: 94.5 -> 95."""
+    return int(math.floor(x + 0.5))
+
+
+def mark_colour(mark):
+    """Green from 90, amber from 75, else red."""
+    return GOOD if whole(mark) >= 90 else WARN if whole(mark) >= 75 else BAD
+
+
+def lost_text(lost, most=2):
+    """What cost a ride its points, the costliest `most` (tsw_comfort.losses): 'jolt on stopping, 1.4 m/s²  ·  4 s
+    firm braking'. Less than half a point isn't worth saying."""
+    words = []
+    for cost, what, *rest in lost[:most]:
+        if cost < 0.5:
+            break
+        if what in ("stop", "way"):
+            words.append(f"jolt {'on stopping' if what == 'stop' else 'at a stop on the way'}, {rest[0]:.1f} m/s²")
+        else:
+            kind, seconds = rest[0], max(1, whole(rest[-1]))
+            doing = "braking" if kind == "brake" else "acceleration"
+            words.append(f"harsh {doing} {rest[1]:.1f} m/s², {seconds} s" if what == "harsh"
+                         else f"{seconds} s firm {doing}")
+    return "  ·  ".join(words)
+
+
 class DwellOverlay(Overlay):
     """While you're stopped at a stop, in the top right corner: whether to wait, shut the doors or go, the time
     now and the departure time, your points (tsw_stops.StopTracker.stop) and how the ride here felt to the
@@ -488,7 +515,7 @@ class DwellOverlay(Overlay):
 
     def __init__(self, root, k):
         super().__init__(root, k, 0.03, [(24, True), (13, True), (12, False), (11, False), (12, True), (10, False),
-                                         (11, False), (10, False)], right=True)
+                                         (11, False), (11, True)], right=True)
 
     def show(self, stop, state, imperial, ride=None):
         """`state`: the tracker's next stop readout (tsw_stops.StopTracker.state); `ride`: the ride report
@@ -498,28 +525,17 @@ class DwellOverlay(Overlay):
 
     @staticmethod
     def ride_lines(ride):
-        """'Jolt on stopping, 1.9 m/s²  ·  1 harsh brake' (red, else green) and '15 passengers  ·  smooth rides 2
-        of 3 this service'."""
+        """'This ride 79  ·  jolt on stopping, 1.4 m/s²' (coloured by the mark) and 'Comfort 87 this service  ·
+        62 passengers'."""
         if not ride:
             return ("", FG), ("", MUTED)
-        parts = []
-        if ride["stop"] == "jolt":
-            parts.append(f"Jolt on stopping, {ride['braking']:.1f} m/s²")
-        elif ride["stop"] == "smooth":
-            parts.append("Smooth stop")
-        for kind, word in (("brake", "harsh brake"), ("power", "harsh acceleration")):
-            n = sum(k == kind for k, _ in ride["harsh"])
-            if n:
-                parts.append(f"{n} {word}{'s' * (n != 1)}")
-        if ride["jolts"]:
-            parts.append("jolt at a stop on the way" if ride["jolts"] == 1
-                         else f"{ride['jolts']} jolts at stops on the way")
-        smooth = ride["stop"] != "jolt" and not ride["harsh"] and not ride["jolts"]
+        why = lost_text(ride["lost"]) or ("smooth stop" if ride["stop"] == "smooth" else "")
+        line = f"This ride {whole(ride['mark'])}" + (f"  ·  {why}" if why else "")
         n = ride["passengers"]
         tally = f"{n} passenger{'s' * (n != 1)}" if n else "no passengers aboard"
-        if ride["rides"]:
-            tally += f"  ·  smooth rides {ride['smooth']} of {ride['rides']} this service"
-        return ("  ·  ".join(parts), GOOD if smooth else BAD), (tally, MUTED)
+        if ride.get("score") is not None:
+            tally = f"Comfort {whole(ride['score'])} this service  ·  {tally}"
+        return (line, mark_colour(ride["mark"])), (tally, FG)
 
     @classmethod
     def lines_for(cls, stop, state=None, imperial=False, ride=None):
@@ -618,37 +634,44 @@ class ScheduleOverlay(Overlay):
         times = tuple(c >= 3 for c in keep)
         return title, tuple(rows), footer, times
 
+    @staticmethod
+    def _label(parent, text, colour, size, bold, **grid):
+        tk.Label(parent, text=text, bg=PANEL, fg=colour, justify="left",
+                 font=(FONT, size, "bold") if bold else (FONT, size)).grid(**grid)
+
     def _build(self, content):
         """Lays the table out again (only when it changes: once a stop or so)."""
         self.content = content
-        title, rows, footer, times = content
+        title, rows, footer, times = content[:4]
         if self.table is not None:
             self.table.destroy()
-        k = self.k
+        k, label = self.k, self._label
         table = self.table = tk.Frame(self.box, bg=PANEL)
         table.pack()
-
-        def label(text, colour, size, bold, **grid):
-            tk.Label(table, text=text, bg=PANEL, fg=colour, justify="left",
-                     font=(FONT, size, "bold") if bold else (FONT, size)).grid(**grid)
-
         last = len(rows[0]) - 1
-        label(title, FG, *self.TITLE, row=0, column=0, columnspan=last + 1, sticky="w", pady=(0, round(4 * k)))
+        label(table, title, FG, *self.TITLE, row=0, column=0, columnspan=last + 1, sticky="w",
+              pady=(0, round(4 * k)))
         for r, cells in enumerate(rows, start=1):
             size = self.HEAD if r == 1 else self.ROW
             for c, (text, colour, bold) in enumerate(cells):
-                label(text, colour, size, bold, row=r, column=c, sticky="e" if times[c] else "w",
+                label(table, text, colour, size, bold, row=r, column=c, sticky="e" if times[c] else "w",
                       padx=(0, 0 if c == last else round((6 if c == 0 else 14) * k)))
+        row = self._more(table, len(rows) + 1, last + 1)
         if footer:
-            label(footer, MUTED, *self.FOOT, row=len(rows) + 1, column=0, columnspan=last + 1, sticky="w",
+            label(table, footer, MUTED, *self.FOOT, row=row, column=0, columnspan=last + 1, sticky="w",
                   pady=(round(4 * k), 0))
         self.win.update_idletasks()
         self._place()
 
+    def _more(self, table, row, columns):
+        """Anything under the table, from `row`: the row after it."""
+        return row
+
 
 class SummaryOverlay(ScheduleOverlay):
     """At the end of a service, under the what-to-do panel in place of the schedule: how the run went against the
-    best run of the same service before (tsw_history.py), where it's better in green."""
+    best run of the same service before (tsw_history.py), where it's better in green, and each ride's comfort mark."""
+    RIDES = 10                # more rides than this: only those that lost points, the worst this many
 
     def show(self, run, best, count):
         content = self.summary_for(run, best, count)
@@ -656,9 +679,49 @@ class SummaryOverlay(ScheduleOverlay):
             self._build(content)
         Overlay.show(self)
 
-    @staticmethod
-    def summary_for(run, best, count):
-        """(title, rows, footer, times) as ScheduleOverlay.content_for has them."""
+    def _more(self, table, row, columns):
+        """The rides' marks, in a table of their own under the comparison."""
+        rides = self.content[4]
+        if not rides:
+            return row
+        lines, note = rides
+        k, label = self.k, self._label
+        frame = tk.Frame(table, bg=PANEL)
+        frame.grid(row=row, column=0, columnspan=columns, sticky="w", pady=(round(8 * k), 0))
+        label(frame, "RIDES", FG, *self.TITLE, row=0, column=0, columnspan=3, sticky="w", pady=(0, round(2 * k)))
+        for r, (station, mark, colour, why) in enumerate(lines, start=1):
+            label(frame, station, FG, self.ROW, False, row=r, column=0, sticky="w", padx=(0, round(14 * k)))
+            label(frame, mark, colour, self.ROW, True, row=r, column=1, sticky="e", padx=(0, round(14 * k)))
+            label(frame, why, MUTED, *self.FOOT, row=r, column=2, sticky="w")
+        if note:
+            label(frame, note, MUTED, *self.FOOT, row=len(lines) + 1, column=0, columnspan=3, sticky="w")
+        return row + 1
+
+    @classmethod
+    def rides_for(cls, marks):
+        """(rows of (station, mark, colour, why), note) for the rides kept with a run (tsw_comfort._ride), or None.
+        All of them, or on a long service those that lost points, in the order driven."""
+        if not marks:
+            return None
+        shown = list(range(len(marks)))
+        if len(marks) > cls.RIDES:
+            lost = [i for i in shown if whole(marks[i]["mark"]) < 100]
+            worst = set(sorted(lost, key=lambda i: marks[i]["mark"])[:cls.RIDES])
+            shown = [i for i in lost if i in worst]
+        rows = tuple((marks[i].get("station") or "-", str(whole(marks[i]["mark"])), mark_colour(marks[i]["mark"]),
+                      lost_text(marks[i]["lost"])) for i in shown)
+        rest = [r for i, r in enumerate(marks) if i not in shown]
+        note = ""
+        if rest:
+            note = f"+ {len(rest)} more ride{'s' * (len(rest) != 1)}"
+            if all(whole(r["mark"]) >= 100 for r in rest):
+                note += " at 100"
+        return rows, note
+
+    @classmethod
+    def summary_for(cls, run, best, count):
+        """(title, rows, footer, times, rides): the first four as ScheduleOverlay.content_for has them, rides as
+        rides_for gives them."""
         rows = [[("", MUTED, True), ("THIS RUN", MUTED, True)] + ([("BEST BEFORE", MUTED, True)] if best else [])]
 
         def row(label, key, text, better=None):
@@ -672,6 +735,8 @@ class SummaryOverlay(ScheduleOverlay):
             rows.append(cells)
 
         row("Points", "points", lambda r: f"{r['points']:,}", lambda a, b: a["points"] > b["points"])
+        row("Comfort", "comfort", lambda r: str(whole(r["comfort"])),
+            lambda a, b: whole(a["comfort"]) > whole(b["comfort"]))
         row("On time", "on_time", lambda r: f"{r['on_time']} of {r['stops']} stops",
             lambda a, b: a["on_time"] / a["stops"] > b["on_time"] / b["stops"])
         row("Stop accuracy", "accuracy", lambda r: f"{r['accuracy']:.1f} m off",
@@ -684,6 +749,9 @@ class SummaryOverlay(ScheduleOverlay):
         footer = []
         if run["worst_late"] > tsw_history.ON_TIME:
             footer.append(f"Latest {minutes(run['worst_late'])} behind time at a stop")
+        if run.get("comfort") is not None:
+            footer.append("Comfort: each ride's mark, weighted by the passengers aboard" if run.get("passengers")
+                          else "Comfort: the rides' marks, nobody aboard")
         if best:
             line = f"Best before on {best['finished'][:10]}"
             if best.get("train") and best["train"] != run.get("train"):
@@ -693,7 +761,7 @@ class SummaryOverlay(ScheduleOverlay):
             footer.append(f"First run of {run['service']} kept")
         title = f"SERVICE COMPLETE  ·  {run['service']}" + (f"  ·  {run['route']}" if run.get("route") else "")
         times = tuple(c > 0 for c in range(len(rows[0])))
-        return title, tuple(tuple(r) for r in rows), "\n".join(footer), times
+        return title, tuple(tuple(r) for r in rows), "\n".join(footer), times, cls.rides_for(run.get("marks"))
 
 
 class SpeedOverlay(Overlay):
@@ -714,11 +782,15 @@ class SpeedOverlay(Overlay):
 
 class ComfortOverlay(Overlay):
     """In the last seconds of a hard stop, to ease the brake off before the train stops; then how the stop went;
-    else while braking or speeding up is firm (amber) or harsh (red) for the passengers
-    (tsw_comfort.ComfortWatch.coach). Below the speeding popup."""
+    else while braking or speeding up is firm (amber) or harsh (red) for the passengers, and for a moment after
+    what that cost the service's comfort (tsw_comfort.ComfortWatch.coach). Below the speeding popup."""
 
     def __init__(self, root, k):
         super().__init__(root, k, 0.20, [(10, True), (24, True), (12, False)])
+
+    @staticmethod
+    def aboard(n):
+        return f"{n} passenger{'s' * (n != 1)} aboard" if n else "no passengers aboard"
 
     def show(self, coach):
         phase = coach["phase"]
@@ -726,14 +798,23 @@ class ComfortOverlay(Overlay):
             self.set((f"STOPPING IN {max(1, math.ceil(coach['seconds']))} s", WARN), ("EASE OFF THE BRAKE", WARN),
                      (f"braking {coach['braking']:.1f} m/s²", FG))
         elif phase == "stopped":
-            self.set(("", FG), ("JOLT ON STOPPING", BAD) if coach["jolt"] else ("SMOOTH STOP", GOOD),
-                     (f"braking {coach['braking']:.1f} m/s² as it stopped", MUTED))
+            note = f"braking {coach['braking']:.1f} m/s² as it stopped"
+            if whole(coach.get("cost") or 0):
+                note += f"  ·  −{whole(coach['cost'])}"
+            score = coach.get("score")
+            self.set((f"COMFORT {whole(score)}" if score is not None else "", FG),
+                     ("JOLT ON STOPPING", BAD) if coach["jolt"] else ("SMOOTH STOP", GOOD), (note, MUTED))
+        elif phase == "lost":
+            what = "BRAKING" if coach["kind"] == "brake" else "ACCELERATION"
+            self.set((f"{coach['level'].upper()} {what}  −{whole(coach['cost'])}",
+                      BAD if coach["level"] == "harsh" else WARN),
+                     (f"COMFORT {whole(coach['score'])}", FG),
+                     (f"this ride {whole(coach['mark'])}  ·  {self.aboard(coach['passengers'])}", FG))
         else:
             colour = BAD if phase == "harsh" else WARN
             what = "BRAKING" if coach["kind"] == "brake" else "ACCELERATION"
             if phase == "harsh":
-                n = coach["passengers"]
-                note = f"{n} passenger{'s' * (n != 1)} aboard" if n else "no passengers aboard"
+                note = self.aboard(coach["passengers"])
             else:
                 note = "ease off a step" if coach["kind"] == "brake" else "ease off the power"
             self.set((f"{phase.upper()} {what}", colour), (f"{coach['felt']:.1f} m/s²", colour), (note, FG))
@@ -745,8 +826,8 @@ class HistoryWindow:
     """The services you've driven to the end (tsw_history.py), newest first, each service's best run in green."""
     COLUMNS = (("finished", "Finished", 125, "w"), ("route", "Route", 150, "w"), ("service", "Service", 70, "w"),
                ("train", "Train", 150, "w"), ("points", "Points", 65, "e"), ("on_time", "On time", 65, "e"),
-               ("accuracy", "From marker", 85, "e"), ("smooth", "Smooth rides", 90, "e"),
-               ("passengers", "Passengers", 80, "e"))
+               ("accuracy", "From marker", 85, "e"), ("comfort", "Comfort", 65, "e"),
+               ("smooth", "Smooth rides", 90, "e"), ("passengers", "Passengers", 80, "e"))
 
     def __init__(self, root, k, history):
         win = self.win = tk.Toplevel(root)
@@ -799,6 +880,7 @@ class HistoryWindow:
         return (when(run.get("finished")), run.get("route", ""), run["service"], pretty_train(run.get("train")),
                 "-" if run.get("points") is None else f"{run['points']:,}", f"{run['on_time']} of {run['stops']}",
                 f"{run['accuracy']:.1f} m",
+                "-" if run.get("comfort") is None else str(whole(run["comfort"])),
                 f"{run['smooth']} of {run['rides']}" if run.get("rides") else "-",
                 run.get("passengers", "-"))
 
@@ -820,6 +902,7 @@ class App:
         self.speed_watch = tsw_speed.SpeedWatch()
         self.comfort = tsw_comfort.ComfortWatch(self.log)
         self.at_station = None        # service you're stopped at a station of, for the ride report
+        self.at_name = None           # ... and that station
         self.ride = None              # ride report for that station
         self.history = tsw_history.History()
         self.history_window = None
@@ -1705,10 +1788,10 @@ class App:
         """The ride report for the station you're stopped at (tsw_stops.StopTracker.stop): it follows the ride as
         the judging catches up with the stop, and stays as it was once you've left; leaving starts the next ride."""
         if stop and stop["phase"] != "departed":
-            self.at_station = stop["service"]
+            self.at_station, self.at_name = stop["service"], stop["station"]
             self.ride = self.comfort.report(stop["service"])
         elif self.at_station is not None:
-            self.comfort.new_leg(self.at_station)
+            self.comfort.new_leg(self.at_station, self.at_name)
             self.at_station = None
         return self.ride if stop else None
 
@@ -1722,7 +1805,7 @@ class App:
             self._draw()
             stop = self.tracker.stop
             ride = self._ride(stop)
-            run = self.history.finish(stop, self.comfort.service(stop["service"])) \
+            run = self.history.finish(stop, self.comfort.service(stop["service"], stop["station"])) \
                 if stop and stop["phase"] == "end" else None
             at_stop = stop if self.s["stop_panel"] else None
             if at_stop:

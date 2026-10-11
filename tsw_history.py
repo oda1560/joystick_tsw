@@ -1,8 +1,8 @@
 """
 The services you've driven to the end, kept to compare runs (service_history.json next to this script): when, the
 route, service and train, your points, how many stops you made on time and how close to the marker (from the
-game's checkpoint save, tsw_score.py), the most passengers aboard and how many rides between stations were smooth
-(tsw_comfort.py).
+game's checkpoint save, tsw_score.py), the most passengers aboard, how many rides between stations were smooth, the
+service's comfort and each ride's mark (tsw_comfort.py).
 
     history = History()
     run = history.finish(stop, comfort)   # at the end of a service (tsw_stops.StopTracker.stop, phase "end";
@@ -22,6 +22,7 @@ import os
 
 HISTORY_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "service_history.json")
 ON_TIME = 60.0                 # s: arriving up to this late counts as on time (early too)
+COMFORT_KEYS = ("passengers", "rides", "smooth", "comfort", "marks")
 
 
 class History:
@@ -54,8 +55,10 @@ class History:
                "accuracy": round(sum(abs(off) for _, off in stops) / len(stops), 1)}
         if comfort and comfort.get("rides"):        # a passenger train (empty ones too) judged at a stop
             run.update(passengers=comfort["passengers"], rides=comfort["rides"], smooth=comfort["smooth"])
+            if comfort.get("comfort") is not None:
+                run.update(comfort=round(comfort["comfort"], 1), marks=comfort.get("marks") or [])
         elif old:                              # the comfort part from before (the bridge started again here)
-            run.update({k: old[k] for k in ("passengers", "rides", "smooth") if k in old})
+            run.update({k: old[k] for k in COMFORT_KEYS if k in old})
         if run != old:
             if old:
                 self.runs[self.runs.index(old)] = run

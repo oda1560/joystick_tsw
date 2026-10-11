@@ -132,7 +132,7 @@ Five panels appear over the game by themselves, or while you hold a button. They
 | Next stop | Top centre | While you hold button 11 or F6 | Clear the Next stop button and set Next stop key to Not set |
 | What to do at a stop, with the schedule | Top right | While stopped at a stop, and 30 s after leaving | Show what to do at stops |
 | Speeding | Under the next stop panel | While over the limit | Show the limit when speeding |
-| Passenger comfort | Under the speeding panel | Firm or harsh braking or acceleration, and the last seconds of a stop | Show passenger comfort |
+| Passenger comfort | Under the speeding panel | Firm or harsh braking or acceleration and what it cost, and the last seconds of a stop | Show passenger comfort |
 | Service complete | Top right, in place of the schedule | At the last stop of a service | Show what to do at stops |
 
 Distances and speeds follow where the train is: miles, yards and mph in Great Britain, Ireland and the US, kilometres, metres and km/h elsewhere.
@@ -175,18 +175,35 @@ The comfort panel warns when the ride gets rough for passengers. It judges how h
 | --- | --- | --- |
 | FIRM BRAKING / FIRM ACCELERATION (amber) | Braking over 0.9 m/s², speeding up over 1.3 m/s² | Ease off a step, or ease off the power |
 | HARSH BRAKING / HARSH ACCELERATION (red) | Braking over 1.2 m/s², speeding up over 1.5 m/s², with the number of passengers aboard | Ease off now |
+| FIRM BRAKING −4 · COMFORT 96 (or HARSH …) | For 4 s once a firm or harsh stretch is over: the points it took off this ride, the service's comfort now, and this ride's mark | — |
 | STOPPING IN n s · EASE OFF THE BRAKE | Braking over 0.6 m/s² and about to stop | Ease the brake off before the train stops |
-| SMOOTH STOP or JOLT ON STOPPING | For 6 s after stopping. A jolt is braking over 0.7 m/s² in the last 1 m/s | — |
+| SMOOTH STOP or JOLT ON STOPPING | For 6 s after stopping, with the service's comfort and what a jolt cost. A jolt is braking over 0.7 m/s² in the last 1 m/s | — |
 
 The limits come from real trains: a modern train's full service brake is 0.9 m/s² and its emergency brake about 1.2, and a Class 331 speeds up at 1.3 m/s² on full power. They're the same for every train.
 
 The ease-off warning comes early enough for you to react and for the brake to release. The bridge times how long each train's brake takes to ease off and uses that from then on; until it has, it allows 3 s.
 
-At the next stop, the what-to-do panel adds a **ride report** for the run since the last station: a smooth stop or a jolt, any harsh moments, passengers aboard, and "smooth rides n of m this service". Comfort is judged on passenger trains only, empty ones included; freight and light engines stay quiet.
+#### Comfort score
+
+Each ride from one station to the next gets a **mark out of 100**. It starts at 100 and loses:
+
+| For | Points |
+| --- | --- |
+| Each second of firm (amber) braking or acceleration | 1 |
+| A harsh (red) moment | 10, and 2 for each second it lasts past the first |
+| Each stop with a jolt, at the station or on the way (a signal, say) | 30 for each m/s² over 0.7 as the train stopped, at most 30: 0.9 costs 6, 1.4 costs 21 |
+
+Seconds are the game's own, so they don't stretch when the game runs slowly. The **service's comfort** is the average of the rides' marks, each weighted by the passengers aboard: how the ride felt to the average passenger. With nobody aboard all the way, the rides count alike. Marks of 90 and over are green, 75 to 89 amber, under 75 red.
+
+At each stop, the what-to-do panel shows the ride you've just had, for example "This ride 79 · jolt on stopping, 1.4 m/s²", and under it "Comfort 87 this service · 62 passengers". Comfort is judged on passenger trains only, empty ones included; freight and light engines stay quiet.
+
+Full service held all the way to a stand on a Class 150 marks about 28: the game's 150 brakes harder and harder as it slows (1.8 m/s² just before it stops), so ease off before the end.
 
 ### End of service and service history
 
-At the last stop, a **Service complete** table compares this run with your best run of the same service before: points, stops on time, stop accuracy, smooth rides and passengers. Better values are green. Arriving up to 60 s late counts as on time, and so does arriving early.
+At the last stop, a **Service complete** table compares this run with your best run of the same service before: points, comfort, stops on time, stop accuracy, smooth rides and passengers. Better values are green. Arriving up to 60 s late counts as on time, and so does arriving early.
+
+Under it, **Rides** lists each ride's comfort mark and what cost it points. On a service of more than 10 rides it lists only the rides that lost points (the worst 10), with a line such as "+ 22 more rides at 100".
 
 Click **Service history** in Settings to see every service you've driven to the end, newest first, with each service's best run in green. Restart the bridge at the terminus and it updates the same run rather than adding a new one.
 

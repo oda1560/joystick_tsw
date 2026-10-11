@@ -73,8 +73,19 @@ class LoggedDrive(unittest.TestCase):
     def test_ride_report(self):
         r = self.judge.report("1M56")
         self.assertEqual(r["stop"], "jolt")
-        self.assertEqual([k for k, _ in r["harsh"]], ["brake"])
-        self.assertEqual((r["passengers"], r["smooth"], r["rides"], r["jolts"]), (15, 0, 1, 0))
+        self.assertEqual([k for k, *_ in r["harsh"]], ["brake"])
+        self.assertEqual((r["passengers"], r["smooth"], r["rides"], r["way"]), (15, 0, 1, []))
+
+    def test_full_service_to_a_stand_marks_low(self):
+        # stopping at 1.83 m/s² (the most a stop costs), 9 s harsh before it, 15 s firm before that
+        r = self.judge.report("1M56")
+        self.assertEqual([loss[1] for loss in r["lost"]], ["stop", "harsh", "firm"])
+        self.assertEqual(r["lost"][0][0], tsw_comfort.STOP_MOST)
+        self.assertAlmostEqual(r["lost"][1][4], 9.25, delta=0.5)
+        self.assertAlmostEqual(r["mark"], 28, delta=2)
+        self.assertAlmostEqual(r["score"], r["mark"], delta=0.05)
+        stopped = self.shown("stopped")[0][2]
+        self.assertEqual((stopped["cost"], stopped["mark"]), (tsw_comfort.STOP_MOST, r["mark"]))
 
     def test_said_for_the_log(self):
         kinds = [e[0] for _, e in self.said]
@@ -132,7 +143,10 @@ class MadeUpStops(unittest.TestCase):
                 judge.feed(t, v, -decel if v else 0.0, 30)
                 t += 0.07
             judge.new_leg("2P27")
-        self.assertEqual(judge.service_so_far("2P27"), {"rides": 3, "smooth": 2, "passengers": 30})
+        done = judge.service_so_far("2P27")
+        self.assertEqual((done["rides"], done["smooth"], done["passengers"]), (3, 2, 30))
+        self.assertEqual([r["mark"] for r in done["marks"]], [100, 97, 100])    # 0.8 as it stopped: 3 off
+        self.assertAlmostEqual(done["comfort"], 99)
 
     def test_another_train_standing_is_not_a_stop(self):
         judge = tsw_comfort.Judge()
@@ -188,11 +202,109 @@ class Limits(unittest.TestCase):
     def test_speeding_up_harsh_over_1_5(self):
         shown, judge = start(1.6)
         self.assertEqual(shown, [("harsh", "power")])
-        self.assertEqual([k for k, _ in judge.report("X")["harsh"]], ["power"])
+        self.assertEqual([k for k, *_ in judge.report("X")["harsh"]], ["power"])
 
     def test_braking_as_hard_is_firm(self):
         self.assertEqual(stop(lambda v: 1.0)[0][0], ("firm", None))
         self.assertEqual(start(1.0)[0], [])
+
+
+def drive(segments, v=25.0, passengers=40, dt=0.07, rate=None):
+    """Moving at `v` m/s, then (seconds, acceleration) one after another; `rate`: game seconds a wall second (the
+    game's clock read), None: no clock. (judge, [(t, phase, panel)] each time the panel changed)."""
+    judge, t, shown = tsw_comfort.Judge(), 0.0, [(0.0, None, None)]
+    for seconds, acc in segments:
+        end = t + seconds
+        while t < end - 1e-9:
+            v = max(0.0, v + acc * dt * (rate or 1.0))
+            judge.feed(t, v, acc, passengers, 6e4 + t * rate if rate else None)
+            p = judge.panel
+            if shown[-1][1] != (p and p["phase"]):
+                shown.append((t, p and p["phase"], p))
+            t += dt
+    return judge, shown
+
+
+def stop_at(judge, decel, t, passengers=30, v=10.0):
+    """A made-up stop braking at `decel` from `v`: the time after."""
+    while v > 0:
+        v = max(0.0, v - decel * 0.07)
+        judge.feed(t, v, -decel if v else 0.0, passengers)
+        t += 0.07
+    return t + 10.0
+
+
+class Marks(unittest.TestCase):
+    def test_a_firm_stretch_then_what_it_cost(self):
+        judge, shown = drive([(5, -1.0), (8, -0.5)])
+        self.assertEqual([ph for _, ph, _ in shown], [None, "firm", "lost", None])
+        t, _, lost = shown[2]
+        self.assertEqual((lost["level"], lost["kind"], lost["passengers"]), ("firm", "brake", 40))
+        self.assertAlmostEqual(lost["cost"], 5.0, delta=0.2)
+        self.assertAlmostEqual(lost["mark"], 95.0, delta=0.2)
+        self.assertAlmostEqual(lost["score"], lost["mark"], delta=0.05)
+        self.assertAlmostEqual(t, 5 + tsw_comfort.HOLD_SECONDS, delta=0.2)          # once the warning's gone
+        self.assertAlmostEqual(shown[3][0] - t, tsw_comfort.LOSS_SECONDS, delta=0.1)
+
+    def test_a_harsh_moment_then_what_it_cost(self):
+        judge, shown = drive([(2, -1.3), (6, -0.5)])
+        self.assertEqual([ph for _, ph, _ in shown], [None, "harsh", "lost", None])
+        lost = shown[2][2]
+        self.assertEqual(lost["level"], "harsh")
+        self.assertAlmostEqual(lost["cost"], 12.0, delta=0.3)                       # 10, and 2 for the second second
+        self.assertAlmostEqual(lost["mark"], 88.0, delta=0.3)
+        r = judge.report("X")
+        self.assertEqual([loss[1] for loss in r["lost"]], ["harsh"])
+
+    def test_over_harsh_too_briefly_is_firm(self):
+        judge, shown = drive([(0.8, -1.3), (6, -0.5)])
+        self.assertEqual([ph for _, ph, _ in shown], [None, "harsh", "lost", None])
+        self.assertEqual(shown[2][2]["level"], "firm")
+        r = judge.report("X")
+        self.assertEqual(r["harsh"], [])
+        self.assertAlmostEqual(r["firm"]["brake"], 0.8, delta=0.1)
+
+    def test_seconds_in_the_game_s_time(self):
+        # in slow motion 5 s on the wall clock is 3 s in the game
+        judge, shown = drive([(5, -1.0), (8, -0.5)], rate=0.6)
+        self.assertAlmostEqual(next(p for _, ph, p in shown if ph == "lost")["cost"], 3.0, delta=0.2)
+
+    def test_nothing_lost_nothing_shown(self):
+        judge, shown = drive([(10, -0.8)])
+        self.assertEqual([ph for _, ph, _ in shown], [None])
+        self.assertIsNone(judge.report("X"))                # not stopped, nothing lost
+
+    def test_a_stop_costs_by_how_hard_it_stopped(self):
+        self.assertEqual(tsw_comfort._stop_cost(0.6), 0)
+        self.assertAlmostEqual(tsw_comfort._stop_cost(1.4), 21)
+        self.assertEqual(tsw_comfort._stop_cost(1.9), tsw_comfort.STOP_MOST)
+
+    def test_a_jolt_at_a_stop_on_the_way(self):
+        judge = tsw_comfort.Judge()
+        stop_at(judge, 0.5, stop_at(judge, 0.8, 0.0))        # a signal with a jolt, then the station smoothly
+        r = judge.report("X")
+        self.assertEqual((r["stop"], r["way"]), ("smooth", [0.8]))
+        self.assertEqual([loss[1] for loss in r["lost"]], ["way"])
+        self.assertAlmostEqual(r["mark"], 97)
+        self.assertEqual(r["smooth"], 0)
+
+    def test_score_weighted_by_passengers(self):
+        rides = [{"mark": 100, "passengers": 40}, {"mark": 79, "passengers": 62}]
+        self.assertAlmostEqual(tsw_comfort.score(rides), (4000 + 79 * 62) / 102)
+        self.assertEqual(tsw_comfort.score(rides + [{"mark": 0, "passengers": 0}]), tsw_comfort.score(rides))
+        self.assertEqual(tsw_comfort.score([dict(r, passengers=0) for r in rides]), 89.5)    # nobody aboard
+        self.assertIsNone(tsw_comfort.score([]))
+
+    def test_rides_named_by_the_station(self):
+        judge = tsw_comfort.Judge()
+        t = stop_at(judge, 0.8, 0.0, passengers=20)
+        ride = judge.new_leg("2P27", "Frizinghall")
+        self.assertEqual((ride["station"], ride["mark"], ride["passengers"]), ("Frizinghall", 97, 20))
+        stop_at(judge, 0.5, t, passengers=60)
+        done = judge.service_so_far("2P27", "Shipley")       # at the end, still there
+        self.assertEqual([(r["station"], r["mark"]) for r in done["marks"]], [("Frizinghall", 97), ("Shipley", 100)])
+        self.assertAlmostEqual(done["comfort"], (97 * 20 + 100 * 60) / 80)
+        self.assertEqual(json.loads(json.dumps(done)), done)                     # kept in the history as it is
 
 
 class BrakeTiming(unittest.TestCase):

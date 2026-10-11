@@ -54,9 +54,17 @@ class History(unittest.TestCase):
         self.assertEqual(len(tsw_history.History(self.path).runs), 1)
 
     def test_comfort_kept_when_read_again_without_it(self):
-        self.history.finish(at_end(900, 1.0, [(0, 1.0)]), {"rides": 4, "smooth": 3, "passengers": 58})
+        marks = [{"station": "Pontypridd", "mark": 97.0, "passengers": 58, "smooth": False,
+                  "lost": [[3.0, "stop", 0.8]]}]
+        self.history.finish(at_end(900, 1.0, [(0, 1.0)]),
+                            {"rides": 1, "smooth": 0, "passengers": 58, "comfort": 96.96, "marks": marks})
         again = tsw_history.History(self.path).finish(at_end(900, 1.0, [(0, 1.0)]), None)
-        self.assertEqual(again["smooth"], 3)
+        self.assertEqual((again["smooth"], again["comfort"], again["marks"]), (0, 97.0, marks))
+
+    def test_no_comfort_without_rides(self):
+        run = self.history.finish(at_end(900, 1.0, [(0, 1.0)]),
+                                  {"rides": 0, "smooth": 0, "passengers": 0, "comfort": None, "marks": []})
+        self.assertNotIn("comfort", run)
 
     def test_no_stops_no_run(self):
         self.assertIsNone(self.history.finish(dict(BASE, points=None)))

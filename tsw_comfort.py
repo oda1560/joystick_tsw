@@ -29,17 +29,29 @@ showed nothing when it was only for trains with passengers. Freight and light en
 no locomotive or wagon has a passenger model. It used to take a car with nodes named PassengerDoor_* as well, which
 left out a third of the passenger vehicles (the Class 350's are Door_PassengerDoor_*) and showed nothing on them.
 
+Each ride from one station to the next gets a mark out of 100: it loses a point a second braking or speeding up
+over the firm limit, 10 for a harsh moment and 2 a second it goes on past the first, and for each stop with a jolt
+30 an m/s² over the jolt limit (1.4 m/s² as it stopped: 21). The service's comfort is the rides' marks weighted by
+the passengers aboard: how the ride felt to the average passenger. The weights are a starting point, not taken from
+anywhere.
+
     watch = ComfortWatch(); watch.start()
     watch.coach              # None, or what the comfort panel says:
                              #   {"phase": "ease", "seconds": to the stop (wall clock), "braking": m/s²}
-                             #   {"phase": "stopped", "jolt": bool, "braking": m/s² as it stopped}
+                             #   {"phase": "stopped", "jolt": bool, "braking": m/s² as it stopped, "cost": points,
+                             #    "mark": this ride's, "score": the service's}
                              #   {"phase": "firm" / "harsh", "kind": "brake" / "power", "felt": m/s², "passengers"}
+                             #   {"phase": "lost", "level": "firm" / "harsh", "kind", "cost", "mark", "score",
+                             #    "passengers"}: for a moment after a firm or harsh stretch that cost points
     watch.report(service)    # the ride since the last station, None off passenger trains: {"stop": None / "smooth" /
                              #   "jolt" (the stop you're at), "braking": as it stopped, "harsh": [["brake" / "power",
-                             #   worst m/s²]], "jolts": at stops on the way (signals), "passengers": most aboard,
+                             #   worst m/s², seconds]], "firm": {"brake" / "power": seconds}, "way": braking at each
+                             #   stop with a jolt on the way (signals), "passengers": most aboard, "mark": out of 100,
+                             #   "lost": what cost it (losses()), "score": the service's comfort with this ride,
                              #   "smooth": rides this service without a jolt or a harsh moment, "rides": of them}
-    watch.service(service)   # this service so far: {"rides", "smooth", "passengers": most aboard}
-    watch.new_leg(service)   # on leaving a station: that ride is done
+    watch.service(service, station)   # this service so far, the ride to `station` too if it's over: {"rides",
+                             #   "smooth", "passengers": most aboard, "comfort": score, "marks": [ride (_ride)]}
+    watch.new_leg(service, station)   # on leaving a station: the ride to it is done
 """
 
 import collections
@@ -76,6 +88,11 @@ LIMITS = {"brake": {"firm": (0.9, 0.8), "harsh": (1.2, 1.0)},
           "power": {"firm": (1.3, 1.2), "harsh": (1.5, 1.3)}}
 HARSH_SECONDS = 1.0
 HOLD_SECONDS = 1.0             # the firm / harsh warning stays this long after
+FIRM_COST = 1.0                # a ride's mark loses this a second (game) over the firm limit,
+HARSH_COST, HARSH_EXTRA = 10.0, 2.0   # this a harsh moment and this a second it lasts past HARSH_SECONDS,
+STOP_COST, STOP_MOST = 30.0, 30.0     # and this an m/s² braking over JOLT as it stops, at most STOP_MOST a stop
+LOSS_SECONDS = 4.0             # what a firm / harsh stretch cost stays up this long after it
+MAX_STEP = 0.5                 # s (game): a longer gap between readings counts as this long
 RATIO_SECONDS = 3.0            # game time against the wall clock over this long
 BRAKE_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "brake_ease.json")
 
@@ -86,11 +103,53 @@ PATHS = {"speed": A + "Function.HUD_GetSpeed", "acc": A + "Function.HUD_GetAccel
 
 
 def _leg():
-    return {"stop": None, "braking": None, "harsh": [], "jolts": 0, "passengers": 0, "judged": False}
+    return {"stop": None, "braking": None, "harsh": [], "firm": {"brake": 0.0, "power": 0.0}, "way": [],
+            "passengers": 0, "judged": False}
 
 
 def _smooth(leg):
-    return leg["stop"] != "jolt" and not leg["harsh"] and not leg["jolts"]
+    return leg["stop"] != "jolt" and not leg["harsh"] and not leg["way"]
+
+
+def _stop_cost(braking):
+    return min(max(braking - JOLT, 0.0) * STOP_COST, STOP_MOST)
+
+
+def losses(leg):
+    """What a ride lost of its 100, costliest first, each [points, what, ...]: [p, "stop", braking] stopping at the
+    station with a jolt, [p, "way", braking] a jolt at a stop on the way, [p, "harsh", kind, worst m/s², seconds],
+    [p, "firm", kind, seconds]."""
+    lost = []
+    if leg["stop"] == "jolt":
+        lost.append([_stop_cost(leg["braking"]), "stop", leg["braking"]])
+    lost += [[_stop_cost(braking), "way", braking] for braking in leg["way"]]
+    lost += [[HARSH_COST + HARSH_EXTRA * max(seconds - HARSH_SECONDS, 0.0), "harsh", kind, worst, seconds]
+             for kind, worst, seconds in leg["harsh"]]
+    lost += [[FIRM_COST * seconds, "firm", kind, seconds] for kind, seconds in leg["firm"].items() if seconds > 0]
+    return sorted(lost, key=lambda loss: -loss[0])
+
+
+def mark(leg):
+    """A ride's comfort out of 100."""
+    return max(0.0, 100.0 - sum(loss[0] for loss in losses(leg)))
+
+
+def score(rides):
+    """A service's comfort from its rides' marks, each weighted by the passengers aboard: how the ride felt to the
+    average passenger. With nobody aboard all the way the rides count alike. None with no rides."""
+    if not rides:
+        return None
+    aboard = sum(r["passengers"] for r in rides)
+    if aboard:
+        return sum(r["mark"] * r["passengers"] for r in rides) / aboard
+    return sum(r["mark"] for r in rides) / len(rides)
+
+
+def _ride(leg, station=None):
+    """A ride as it's kept: {"station", "mark", "passengers", "smooth", "lost": losses()}."""
+    lost = [[round(x, 2) if isinstance(x, float) else x for x in loss] for loss in losses(leg)]
+    return {"station": station, "mark": round(mark(leg), 1), "passengers": leg["passengers"], "smooth": _smooth(leg),
+            "lost": lost}
 
 
 class BrakeLearner:
@@ -180,18 +239,25 @@ class Judge:
         self.approach = None          # hardest braking slower than LAST on the way into a stop
         self.braking = 0.0            # braking at the reading before
         self.harsh_since = None       # when braking or speeding up went over harsh
-        self.harsh = None             # the harsh moment going on, once counted: [kind, worst]
+        self.harsh_kind = None        # ... which of them
+        self.harsh_time = 0.0         # ... and for how long since (game)
+        self.harsh = None             # the harsh moment going on, once counted: [kind, worst, seconds]
         self.worst = 0.0
+        self.last_time = None         # (game clock?, seconds) at the reading before
+        self.episode = None           # a firm / harsh stretch going on: {"cost", "kind", "level"}
+        self.loss = None              # what the last one cost, for a moment after
+        self.loss_until = 0.0
         self.learner = BrakeLearner()
         self.leg = _leg()
         self.service = None           # the service the rides below are of
-        self.smooth = self.rides = 0  # rides done on it
+        self.done = []                # rides done on it (_ride)
         self.most = 0                 # most passengers aboard on it
 
     @property
     def panel(self):
-        """What the comfort panel says: the stop warning or how the stop went, else firm / harsh."""
-        return self.coach or self.alert
+        """What the comfort panel says: the stop warning or how the stop went, else firm / harsh, else what that
+        cost."""
+        return self.coach or self.alert or self.loss
 
     def lead(self):
         """Seconds (game) before the stop the warning comes: time to react, and for the brake to ease off."""
@@ -214,11 +280,14 @@ class Judge:
         said = []
         self._time(now, clock)
         game = clock if clock is not None else now
+        step = self._step(now, clock)
         eased = self.learner.feed(game, braking, brake, power, v)
         if eased:
             said.append(("ease", eased))
         if self.coach and self.coach["phase"] == "stopped" and now > self.coach_until:
             self.coach = None
+        if self.loss and now > self.loss_until:
+            self.loss = None
         if v > MOVING:
             self.moved = True
             if judged:
@@ -245,31 +314,40 @@ class Judge:
             hardest = self.approach if self.approach is not None else max(self.braking, 0.0)
             jolt = hardest > JOLT
             if judged:
-                self.coach = {"phase": "stopped", "jolt": jolt, "braking": hardest}
-                self.coach_until = now + RESULT_SECONDS
                 if self.leg["stop"] == "jolt":     # at a stop on the way (a signal, say)
-                    self.leg["jolts"] += 1
+                    self.leg["way"].append(self.leg["braking"])
                 self.leg["stop"], self.leg["braking"] = ("jolt" if jolt else "smooth"), hardest
+                self.coach = {"phase": "stopped", "jolt": jolt, "braking": hardest,
+                              "cost": _stop_cost(hardest) if jolt else 0.0, "mark": mark(self.leg),
+                              "score": self.live_score()}
+                self.coach_until = now + RESULT_SECONDS
                 said.append(("stop", jolt, hardest))
             else:
                 self.coach = None
             self.moved, self.approach = False, None
 
-        self._alert(now, v, along, kind, passengers)
+        spent = self._spent()
+        level = self._alert(now, v, along, kind, passengers)
         harsh, harsh_off = LIMITS[kind]["harsh"]
         if judged and v >= STOPPED and abs(along) > (harsh_off if self.harsh_since is not None else harsh):
             if self.harsh_since is None:
-                self.harsh_since, self.worst = now, 0.0
+                self.harsh_since, self.harsh_kind, self.harsh_time, self.worst = now, kind, 0.0, 0.0
             self.worst = max(self.worst, abs(along))
+            self.harsh_time += step
             if self.harsh is None and now - self.harsh_since >= HARSH_SECONDS:
-                self.harsh = [kind, self.worst]
+                self.harsh = [kind, self.worst, self.harsh_time]
                 self.leg["harsh"].append(self.harsh)
             elif self.harsh is not None:
-                self.harsh[1] = self.worst
+                self.harsh[1:] = [self.worst, self.harsh_time]
         else:
             if self.harsh is not None:
                 said.append(("harsh", self.harsh[0], self.harsh[1]))
+            elif self.harsh_since is not None:       # over harsh too briefly to be a harsh moment: firm
+                self.leg["firm"][self.harsh_kind] += self.harsh_time
             self.harsh_since = self.harsh = None
+            if judged and level and v >= STOPPED:
+                self.leg["firm"][kind] += step
+        self._episode(now, v, kind, level, passengers, self._spent() - spent)
         return said
 
     def lost(self):
@@ -277,8 +355,44 @@ class Judge:
         standing still after leaving a 331 on the move read as the 331 stopping with a jolt."""
         self.accs.clear()
         self.coach = self.alert = self.approach = self.harsh_since = self.harsh = None
+        self.episode = self.loss = self.last_time = None
         self.moved, self.braking = False, 0.0
         self.learner = BrakeLearner()
+
+    def _step(self, now, clock):
+        """Game seconds since the reading before (by the wall clock when the game's isn't read), at most MAX_STEP."""
+        t = (clock is not None, clock if clock is not None else now)
+        last, self.last_time = self.last_time, t
+        if last is None or last[0] != t[0]:
+            return 0.0
+        return min(max(t[1] - last[1], 0.0), MAX_STEP)
+
+    def _spent(self):
+        """Points the ride has lost to firm and harsh driving so far."""
+        return sum(loss[0] for loss in losses(self.leg) if loss[1] in ("firm", "harsh"))
+
+    def live_score(self):
+        """The service's comfort now, with the ride going on."""
+        return score(self.done + ([_ride(self.leg)] if self.leg["judged"] else []))
+
+    def _episode(self, now, v, kind, level, passengers, cost):
+        """What a stretch of firm / harsh driving cost: shown for a moment once its warning has gone, unless the
+        train has stopped (how the stop went says it then)."""
+        if level:
+            self.episode = self.episode or {"cost": 0.0, "kind": kind, "level": "firm"}
+            if self.harsh is not None:
+                self.episode.update(kind=self.harsh[0], level="harsh")
+        if level or self.coach:
+            self.loss = None
+        if self.episode is None:
+            return
+        self.episode["cost"] += cost
+        if self.alert is None:
+            episode, self.episode = self.episode, None
+            if passengers is not None and v >= STOPPED and self.coach is None and episode["cost"] >= 0.5:
+                self.loss = dict(episode, phase="lost", mark=mark(self.leg), score=self.live_score(),
+                                 passengers=passengers)
+                self.loss_until = now + LOSS_SECONDS
 
     def _time(self, now, clock):
         """How fast the game's time goes against the wall clock (slower below 20 fps)."""
@@ -294,7 +408,7 @@ class Judge:
             self.ratio = min(max(game / wall, 0.1), 1.0)
 
     def _alert(self, now, v, along, kind, passengers):
-        """Firm (amber) or harsh (red), braking or speeding up, held for a moment after."""
+        """Firm (amber) or harsh (red), braking or speeding up, held for a moment after. The level now, or None."""
         size = abs(along)
         was = self.alert["phase"] if self.alert and self.alert["kind"] == kind else None
         (firm, firm_off), (harsh, harsh_off) = LIMITS[kind]["firm"], LIMITS[kind]["harsh"]
@@ -309,37 +423,43 @@ class Judge:
             self.alert_until = now + HOLD_SECONDS
         elif self.alert and (now > self.alert_until or passengers is None or v < STOPPED):
             self.alert = None
+        return level
 
     def report(self, service):
         leg = self.leg
-        if not leg["judged"] or (leg["stop"] is None and not leg["harsh"] and not leg["jolts"]):
+        lost = losses(leg)
+        if not leg["judged"] or (leg["stop"] is None and not lost):
             return None
-        smooth, rides = (self.smooth, self.rides) if service == self.service else (0, 0)
-        if leg["stop"] is not None:
-            smooth, rides = smooth + _smooth(leg), rides + 1
-        return dict(leg, harsh=[list(h) for h in leg["harsh"]], smooth=smooth, rides=rides)
+        done = self.done if service == self.service else []
+        ended = done + ([_ride(leg)] if leg["stop"] is not None else [])
+        return dict(leg, harsh=[list(h) for h in leg["harsh"]], firm=dict(leg["firm"]), way=list(leg["way"]),
+                    mark=mark(leg), lost=lost, score=score(done + [_ride(leg)]),
+                    smooth=sum(r["smooth"] for r in ended), rides=len(ended))
 
-    def service_so_far(self, service):
-        """{"rides", "smooth", "passengers": most aboard} on a service, with the ride now if it has ended at a stop."""
+    def service_so_far(self, service, station=None):
+        """{"rides", "smooth", "passengers": most aboard, "comfort": score, "marks": the rides} on a service, with the
+        ride now (to `station`) if it has ended at a stop."""
         leg = self.leg
-        if service != self.service:
-            done = {"rides": 0, "smooth": 0, "passengers": leg["passengers"]}
-        else:
-            done = {"rides": self.rides, "smooth": self.smooth, "passengers": max(self.most, leg["passengers"])}
+        same = service == self.service
+        done = list(self.done) if same else []
         if leg["judged"] and leg["stop"] is not None:
-            done["rides"] += 1
-            done["smooth"] += _smooth(leg)
-        return done
+            done.append(_ride(leg, station))
+        return {"rides": len(done), "smooth": sum(r["smooth"] for r in done),
+                "passengers": max(self.most, leg["passengers"]) if same else leg["passengers"],
+                "comfort": score(done), "marks": done}
 
-    def new_leg(self, service):
-        leg = self.leg
+    def new_leg(self, service, station=None):
+        """Leaving `station`: the ride to it is done. That ride as kept, or None if it wasn't judged."""
+        leg, ride = self.leg, None
         if service != self.service:
-            self.service, self.smooth, self.rides, self.most = service, 0, 0, leg["passengers"]
+            self.service, self.done, self.most = service, [], leg["passengers"]
         if leg["judged"] and leg["stop"] is not None:
-            self.smooth += _smooth(leg)
-            self.rides += 1
+            ride = _ride(leg, station)
+            self.done.append(ride)
         self.leg = _leg()
-        self.harsh = None                 # a harsh moment going on carries on into the next ride uncounted
+        self.harsh = None                 # a harsh moment going on carries on into the next ride uncounted ...
+        self.harsh_time = 0.0             # ... and what's left of it is firm there
+        return ride
 
 
 class Feed:
@@ -444,13 +564,20 @@ class ComfortWatch(threading.Thread):
         with self.lock:
             return self.judge.report(service)
 
-    def service(self, service):
+    def service(self, service, station=None):
         with self.lock:
-            return self.judge.service_so_far(service)
+            return self.judge.service_so_far(service, station)
 
-    def new_leg(self, service):
+    def new_leg(self, service, station=None):
         with self.lock:
-            self.judge.new_leg(service)
+            ride = self.judge.new_leg(service, station)
+            done = len(self.judge.done)
+            total = score(self.judge.done)
+        if ride:
+            why = ", ".join(f"{loss[1]} -{loss[0]:.0f}" for loss in ride["lost"] if loss[0] >= 0.5)
+            self.log(f"Comfort: the ride to {station or 'the stop'} marked {ride['mark']:.0f}"
+                     f"{f' ({why})' if why else ''}, {ride['passengers']} passengers; "
+                     f"{service} so far {total:.0f} over {done} ride{'s' * (done != 1)}")
 
     def run(self):
         while self.running:
