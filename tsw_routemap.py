@@ -10,7 +10,8 @@ Checked on Airedale-Wharfedale 2S00: the timetable's AI driver never runs faster
 A map of the whole route instead puts every line its passenger journeys use on a few pages, the limits both ways
 on each: the longest stretch of a journey not yet drawn becomes a section, the track alongside it (the other line,
 or the same track the other way) going with it, and so on until what's left is short. Its first page maps them
-with a board at each place to slow down, so it can be printed on its own.
+with a board at each place to slow down and every station named, crowded places drawn again larger where the page
+is empty, so it can be printed on its own.
 
     python tsw_routemap.py                    choose a route and a service
     python tsw_routemap.py airedale           list a route's services
@@ -28,6 +29,7 @@ import datetime
 import functools
 import heapq
 import html
+import itertools
 import json
 import math
 import os
@@ -984,6 +986,37 @@ def breaks(path, i):
     return a.hx * b.hx + a.hy * b.hy < 0 or math.hypot(b.x - a.x, b.y - a.y) > 3 * STEP or b.m - a.m > 3 * STEP
 
 
+def station_name(platform):
+    """A platform's station as the map names it: 'Coryton Station Platform 1' -> 'Coryton', 'Westbourne Park
+    Westbound' -> 'Westbourne Park'."""
+    name = tsw_stops.split_platform(platform)[0]
+    name = re.sub(r"\s+(P\d+[a-z]?|Pl|Plat|Platform|Gleis|Track)\.?$", "", name, flags=re.I)
+    name = re.sub(r"\s+(Eastbound|Westbound|Northbound|Southbound)$", "", name)
+    return re.sub(r"\s+Station$", "", name)
+
+
+def plain(name):
+    """A name to compare spellings by: 'Schlüchtern' and 'Schluechtern' are the same."""
+    for a, b in (("ä", "ae"), ("ö", "oe"), ("ü", "ue"), ("ß", "ss"), ("Ä", "Ae"), ("Ö", "Oe"), ("Ü", "Ue")):
+        name = name.replace(a, b)
+    return name.casefold()
+
+
+def numbered_twins(named, near):
+    """[(name, where)] with names like 'Stafford 1' and 'Stafford 3' (the platforms of one station, named apart)
+    as 'Stafford' where `near(where, where)` says they're close."""
+    def stem(name):
+        m = re.match(r"^(.*\D)\s+\d+$", name)
+        return m.group(1) if m else None
+    out = []
+    for name, at in named:
+        base = stem(name)
+        if base and any(other != name and base in (other, stem(other)) and near(at, there) for other, there in named):
+            name = base
+        out.append((name, at))
+    return out
+
+
 class Section:
     """A stretch of the route drawn as one line, with the limits both ways: forward (True) is the way the
     journey it was found on runs, from x = 0 to its length. Distances x are in metres from its start."""
@@ -1019,7 +1052,9 @@ class Section:
         self.limits, self.signals, self.platforms = {}, {}, {}
         for way in (True, False):
             self._read(network, coverage, way, self._follow(network, found[way]))
-        self.stations = self._join(sorted(self.platforms[True] + self.platforms[False]), 400)
+        both = numbered_twins([(n, (a, b)) for a, b, n in self.platforms[True] + self.platforms[False]],
+                              lambda p, q: abs(p[0] + p[1] - q[0] - q[1]) / 2 < 400)
+        self.stations = self._join(sorted((a, b, n) for n, (a, b) in both), 400)
 
     @staticmethod
     def _follow(network, found):
@@ -1095,7 +1130,7 @@ class Section:
             for s, e, name in r.platforms:
                 if e >= lo and s <= hi:
                     a, b = sorted((x_at(max(s, lo)), x_at(min(e, hi))))
-                    platforms.append((a, b, tsw_stops.split_platform(name)[0]))
+                    platforms.append((a, b, station_name(name)))
         self.limits[way] = usable_limits(limits, way, self.length)
         self.signals[way] = sorted(set(signals))
         self.platforms[way] = self._join(sorted(platforms))
@@ -1512,11 +1547,29 @@ table.index td.sec { font-weight: 700; width: 9mm; }
 .mapboard.low { stroke: #D2502A; stroke-width: 2; }
 .mapboardtext { font-size: 11px; font-weight: 800; fill: #111; }
 .linespeed { font-size: 10px; font-weight: 600; font-style: italic; fill: #5F5E5A; }
+.nameleader { stroke: #777; stroke-width: 0.7; }
+.frame { fill: none; stroke: #111; stroke-width: 1; stroke-dasharray: 4 2.5; }
+.insetbox { fill: #fff; stroke: #333; stroke-width: 1.1; }
+.insettag { fill: #111; }
+.insettagtext { font-size: 11px; font-weight: 800; fill: #fff; }
+.insettagtext.small { font-size: 9.5px; }
+.insettitle { font-size: 10px; font-weight: 600; fill: #111; }
+.insetrule { stroke: #bbb; stroke-width: 0.6; }
+.insetscale { font-size: 8px; fill: #555; }
+.key td.shortsec { color: #555; font-size: 7.6pt; }
 """
 
 
 MAP_MM = (277.0, 179.0)     # the whole-route map: all of the first page under its heading
 KEY_MM = 92.0               # how wide the key is, in the map's emptiest corner
+MAP_W = 1000.0              # the map's own units across it
+MAP_H = MAP_W * MAP_MM[1] / MAP_MM[0]
+CROWD = (8, 50.0)           # this many names and boards within this many map units (14 mm) is crowded: an inset
+INSET_MOST = 180.0          # map units: a crowded stretch longer than this goes in more than one inset
+INSET_ZOOMS = (2, 2.5, 3, 3.5, 4, 5, 6)
+INSET_TITLE = 16.0          # map units: an inset's title bar
+INSET_NARROWEST = 130.0     # map units: an inset's width at least, for its scale bar
+BOARD_REACH = (16, 24, 34, 46, 60, 76, 95)      # map units: how far from its stretch a board is tried
 
 
 def crossing(a, b, c, d):
@@ -1526,30 +1579,375 @@ def crossing(a, b, c, d):
     return side(a, b, c) * side(a, b, d) < 0 and side(c, d, a) * side(c, d, b) < 0
 
 
-def route_overview(sections, units, key_height, spots=()):
-    """A map of the sections filling the page, coloured by the lower limit of the two ways, numbered, with the
-    stations, a board at each of the `spots` (slow_spots) and the limit along long stretches; as large as it can be
-    with a corner left empty for the key (`key_height` mm tall). Returns (svg, the corner: 'tr', 'tl', 'br' or
-    'bl', map units per metre)."""
-    width = 1000.0
-    height = width * MAP_MM[1] / MAP_MM[0]
-    per_mm = width / MAP_MM[0]
+def route_stations(sections, places=None):
+    """[(name, (x, y))]: the stations on the sections and those the journeys run past on track that isn't drawn
+    (`places`: {name: [(x, y)]}), each once, where its platforms are."""
+    found = collections.defaultdict(list)
+    for s in sections:
+        for a, b, name in s.stations:
+            found[name].append(s.place((a + b) / 2))
+    drawn = set(found)
+    for name, at in (places or {}).items():
+        if name not in drawn:
+            found[name] += at
+    middles = [(name, (sum(p[0] for p in at) / len(at), sum(p[1] for p in at) / len(at)))
+               for name, at in found.items()]
+    named = numbered_twins(middles, lambda p, q: math.dist(p, q) < 400)
+    kept, spelt = [], {}                    # spelt the way with the most letters like ü
+    for name, p in sorted(named, key=lambda np: -sum(ord(c) > 127 for c in np[0])):
+        twin = next((n for n, q in kept if plain(n) == plain(name) and math.dist(p, q) < 400), None)
+        if twin:
+            spelt[(name, p)] = twin
+        else:
+            kept.append((name, p))
+    merged = collections.defaultdict(list)
+    for name, p in named:
+        merged[spelt.get((name, p), name)].append(p)
+    return sorted((name, (sum(p[0] for p in at) / len(at), sum(p[1] for p in at) / len(at)))
+                  for name, at in merged.items())
+
+
+class Boxes:
+    """Boxes (x0, y0, x1, y1) on the map, found by place."""
+    CELL = 25.0
+
+    def __init__(self):
+        self.all, self.cells = [], collections.defaultdict(list)
+
+    def _cells(self, box):
+        for i in range(int(box[0] // self.CELL), int(box[2] // self.CELL) + 1):
+            for j in range(int(box[1] // self.CELL), int(box[3] // self.CELL) + 1):
+                yield i, j
+
+    def add(self, box):
+        self.all.append(box)
+        for k in self._cells(box):
+            self.cells[k].append(box)
+
+    def remove(self, box):
+        self.all.remove(box)
+        for k in self._cells(box):
+            self.cells[k].remove(box)
+
+    def hits(self, box):
+        return any(not (box[2] < t[0] or box[0] > t[2] or box[3] < t[1] or box[1] > t[3])
+                   for k in self._cells(box) for t in self.cells.get(k, ()))
+
+
+class Occupancy:
+    """Which 5-unit cells of the map are used, to find empty rectangles quickly."""
+    CELL = 5.0
+
+    def __init__(self):
+        self.nx, self.ny = int(MAP_W // self.CELL) + 1, int(MAP_H // self.CELL) + 1
+        self.grid = [[0] * self.nx for _ in range(self.ny)]
+
+    def add(self, box, margin=5.0):
+        c = self.CELL
+        i0, j0 = max(int((box[0] - margin) // c), 0), max(int((box[1] - margin) // c), 0)
+        i1, j1 = min(int((box[2] + margin) // c), self.nx - 1), min(int((box[3] + margin) // c), self.ny - 1)
+        for j in range(j0, j1 + 1):
+            row = self.grid[j]
+            for i in range(i0, i1 + 1):
+                row[i] = 1
+
+    def empty(self, w, h, near):
+        """The top left (x, y) of the empty w x h rectangle nearest `near`, or None."""
+        c = self.CELL
+        s = [[0] * (self.nx + 1) for _ in range(self.ny + 1)]        # how many used cells above and left
+        for j in range(self.ny):
+            run = 0
+            for i in range(self.nx):
+                run += self.grid[j][i]
+                s[j + 1][i + 1] = s[j][i + 1] + run
+        cw, ch = math.ceil(w / c), math.ceil(h / c)
+        best = None
+        for j in range(1, self.ny - ch):
+            for i in range(1, self.nx - cw):
+                if s[j + ch][i + cw] - s[j][i + cw] - s[j + ch][i] + s[j][i] == 0:
+                    d = math.hypot(i * c + w / 2 - near[0], j * c + h / 2 - near[1])
+                    if best is None or d < best[0]:
+                        best = (d, i * c, j * c)
+        return best and best[1:]
+
+
+NAME_SPOTS = [(8, 4, "start"), (-8, 4, "end"), (0, -8, "middle"), (0, 16, "middle"), (8, -6, "start"),
+              (-8, -6, "end"), (8, 14, "start"), (-8, 14, "end"), (13, -13, "start"), (-13, -13, "end"),
+              (13, 21, "start"), (-13, 21, "end"), (18, 4, "start"), (-18, 4, "end"), (0, -16, "middle"),
+              (0, 25, "middle"), (20, -18, "start"), (-20, -18, "end"), (20, 26, "start"), (-20, 26, "end")]
+
+
+class MapView:
+    """The route drawn onto a rectangle of the first page's map at one scale, things placed where they don't
+    overlap. World (x, y) -> map (x, y) by `at`. `strict`: a name needing a leader counts as finding no room."""
+
+    def __init__(self, scale, ox, oy, x0, y0, rect, strict=False):
+        self.scale, self.ox, self.oy, self.x0, self.y0, self.rect = scale, ox, oy, x0, y0, rect
+        self.strict = strict
+        self.taken = Boxes()            # nothing else may go here
+        self.solid = Boxes()            # names, boards, dots and circles: no leader runs through these
+        self.leaders, self.drawn, self.o = [], [], []
+        self.failed = []                # [map point] of what found no room, or only far away
+        self.stuck = []                 # [map point] of what found no room at all: a name over others, a board
+                                        # whose leader runs through names
+
+    def at(self, x, y):
+        return self.ox + (x - self.x0) * self.scale, self.oy + (y - self.y0) * self.scale
+
+    def back(self, px, py):
+        return self.x0 + (px - self.ox) / self.scale, self.y0 + (py - self.oy) / self.scale
+
+    def inside(self, p, pad=0.0):
+        r = self.rect
+        return r[0] - pad <= p[0] <= r[2] + pad and r[1] - pad <= p[1] <= r[3] + pad
+
+    def free(self, box):
+        r = self.rect
+        return box[0] > r[0] + 4 and box[2] < r[2] - 4 and box[1] > r[1] + 4 and box[3] < r[3] - 4 and \
+            not self.taken.hits(box)
+
+    def take(self, box, solid=True):
+        self.taken.add(box)
+        self.drawn.append(box)
+        if solid:
+            self.solid.add(box)
+
+    def lines(self, sections, units, clip=None):
+        """The sections coloured by the lower limit of the two ways, through their points and every place the
+        limit changes (so a short stretch shows its colour); the line taken every 3 units."""
+        if clip:
+            self.o.append(f'<g clip-path="url(#{clip})">')
+        for s in sections:
+            cuts = {x for way in (True, False) for x, _ in s.limits[way] if 0 < x < s.length}
+            marks = sorted([(m, x, y, False) for m, x, y in s.points] + [(x, *s.place(x), True) for x in cuts])
+            run, colour = [], None
+
+            def flush():
+                if len(run) > 1 and any(self.inside(q, 30) for q in run):
+                    self.o.append(f'<polyline points="{" ".join(f"{a:.1f},{b:.1f}" for a, b in run)}" '
+                                  f'stroke="{colour}" class="line"/>')
+            for (ma, xa, ya, _), (mb, xb, yb, cut) in zip(marks, marks[1:]):
+                vs = [v for v in (s.limit_at(True, (ma + mb) / 2), s.limit_at(False, (ma + mb) / 2)) if v is not None]
+                c = units.colour(min(vs)) if vs else "#bbb"
+                p, q = self.at(xa, ya), self.at(xb, yb)
+                if c != colour:
+                    flush()
+                    run, colour = [p], c
+                if cut or mb == marks[-1][0] or abs(q[0] - run[-1][0]) + abs(q[1] - run[-1][1]) > 1.5:
+                    run.append(q)
+                n = max(1, math.ceil(math.dist(p, q) / 3))
+                for k in range(n):
+                    x, y = p[0] + (q[0] - p[0]) * k / n, p[1] + (q[1] - p[1]) * k / n
+                    if self.inside((x, y)):
+                        self.taken.add((x - 2.5, y - 2.5, x + 2.5, y + 2.5))
+                        self.drawn.append((x - 2.5, y - 2.5, x + 2.5, y + 2.5))
+            flush()
+        if clip:
+            self.o.append('</g>')
+
+    def heading(self, s, m):
+        (ax, ay), (bx, by) = self.at(*s.place(m - 40)), self.at(*s.place(m + 40))
+        d = max(math.hypot(bx - ax, by - ay), 0.01)
+        return (bx - ax) / d, (by - ay) / d
+
+    def through(self, a, b):
+        """How many 3-unit steps of a leader from a to b run through names, boards and dots (not counting the
+        first 12 units, by the dot it starts at)."""
+        length = math.dist(a, b)
+        return sum(1 for t in range(12, int(length), 3)
+                   if self.solid.hits((a[0] + (b[0] - a[0]) * t / length, a[1] + (b[1] - a[1]) * t / length) * 2))
+
+    def clear(self, a, b, cross=True):
+        """Whether a leader from a to b runs clear of names, boards and dots, and (`cross`) of other leaders."""
+        return not self.through(a, b) and (not cross or not any(crossing(a, b, c, d) for c, d in self.leaders))
+
+    def around(self, ax, ay, w, h, reach, heading=(1.0, 0.0), ring=16, leader=2):
+        """A free box w x h near (ax, ay), tried round it at each distance in `reach`, across the line (`heading`)
+        first: (box, where its leader meets it), or None. `leader` 2: the leader runs clear of names and other
+        leaders, 1: of names, 0: the one running through least."""
+        hx, hy = heading
+        angles = sorted((k * 2 * math.pi / ring for k in range(ring)),
+                        key=lambda a: abs(math.cos(a) * hx + math.sin(a) * hy))
+        least = None
+        for r in reach:
+            for a in angles:
+                cx, cy = ax + r * math.cos(a), ay + r * math.sin(a)
+                box = (cx - w / 2, cy - h / 2, cx + w / 2, cy + h / 2)
+                if not self.free(box):
+                    continue
+                end = (min(max(ax, box[0]), box[2]), min(max(ay, box[1]), box[3]))
+                if leader == 0:
+                    through = self.through((ax, ay), end)
+                    if least is None or through < least[0]:
+                        least = (through, box, end)
+                    if through == 0:
+                        break
+                    continue
+                if not self.clear((ax, ay), end, leader > 1):
+                    continue
+                return box, end
+            if least and least[0] == 0:
+                break
+        return least and least[1:]
+
+    def section_numbers(self, sections, units):
+        """[(map point, number)] for the sections a mile (km) or more long, each where it's clear along it."""
+        out = []
+        for s in sections:
+            if s.length < units.length:
+                continue
+            for f in (0.5, 0.4, 0.6, 0.3, 0.7, 0.2, 0.8, 0.12, 0.88, 0.5):
+                q = self.at(*s.place(s.length * f))
+                box = (q[0] - 9, q[1] - 9, q[0] + 9, q[1] + 9)
+                if self.inside(q) and not self.solid.hits(box):
+                    break
+            if self.inside(q):
+                self.take(box)
+                out.append((q, s.number))
+        return out
+
+    def draw_numbers(self, numbers):
+        for (qx, qy), number in numbers:
+            self.o.append(f'<circle cx="{qx:.1f}" cy="{qy:.1f}" r="8" class="maplink"/><text x="{qx:.1f}" '
+                          f'y="{qy + 3.7:.1f}" text-anchor="middle" class="maplinktext">{number}</text>')
+
+    def dots(self, stations):
+        """Each station's dot: [(name, map point)] of those in the rectangle."""
+        out = []
+        for name, (x, y) in stations:
+            q = self.at(x, y)
+            if self.inside(q):
+                self.take((q[0] - 5, q[1] - 5, q[0] + 5, q[1] + 5))
+                self.o.append(f'<circle cx="{q[0]:.1f}" cy="{q[1]:.1f}" r="3.3" class="dot"/>')
+                out.append((name, q))
+        return out
+
+    def names(self, placed):
+        """The stations' names beside their dots, the one with the fewest places left first each time; where
+        there's none, a little way off on a leader."""
+        todo = list(placed)
+        while todo:
+            best = None
+            for name, (sx, sy) in todo:
+                w = text_width(name, 11)
+                fits = [spot for spot in NAME_SPOTS if self.free(name_box(sx, sy, w, *spot))]
+                if best is None or len(fits) < len(best[0]):
+                    best = (fits, name, (sx, sy), w)
+                    if not fits:
+                        break
+            fits, name, (sx, sy), w = best
+            todo.remove((name, (sx, sy)))
+            if fits:
+                tx, ty, anchor = fits[0]
+                box = name_box(sx, sy, w, tx, ty, anchor)
+                self.o.append(f'<text x="{sx + tx:.1f}" y="{sy + ty:.1f}" text-anchor="{anchor}" '
+                              f'class="maplabel">{esc(name)}</text>')
+                self.take(box)
+                continue
+            found = self.around(sx, sy, w + 2, 12, (24, 34, 46, 60, 76, 95))
+            if found is None or self.strict:
+                self.failed.append((sx, sy))
+            if found:
+                box, end = found
+                self.leaders.append(((sx, sy), end))
+                self.o.append(f'<line x1="{sx:.1f}" y1="{sy:.1f}" x2="{end[0]:.1f}" y2="{end[1]:.1f}" '
+                              f'class="nameleader"/><text x="{(box[0] + box[2]) / 2:.1f}" y="{box[3] - 2:.1f}" '
+                              f'text-anchor="middle" class="maplabel">{esc(name)}</text>')
+            else:
+                self.stuck.append((sx, sy))
+                tx, ty, anchor = NAME_SPOTS[0]
+                box = name_box(sx, sy, w, tx, ty, anchor)
+                self.o.append(f'<text x="{sx + tx:.1f}" y="{sy + ty:.1f}" text-anchor="{anchor}" '
+                              f'class="maplabel">{esc(name)}</text>')
+            self.take(box)
+
+    def boards(self, spots, units):
+        """A board at each of the `spots` in the rectangle, the lowest placed first, on a leader to its stretch."""
+        for spot in sorted(spots, key=lambda p: p.limit):
+            s, mid = spot.section, (spot.x1 + spot.x2) / 2
+            ax, ay = self.at(*s.place(mid))
+            if not self.inside((ax, ay)):
+                continue
+            text = str(units.speed(spot.limit))
+            w, h = text_width(text, 11) + (21 if spot.heading else 9), 14.0
+            heading = self.heading(s, mid)
+            found = next((f for leader in (2, 1) for f in [self.around(ax, ay, w, h, BOARD_REACH, heading, leader)]
+                          if f), None)
+            if found is None:
+                found = self.around(ax, ay, w, h, BOARD_REACH, heading, leader=0)
+                if found is None or self.through((ax, ay), found[1]):
+                    self.stuck.append((ax, ay))
+            if found is None or math.dist((ax, ay), found[1]) > 40:
+                self.failed.append((ax, ay))
+            if found is None:                   # nowhere free: across the line, over whatever is there
+                cx, cy = ax - heading[1] * 18, ay + heading[0] * 18
+                box = (cx - w / 2, cy - h / 2, cx + w / 2, cy + h / 2)
+                found = box, (min(max(ax, box[0]), box[2]), min(max(ay, box[1]), box[3]))
+            box, end = found
+            self.take((box[0] - 2, box[1] - 2, box[2] + 2, box[3] + 2))
+            self.leaders.append(((ax, ay), end))
+            tx = box[0] + (w - 12 if spot.heading else w) / 2
+            self.o.append(f'<line x1="{ax:.1f}" y1="{ay:.1f}" x2="{end[0]:.1f}" y2="{end[1]:.1f}" class="leader"/>'
+                          f'<circle cx="{ax:.1f}" cy="{ay:.1f}" r="2" class="leaderdot"/>'
+                          f'<rect x="{box[0]:.1f}" y="{box[1]:.1f}" width="{w:.1f}" height="{h:.0f}" rx="2" '
+                          f'class="{"mapboard low" if units.speed(spot.limit) <= units.slow else "mapboard"}"/>'
+                          f'<text x="{tx:.1f}" y="{box[1] + 10.8:.1f}" text-anchor="middle" class="mapboardtext">'
+                          f'{text}</text>')
+            if spot.heading:                    # for going one way only: an arrow that way
+                angle = math.degrees(math.atan2(spot.heading[1], spot.heading[0]))
+                self.o.append(f'<g transform="translate({box[2] - 9:.1f},{box[1] + h / 2:.1f}) rotate({angle:.0f})">'
+                              '<line x1="-5" y1="0" x2="1" y2="0" class="maparrow"/><path d="M5,0 L0,-3.4 L0,3.4 Z" '
+                              'class="maparrowhead"/></g>')
+
+    def line_speeds(self, sections, units, skip=()):
+        """The limit beside the line along the long stretches that aren't slow (not in the boxes `skip`)."""
+        for s in sections:
+            limits = s.lower_limits()
+            slow = slow_stretches(limits, units)
+            for x1, x2, v in limits:
+                if v is None or x2 - x1 < LONG_RUN or (x1, x2, v) in slow:
+                    continue
+                ax, ay = self.at(*s.place((x1 + x2) / 2))
+                if not self.inside((ax, ay)) or any(within(b, (ax, ay)) for b in skip):
+                    continue
+                text = str(units.speed(v))
+                found = self.around(ax, ay, text_width(text, 10), 10.0, (10, 14, 19), self.heading(s, (x1 + x2) / 2),
+                                    ring=8, leader=0)
+                if found:
+                    box = found[0]
+                    self.take(box, solid=False)
+                    self.o.append(f'<text x="{(box[0] + box[2]) / 2:.1f}" y="{box[3] - 1.5:.1f}" '
+                                  f'text-anchor="middle" class="linespeed">{text}</text>')
+
+
+def name_box(sx, sy, w, tx, ty, anchor):
+    left = sx + tx - (w if anchor == "end" else w / 2 if anchor == "middle" else 0)
+    return (left, sy + ty - 9, left + w, sy + ty + 2)
+
+
+def within(box, p):
+    return box[0] <= p[0] <= box[2] and box[1] <= p[1] <= box[3]
+
+
+def overview_layout(sections, key_height):
+    """Where the map of the sections goes on the first page: as large as it can be with a corner left empty for
+    the key (`key_height` mm tall), then as near the middle as it goes clear of it. Returns (map units per metre,
+    the map point and world point of the top left, the key's corner 'tr', 'tl', 'br' or 'bl', the key's box)."""
+    per_mm = MAP_W / MAP_MM[0]
     pts = [(x, y) for s in sections for _, x, y in s.points]
-    if len(pts) < 2:
-        return "", "tr", 1.0
     xs, ys = [p[0] for p in pts], [p[1] for p in pts]
     x0, x1, y0, y1 = min(xs), max(xs), min(ys), max(ys)
     dx, dy = max(x1 - x0, 1.0), max(y1 - y0, 1.0)
     pad, near = 30.0, 12.0
     kw, kh = (KEY_MM + 3) * per_mm, (key_height + 3) * per_mm
-    corners = {"tr": (width - kw, 0, width, kh), "tl": (0, 0, kw, kh),
-               "br": (width - kw, height - kh, width, height), "bl": (0, height - kh, kw, height)}
-    full = min((width - 2 * pad) / dx, (height - 2 * pad) / dy)
+    corners = {"tr": (MAP_W - kw, 0, MAP_W, kh), "tl": (0, 0, kw, kh),
+               "br": (MAP_W - kw, MAP_H - kh, MAP_W, MAP_H), "bl": (0, MAP_H - kh, kw, MAP_H)}
+    full = min((MAP_W - 2 * pad) / dx, (MAP_H - 2 * pad) / dy)
 
     def placed(scale, corner, centred=0.0):
         """Where the map goes at a scale: pushed away from the key's corner, or `centred` (0-1) of the way back
         to the middle of the page."""
-        spare_x, spare_y = width - 2 * pad - dx * scale, height - 2 * pad - dy * scale
+        spare_x, spare_y = MAP_W - 2 * pad - dx * scale, MAP_H - 2 * pad - dy * scale
         fx = (0.0 if corner[1] == "r" else 1.0) * (1 - centred) + 0.5 * centred
         fy = (1.0 if corner[0] == "t" else 0.0) * (1 - centred) + 0.5 * centred
         return pad + spare_x * fx, pad + spare_y * fy
@@ -1559,171 +1957,231 @@ def route_overview(sections, units, key_height, spots=()):
         a, b, c, d = corners[corner]
         return sum(1 for x, y in pts
                    if a - near <= ox + (x - x0) * scale <= c + near and b - near <= oy + (y - y0) * scale <= d + near)
-    layout = next(((full * (1 - 0.04 * k), corner) for k in range(13) for corner in corners
+    layout = next(((full * (1 - 0.04 * k), corner) for k in range(19) for corner in corners
                    if hits(full * (1 - 0.04 * k), corner) == 0), None)
     if layout is None:                  # nowhere's empty: the corner the key hides least of
         layout = (full, min(corners, key=lambda corner: hits(full, corner)))
         centred = 0.0
-    else:                               # as near the middle as it goes clear of the key
+    else:
         centred = next(t / 10 for t in range(10, -1, -1) if hits(*layout, t / 10) == 0)
     scale, corner = layout
     ox, oy = placed(scale, corner, centred)
+    return scale, (ox, oy), (x0, y0), corner, corners[corner]
 
-    def at(x, y):
-        return ox + (x - x0) * scale, oy + (y - y0) * scale
 
-    def lower(s, m):
-        vs = [v for v in (s.limit_at(True, m), s.limit_at(False, m)) if v is not None]
-        return min(vs) if vs else None
-    o = [f'<svg viewBox="0 0 {width:.0f} {height:.1f}" class="overview full">']
-    taken = [corners[corner]]
-    for s in sections:
-        # the line through its points and every place the limit changes, so a short stretch shows its colour
-        cuts = {x for way in (True, False) for x, _ in s.limits[way] if 0 < x < s.length}
-        marks = sorted([(m, x, y, False) for m, x, y in s.points] + [(x, *s.place(x), True) for x in cuts])
-        run, colour = [], None
-        for (ma, xa, ya, _), (mb, xb, yb, cut) in zip(marks, marks[1:]):
-            v = lower(s, (ma + mb) / 2)
-            c = units.colour(v) if v is not None else "#bbb"
-            if c != colour:
-                if len(run) > 1:
-                    o.append(f'<polyline points="{" ".join(f"{a:.1f},{b:.1f}" for a, b in run)}" '
-                             f'stroke="{colour}" class="line"/>')
-                run, colour = [at(xa, ya)], c
-            q = at(xb, yb)
-            if cut or mb == marks[-1][0] or abs(q[0] - run[-1][0]) + abs(q[1] - run[-1][1]) > 1.5:
-                run.append(q)
-        if len(run) > 1:
-            o.append(f'<polyline points="{" ".join(f"{a:.1f},{b:.1f}" for a, b in run)}" stroke="{colour}" '
-                     'class="line"/>')
-        for _, x, y in s.points:
-            q = at(x, y)
-            taken.append((q[0] - 2, q[1] - 2, q[0] + 2, q[1] + 2))
-    solid = []                          # what a board's leader mustn't run through: names, boards, circles
-
-    def free(box):
-        return box[0] > 4 and box[2] < width - 4 and box[1] > 4 and box[3] < height - 4 and \
-            all(box[2] < t[0] or box[0] > t[2] or box[3] < t[1] or box[1] > t[3] for t in taken)
-    # section numbers at their middles
-    marks = []
-    for s in sections:
-        m, x, y = min(s.points, key=lambda p: abs(p[0] - s.length / 2))
-        q = at(x, y)
-        marks.append((q, s.number))
-        taken.append((q[0] - 9, q[1] - 9, q[0] + 9, q[1] + 9))
-        solid.append(taken[-1])
-    # stations, each once, labels placed where they don't overlap
-    places, seen = [], set()
-    for s in sections:
-        for m1, m2, name in s.stations:
-            if name in seen:
-                continue
-            seen.add(name)
-            _, x, y = min(s.points, key=lambda p: abs(p[0] - (m1 + m2) / 2))
-            sx, sy = at(x, y)
-            places.append((sx, sy, name))
-            taken.append((sx - 5, sy - 5, sx + 5, sy + 5))
-            solid.append(taken[-1])
-    for sx, sy, name in places:
-        w, h = text_width(name, 11), 11
-        tries = [(8, 4, "start"), (-8, 4, "end"), (0, -8, "middle"), (0, 16, "middle"), (8, -6, "start"),
-                 (-8, -6, "end"), (8, 14, "start"), (-8, 14, "end"), (13, -13, "start"), (-13, -13, "end"),
-                 (13, 21, "start"), (-13, 21, "end"), (18, 4, "start"), (-18, 4, "end"), (0, -16, "middle"),
-                 (0, 25, "middle"), (20, -18, "start"), (-20, -18, "end"), (20, 26, "start"), (-20, 26, "end")]
-        for tx, ty, anchor in tries + tries[:1]:
-            left = sx + tx - (w if anchor == "end" else w / 2 if anchor == "middle" else 0)
-            box = (left, sy + ty - h + 2, left + w, sy + ty + 2)
-            if free(box):
+def crowded(view, things, stuck=()):
+    """Boxes (map units) round the crowded places of a trial drawing (`view`): where something found no room, or
+    CROWD[0] names and boards (`things`: their map points) are within CROWD[1] map units, or something on the map
+    found no room at all (`stuck`, a place of its own). A place longer than INSET_MOST is cut across into pieces.
+    The busiest first."""
+    count, radius = CROWD
+    points = view.failed + list(stuck) +         [p for p in things if sum(1 for q in things if math.dist(p, q) < radius) >= count]
+    groups = []
+    for p in points:
+        near = [g for g in groups if any(math.dist(p, q) < radius for q in g)]
+        groups = [g for g in groups if g not in near] + [[p] + [q for g in near for q in g]]
+    boxes = []
+    for g in groups:
+        if len(g) < 2 and g[0] not in stuck:
+            continue
+        xs, ys = [p[0] for p in g], [p[1] for p in g]
+        box = [min(xs) - 14, min(ys) - 14, max(xs) + 14, max(ys) + 14]
+        for q in things:                    # what's just outside comes in (once: no creeping along the line)
+            if not within(box, q) and box[0] - 10 < q[0] < box[2] + 10 and box[1] - 10 < q[1] < box[3] + 10:
+                box = [min(box[0], q[0] - 14), min(box[1], q[1] - 14), max(box[2], q[0] + 14), max(box[3], q[1] + 14)]
+        boxes.append(box)
+    merged = True
+    while merged:                           # boxes that overlap are one
+        merged = False
+        for i, j in itertools.combinations(range(len(boxes)), 2):
+            a, b = boxes[i], boxes[j]
+            if not (a[2] < b[0] or b[2] < a[0] or a[3] < b[1] or b[3] < a[1]):
+                boxes[i] = [min(a[0], b[0]), min(a[1], b[1]), max(a[2], b[2]), max(a[3], b[3])]
+                del boxes[j]
+                merged = True
                 break
-        taken.append(box)
-        solid.append(box)
-        o.append(f'<circle cx="{sx:.1f}" cy="{sy:.1f}" r="3.3" class="dot"/>'
-                 f'<text x="{sx + tx:.1f}" y="{sy + ty:.1f}" text-anchor="{anchor}" class="maplabel">'
-                 f'{esc(name)}</text>')
-
-    def heading(s, m):
-        (ax, ay), (bx, by) = at(*s.place(m - 40)), at(*s.place(m + 40))
-        d = max(math.hypot(bx - ax, by - ay), 0.01)
-        return (bx - ax) / d, (by - ay) / d
-
-    def around(s, m, w, h, reach, ring=16, leaders=None):
-        """A free box w x h near the line m metres along section s: tried round it at each distance in `reach`,
-        across the line first. With `leaders`, one whose leader doesn't cross another or run through a name or
-        board. Returns (box, where on the line, where the leader meets the box) or None."""
-        ax, ay = at(*s.place(m))
-        hx, hy = heading(s, m)
-        angles = sorted((k * 2 * math.pi / ring for k in range(ring)),
-                        key=lambda a: abs(math.cos(a) * hx + math.sin(a) * hy))
-        for r in reach:
-            for a in angles:
-                cx, cy = ax + r * math.cos(a), ay + r * math.sin(a)
-                box = (cx - w / 2, cy - h / 2, cx + w / 2, cy + h / 2)
-                if not free(box):
-                    continue
-                end = (min(max(ax, box[0]), box[2]), min(max(ay, box[1]), box[3]))
-                if leaders is not None and not clear((ax, ay), end, leaders):
-                    continue
-                return box, (ax, ay), end
-        return None
-
-    def clear(a, b, leaders):
-        length = math.hypot(b[0] - a[0], b[1] - a[1])
-        steps = [(a[0] + (b[0] - a[0]) * t / length, a[1] + (b[1] - a[1]) * t / length)
-                 for t in [6 + 3 * k for k in range(int(max(length - 6, 0) // 3))]]
-        return not any(t[0] <= x <= t[2] and t[1] <= y <= t[3] for x, y in steps for t in solid) and \
-            not any(crossing(a, b, c, d) for c, d in leaders)
-    # boards where to slow down, the lowest placed first, each on a leader to the stretch it's for
-    leaders = []
-    for spot in sorted(spots, key=lambda p: p.limit):
-        s, mid = spot.section, (spot.x1 + spot.x2) / 2
-        text = str(units.speed(spot.limit))
-        w, h = text_width(text, 11) + (21 if spot.heading else 9), 14.0
-        found = around(s, mid, w, h, (16, 24, 34, 46, 60, 76), leaders=leaders) or \
-            around(s, mid, w, h, (16, 24, 34, 46, 60, 76))
-        if found is None:                   # nowhere free: across the line, over whatever is there
-            ax, ay = at(*s.place(mid))
-            hx, hy = heading(s, mid)
-            cx, cy = ax - hy * 18, ay + hx * 18
-            box = (cx - w / 2, cy - h / 2, cx + w / 2, cy + h / 2)
-            found = box, (ax, ay), (min(max(ax, box[0]), box[2]), min(max(ay, box[1]), box[3]))
-        box, (ax, ay), end = found
-        taken.append((box[0] - 2, box[1] - 2, box[2] + 2, box[3] + 2))
-        solid.append(box)
-        leaders.append(((ax, ay), end))
-        tx = box[0] + (w - 12 if spot.heading else w) / 2
-        o.append(f'<line x1="{ax:.1f}" y1="{ay:.1f}" x2="{end[0]:.1f}" y2="{end[1]:.1f}" class="leader"/>'
-                 f'<circle cx="{ax:.1f}" cy="{ay:.1f}" r="2" class="leaderdot"/>'
-                 f'<rect x="{box[0]:.1f}" y="{box[1]:.1f}" width="{w:.1f}" height="{h:.0f}" rx="2" '
-                 f'class="{"mapboard low" if units.speed(spot.limit) <= units.slow else "mapboard"}"/>'
-                 f'<text x="{tx:.1f}" y="{box[1] + 10.8:.1f}" text-anchor="middle" class="mapboardtext">{text}</text>')
-        if spot.heading:                    # for going one way only: an arrow that way
-            angle = math.degrees(math.atan2(spot.heading[1], spot.heading[0]))
-            o.append(f'<g transform="translate({box[2] - 9:.1f},{box[1] + h / 2:.1f}) rotate({angle:.0f})">'
-                     '<line x1="-5" y1="0" x2="1" y2="0" class="maparrow"/><path d="M5,0 L0,-3.4 L0,3.4 Z" '
-                     'class="maparrowhead"/></g>')
-    # the limit beside the line along the long stretches that aren't slow
-    for s in sections:
-        limits = s.lower_limits()
-        slow = slow_stretches(limits, units)
-        for x1, x2, v in limits:
-            if v is None or x2 - x1 < LONG_RUN or (x1, x2, v) in slow:
+    pieces = []
+    for b in boxes:                         # a long one cut across its length, each piece down to what's in it
+        axis = 0 if b[2] - b[0] >= b[3] - b[1] else 1
+        n = math.ceil((b[axis + 2] - b[axis]) / INSET_MOST)
+        for k in range(n):
+            lo = b[axis] + (b[axis + 2] - b[axis]) * k / n
+            hi = b[axis] + (b[axis + 2] - b[axis]) * (k + 1) / n
+            mine = [q for q in things if within(b, q) and lo <= q[axis] < hi + (k == n - 1)]
+            if len(mine) < 2 and not any(within(b, q) and lo <= q[axis] < hi + (k == n - 1) for q in stuck):
                 continue
-            text = str(units.speed(v))
-            found = around(s, (x1 + x2) / 2, text_width(text, 10), 10.0, (10, 14, 19), ring=8)
-            if found:
-                box = found[0]
-                taken.append(box)
-                o.append(f'<text x="{(box[0] + box[2]) / 2:.1f}" y="{box[3] - 1.5:.1f}" text-anchor="middle" '
-                         f'class="linespeed">{text}</text>')
-    for (qx, qy), number in marks:
-        o.append(f'<circle cx="{qx:.1f}" cy="{qy:.1f}" r="8" class="maplink"/>'
-                 f'<text x="{qx:.1f}" y="{qy + 3.7:.1f}" text-anchor="middle" class="maplinktext">{number}</text>')
-    o.append('</svg>')
-    return "".join(o), corner, scale
+            xs, ys = [q[0] for q in mine], [q[1] for q in mine]
+            piece = [max(b[0], min(xs) - 14), max(b[1], min(ys) - 14), min(b[2], max(xs) + 14),
+                     min(b[3], max(ys) + 14)]
+            piece[axis], piece[axis + 2] = max(piece[axis], lo), min(piece[axis + 2], hi)
+            spare = INSET_NARROWEST / INSET_ZOOMS[0] - (piece[2] - piece[0])
+            if spare > 0:
+                piece[0], piece[2] = piece[0] - spare / 2, piece[2] + spare / 2
+            pieces.append((len(mine), piece))
+    return [piece for _, piece in sorted(pieces, key=lambda p: -p[0])]
 
 
-def render_route(info, sections, units):
-    """The printable document of a whole route."""
+def route_overview(sections, units, key_height, spots=(), stations=()):
+    """The first page's map: the sections filling the page, coloured by the lower limit of the two ways, with the
+    long sections' numbers, every one of the `stations` (route_stations) named, a board at each of the `spots`
+    (slow_spots) and the limit along long stretches; as large as it can be with a corner left empty for the key
+    (`key_height` mm tall). Crowded places are framed and drawn again larger, lettered, where the page is empty.
+    Returns (svg, the key's corner: 'tr', 'tl', 'br' or 'bl', map units per metre)."""
+    if sum(len(s.points) for s in sections) < 2:
+        return "", "tr", 1.0
+    scale, (ox, oy), (x0, y0), corner, key_box = overview_layout(sections, key_height)
+    page = (0, 0, MAP_W, MAP_H)
+
+    def anchor(view, spot):
+        return view.at(*spot.section.place((spot.x1 + spot.x2) / 2))
+    # a trial drawing finds the crowded places
+    trial = MapView(scale, ox, oy, x0, y0, page, strict=True)
+    trial.lines(sections, units)
+    trial.take(key_box)
+    trial.section_numbers(sections, units)
+    trial.names(trial.dots(stations))
+    trial.boards(spots, units)
+    things = [trial.at(*p) for _, p in stations] + [anchor(trial, p) for p in spots]
+    stuck = []
+    for _ in range(3):                      # what the map itself has no room for gets a box too
+        boxes = crowded(trial, things, stuck)
+
+        def boxed(p):
+            return any(within(b, p) for b in boxes)
+        main = MapView(scale, ox, oy, x0, y0, page)
+        main.lines(sections, units)
+        main.take(key_box)
+        numbers = main.section_numbers(sections, units)
+        placed = main.dots(stations)
+        for b in boxes:                     # where the frames go: nothing else from outside them
+            main.taken.add(tuple(b))
+        main.names([(n, q) for n, q in placed if not boxed(q)])
+        main.boards([p for p in spots if not boxed(anchor(main, p))], units)
+        if not main.stuck:
+            break
+        stuck += main.stuck
+    main.line_speeds(sections, units, skip=boxes)
+    empty = Occupancy()
+    for box in main.drawn + [tuple(b) for b in boxes]:
+        empty.add(box)
+
+    defs, insets, framed = [], [], []
+    for b in boxes:
+        letter = chr(ord("A") + len(framed))
+        made = inset(sections, units, spots, stations, main, b, empty, letter)
+        if made is None:                    # no room for it: its names and boards go on the map after all
+            main.taken.remove(tuple(b))
+            main.names([(n, q) for n, q in placed if within(b, q)])
+            main.boards([p for p in spots if within(b, anchor(main, p))], units)
+            continue
+        frame, clip, svg, outline = made
+        framed.append(frame)
+        defs.append(clip)
+        insets.append(svg)
+        main.take(outline, solid=False)
+        empty.add(outline, 6)
+        # its frame on the map, with its letter at a free corner
+        f0, f1, f2, f3 = frame
+        tags = [(f0 - 1, f1 - 14), (f2 - 12, f1 - 14), (f0 - 1, f3 + 1), (f2 - 12, f3 + 1), (f0 - 14, f1),
+                (f2 + 1, f1), (f0 - 14, f3 - 13), (f2 + 1, f3 - 13), (f0 - 15, f1 - 15), (f2 + 2, f1 - 15),
+                (f0 - 15, f3 + 2), (f2 + 2, f3 + 2), (f0 + 2, f1 + 2), (f2 - 15, f1 + 2), (f0 + 2, f3 - 15),
+                (f2 - 15, f3 - 15)]
+        tx, ty = next(((x, y) for x, y in tags if main.free((x, y, x + 13, y + 13))), tags[0])
+        main.take((tx, ty, tx + 13, ty + 13))
+        main.o.append(f'<rect x="{f0:.1f}" y="{f1:.1f}" width="{f2 - f0:.1f}" height="{f3 - f1:.1f}" rx="4" '
+                      f'class="frame"/><rect x="{tx:.1f}" y="{ty:.1f}" width="13" height="13" class="insettag"/>'
+                      f'<text x="{tx + 6.5:.1f}" y="{ty + 10:.1f}" text-anchor="middle" class="insettagtext small">'
+                      f'{letter}</text>')
+    main.draw_numbers([n for n in numbers if not any(within(f, n[0]) for f in framed)])
+    return (f'<svg viewBox="0 0 {MAP_W:.0f} {MAP_H:.1f}" class="overview full"><defs>{"".join(defs)}</defs>'
+            f'{"".join(main.o)}{"".join(insets)}</svg>', corner, scale)
+
+
+def inset(sections, units, spots, stations, main, box, empty, letter):
+    """The box (map units) of the main map drawn larger where the map is empty (`empty`): the smallest of
+    INSET_ZOOMS everything fits at, cut down to what's in it. Returns (its frame on the main map, its clip path,
+    its svg, its outline) or None if there's no room for it."""
+    centre = ((box[0] + box[2]) / 2, (box[1] + box[3]) / 2)
+    world = main.back(box[0], box[1])
+    inner = [(n, main.at(*p)) for n, p in stations if within(box, main.at(*p))]
+    ends = [n for n, _ in sorted(max(itertools.combinations(inner, 2), key=lambda ab: math.dist(ab[0][1], ab[1][1])),
+                                 key=lambda st: st[1][0])] if len(inner) > 1 else [n for n, _ in inner]
+
+    def draw(view):
+        view.lines(sections, units)
+        view.names(view.dots(stations))
+        view.boards(spots, units)
+        view.line_speeds(sections, units)
+        return view
+    best = None
+    for zoom in INSET_ZOOMS:
+        w, h = (box[2] - box[0]) * zoom, (box[3] - box[1]) * zoom
+        if w > 0.75 * MAP_W or h + INSET_TITLE > 0.97 * MAP_H:
+            break
+        view = draw(MapView(main.scale * zoom, 0, 0, world[0], world[1], (0, 0, w, h)))
+        # cut down to what's drawn, keeping room for the title and the scale bar
+        shown = [d for d in view.drawn if d[2] > 0 and d[0] < w and d[3] > 0 and d[1] < h]
+        if not shown:
+            continue
+        c0, c1 = max(min(d[0] for d in shown) - 6, 0), max(min(d[1] for d in shown) - 6, 0)
+        c2, c3 = min(max(d[2] for d in shown) + 6, w), min(max(d[3] for d in shown) + 6, h)
+        narrowest = min(INSET_NARROWEST, w)
+        if c2 - c0 < narrowest:
+            c0 = max(c0 - (narrowest - (c2 - c0)) / 2, 0)
+            c2 = min(c0 + narrowest, w)
+            c0 = c2 - narrowest
+        cw, ch = c2 - c0, c3 - c1
+        spot = empty.empty(cw, ch + INSET_TITLE + 12, centre)
+        if spot is None:
+            continue
+        fails = (len(view.stuck), len(view.failed))
+        if best is None or fails < best[0]:
+            best = (fails, zoom, view, (c0, c1, c2, c3), spot)
+        if fails[0] == 0 and fails[1] <= 1:
+            break
+    if best is None:
+        return None
+    _, zoom, trial, (c0, c1, c2, c3), (px, py) = best
+    cw, ch = c2 - c0, c3 - c1
+    top = py + INSET_TITLE
+    room = cw - 30                          # the title: both ends, or the first, or as much of it as fits
+    title = next((tt for tt in (" – ".join(ends), ends[0] if ends else "") if text_width(tt, 10) <= room), None)
+    if title is None:
+        title = ends[0]
+        while title and text_width(title + "…", 10) > room:
+            title = title[:-1]
+        title = title.rstrip() + "…"
+    corner = trial.back(c0, c1)
+    view = draw(MapView(main.scale * zoom, px, top, corner[0], corner[1], (px, top, px + cw, top + ch)))
+    # the scale bar: in a free bottom corner, or under the drawing
+    bar = max([x for x in (0.1, 0.25, 0.5, 1, 2, 5) if x * units.length * view.scale <= min(cw * 0.35, 90)]
+              or [0.1])
+    length = bar * units.length * view.scale
+    label = f"{bar:g} {units.unit} · ×{zoom:g}"
+    need = length + text_width(label, 8) + 10
+    spots_for_bar = [(px + cw - need - 4, top + ch - 13), (px + 4, top + ch - 13)]
+    sx, sy = next(((x, y) for x, y in spots_for_bar if view.free((x, y, x + need, y + 11))), (None, None))
+    height = ch
+    if sx is None:
+        sx, sy, height = px + cw - need - 4, top + ch, ch + 12
+    outline = (px, py, px + cw, top + height)
+    frame0, frame1 = main.at(*corner), main.at(*view.back(px + cw, top + ch))
+    svg = (f'<g class="inset"><rect x="{px:.1f}" y="{py:.1f}" width="{cw:.1f}" height="{top + height - py:.1f}" '
+           f'class="insetbox"/><rect x="{px:.1f}" y="{py:.1f}" width="{INSET_TITLE:.0f}" '
+           f'height="{INSET_TITLE:.0f}" class="insettag"/><text x="{px + 8:.1f}" y="{py + 12:.1f}" '
+           f'text-anchor="middle" class="insettagtext">{letter}</text><text x="{px + 22:.1f}" y="{py + 12:.1f}" '
+           f'class="insettitle">{esc(title)}</text><line x1="{px + INSET_TITLE:.1f}" x2="{px + cw:.1f}" '
+           f'y1="{top:.1f}" y2="{top:.1f}" class="insetrule"/><g clip-path="url(#clip{letter})">{"".join(view.o)}</g>'
+           f'<text x="{sx:.1f}" y="{sy + 8:.1f}" class="insetscale">{esc(label)}</text>'
+           f'<rect x="{sx + need - length - 2:.1f}" y="{sy + 5:.1f}" width="{length:.1f}" height="2.5" '
+           f'fill="#111"/></g>')
+    clip = (f'<clipPath id="clip{letter}"><rect x="{px:.1f}" y="{top:.1f}" width="{cw:.1f}" height="{ch:.1f}"/>'
+            f'</clipPath>')
+    return (frame0[0], frame0[1], frame1[0], frame1[1]), clip, svg, outline
+
+
+def render_route(info, sections, units, places=None):
+    """The printable document of a whole route. `places`: {station: [(x, y)]} the journeys run past."""
     route_line = f'passenger speed limits in {units.speed_unit}, both ways'
     made = datetime.date.today().isoformat()
     names = {s.number: section_title(s, sections) for s in sections}
@@ -1747,14 +2205,21 @@ def render_route(info, sections, units):
     if page:
         pages.append('<div class="strips">' + "".join(page) + '</div>')
 
-    def pages_of(number):
-        p = on_page[number]
+    def pages_of(numbers):
+        p = sorted({n for number in numbers for n in on_page[number]})
         return f"{p[0]}" if len(p) == 1 else f"{p[0]}-{p[-1]}"
     rows = []
-    for s in sections:
+    long_ones = [s for s in sections if s.length >= units.length]
+    short = [s for s in sections if s.length < units.length]
+    for s in long_ones:
         first, last = names[s.number]
         rows.append(f'<tr><td class="sec">{s.number}</td><td>{esc(first)} – {esc(last)}</td>'
-                    f'<td class="num">{s.length / units.length:.1f}</td><td class="num">{pages_of(s.number)}</td></tr>')
+                    f'<td class="num">{s.length / units.length:.1f}</td><td class="num">{pages_of([s.number])}</td>'
+                    f'</tr>')
+    if short:                               # numbered on their strips, not on the map
+        rows.append(f'<tr><td class="sec"></td><td colspan="2" class="shortsec">{len(short)} short loops and '
+                    f'crossovers: {", ".join(str(s.number) for s in short)}</td>'
+                    f'<td class="num">{pages_of([s.number for s in short])}</td></tr>')
     total = sum(s.length for s in sections) / units.length
     sub = (f'{route_line} · {len(sections)} sections, {total:.1f} {units.unit} of line · from {info["journeys"]} '
            f'journeys in {info["timetable"]}')
@@ -1762,13 +2227,17 @@ def render_route(info, sections, units):
     notes = (f"Boards: where to slow down, to {units.slow} {speed} or less (red edge) or to {units.drop} {speed} or "
              "more below the limit either side. Each gives the lower limit of the two ways on the coloured stretch it "
              "points to; one with an arrow is only for trains going that way. Grey numbers: the limit along long "
-             f"stretches. Pages 2-{len(pages) + 1} have every limit both ways, with boards, signals and platforms.")
+             "stretches. A lettered frame is drawn larger in the box with its letter. Pages "
+             f"2-{len(pages) + 1} have every limit both ways, with boards, signals and platforms.")
     # the key's height in mm, roughly (the lines its text takes), for the map to leave room for it
-    titles = [f"{a} – {b}" for a, b in names.values()]
-    key_height = (9 + 3.5 * math.ceil(len(sub) / 58) + 10 + 7 + 5.5 + sum(4.2 * math.ceil(len(t) / 40) for t in titles)
-                  + 3.3 * math.ceil(len(notes) / 64) + 9)
-    overview, corner, scale = route_overview(sections, units, key_height, slow_spots(sections, units))
-    per_mm = 1000.0 / MAP_MM[0]
+    titles = [f"{a} – {b}" for s in long_ones for a, b in [names[s.number]]]
+    if short:
+        titles.append(f"{len(short)} short loops and crossovers: " + ", ".join(str(s.number) for s in short))
+    key_height = (9 + 3.5 * math.ceil(len(sub) / 58) + 10 + 7 + 5.5
+                  + sum(1.4 + 3.5 * math.ceil(len(t) / 28) for t in titles) + 3.3 * math.ceil(len(notes) / 64) + 9)
+    overview, corner, scale = route_overview(sections, units, key_height, slow_spots(sections, units),
+                                             route_stations(sections, places))
+    per_mm = MAP_W / MAP_MM[0]
     bar = max([b for b in (0.25, 0.5, 1, 2, 5, 10, 20, 50, 100) if b * units.length * scale / per_mm <= 32]
               or [0.25])
     bar_mm = bar * units.length * scale / per_mm
@@ -1935,17 +2404,23 @@ def make_route_map(library, route, say=print):
             platforms = path_platforms(network, pieces)
             stops = [pieces[0][0]] + [m for m, _ in stops_along(rows, services[service_name].instructions)]
             followed.append((timetable, pieces, [m for m in stops
-                                                 if any(a - 60 <= m <= b + 60 for a, b, _ in platforms)]))
+                                                 if any(a - 60 <= m <= b + 60 for a, b, _ in platforms)], platforms))
     # passenger journeys: from the first stop at a platform to the last (no depot moves, freight, light engines)
     passenger = [f for f in followed if len(f[2]) >= 2]
     coverage = Coverage(network)
     paths, ends, timetables_used = [], [], set()
-    for timetable, pieces, stops in passenger or followed:
+    places = collections.defaultdict(list)          # station -> [(x, y)] where the journeys pass its platforms
+    for timetable, pieces, stops, platforms in passenger or followed:
         path = coverage.samples(pieces, stops[0] - 300, stops[-1] + 50) if passenger else coverage.samples(pieces)
         if path:
             paths.append(path)
             ends += [path[0], path[-1]]
             timetables_used.add(timetable)
+            for a, b, platform in platforms:
+                k = bisect.bisect_left(path, (a + b) / 2, key=lambda s: s.m)
+                if path[0].m <= (a + b) / 2 <= path[-1].m and "staff halt" not in platform.lower():
+                    s = path[min(k, len(path) - 1)]
+                    places[station_name(platform)].append((s.x, s.y))
     if not paths:
         raise MapError(f"Couldn't follow any journey over the track of {name}")
     say("Laying out the sections...")
@@ -1957,7 +2432,7 @@ def make_route_map(library, route, say=print):
     info = {"route": name, "journeys": len(paths), "timetable": ", ".join(timetable_names)}
     units = Units(imperial_limits([(0, v) for s in sections for way in (True, False)
                                    for _, v in s.limits[way] if v is not None]))
-    path = save_map(f"{name} whole route", render_route(info, sections, units))
+    path = save_map(f"{name} whole route", render_route(info, sections, units, places))
     say(f"{len(sections)} sections, {sum(s.length for s in sections) / units.length:.1f} {units.unit} of line, "
         f"from {len(paths)} journeys")
     return path

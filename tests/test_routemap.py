@@ -169,5 +169,66 @@ class SlowSpots(unittest.TestCase):
         self.assertEqual([round(p.limit / MPH) for p in spots], [40])
 
 
+
+class Stations(unittest.TestCase):
+    def test_names_are_tidied(self):
+        self.assertEqual(rm.station_name("Coryton Station Platform 1"), "Coryton")
+        self.assertEqual(rm.station_name("Westbourne Park Westbound"), "Westbourne Park")
+        self.assertEqual(rm.station_name("Smethwick Rolfe Street P2"), "Smethwick Rolfe Street")
+        self.assertEqual(rm.station_name("Station Road"), "Station Road")
+
+    def test_one_station_spelt_two_ways_is_one(self):
+        net = network(("s", "n1", "n2", (0.0, 0.0), (1.0, 0.0), 3000.0, None, 90))
+        net.ribbons["s"].platforms.append((0.5, 0.52, "Schlüchtern Gleis 1"))
+        sections = route(net, [(0.0, "s", 0.0, 1.0)])
+        stations = rm.route_stations(sections, {"Schluechtern": [(1540.0, 5.0)], "Elsewhere": [(2900.0, 0.0)]})
+        self.assertEqual([n for n, _ in stations], ["Elsewhere", "Schlüchtern"])
+
+    def test_the_numbered_platforms_of_one_station_are_one(self):
+        named = [("Stafford 1", (0, 0)), ("Stafford 3", (30, 0)), ("Heathrow Terminal 4", (0, 100)),
+                 ("Heathrow Terminal 5", (5000, 100))]
+        out = rm.numbered_twins(named, lambda p, q: math.dist(p, q) < 400)
+        self.assertEqual([n for n, _ in out], ["Stafford", "Stafford", "Heathrow Terminal 4", "Heathrow Terminal 5"])
+
+    def test_a_station_off_the_drawn_track_is_named_too(self):
+        net = network(("s", "n1", "n2", (0.0, 0.0), (1.0, 0.0), 3000.0, None, 90))
+        net.ribbons["s"].platforms.append((0.1, 0.12, "Alpha Platform 1"))
+        sections = route(net, [(0.0, "s", 0.0, 1.0)])
+        stations = rm.route_stations(sections, {"Beta": [(1500.0, 40.0), (1500.0, 44.0)]})
+        self.assertEqual([n for n, _ in stations], ["Alpha", "Beta"])
+        self.assertEqual(stations[1][1], (1500.0, 42.0))
+
+
+class FirstPage(unittest.TestCase):
+    def page(self, crowded):
+        """The first page's map of 40 km of line east, with 3 stations along it and (`crowded`) 9 more in its
+        first 1.5 km."""
+        net = network(("s", "n1", "n2", (0.0, 0.0), (1.0, 0.0), 40000.0, None, 90))
+        names = [f"Far {c}" for c in "ABC"]
+        net.ribbons["s"].platforms += [(0.3 + 0.25 * k, 0.302 + 0.25 * k, name) for k, name in enumerate(names)]
+        if crowded:
+            near = [f"Near {c}" for c in "ABCDEFGHI"]
+            net.ribbons["s"].platforms += [(0.004 + 0.004 * k, 0.005 + 0.004 * k, n) for k, n in enumerate(near)]
+            names += near
+        sections = route(net, [(0.0, "s", 0.0, 1.0)], [(0.0, "s", 1.0, 0.0)])
+        units = rm.Units(True)
+        svg, _, _ = rm.route_overview(sections, units, 60, rm.slow_spots(sections, units),
+                                      rm.route_stations(sections))
+        return svg, names
+
+    def test_a_crowded_place_is_drawn_again_larger(self):
+        svg, names = self.page(True)
+        self.assertEqual(svg.count('class="insetbox"'), 1)
+        self.assertIn('class="frame"', svg)
+        for name in names:
+            self.assertIn(f">{name}<", svg)
+
+    def test_an_uncrowded_line_has_no_inset(self):
+        svg, names = self.page(False)
+        self.assertNotIn('class="insetbox"', svg)
+        for name in names:
+            self.assertIn(f">{name}<", svg)
+
+
 if __name__ == "__main__":
     unittest.main()
