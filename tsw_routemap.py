@@ -544,6 +544,14 @@ def esc(text):
     return html.escape(str(text), quote=True)
 
 
+def legend(units, extra):
+    """The colour key, the swatches drawn as lines: a browser leaves background colours out of a print."""
+    swatches = "".join(f'<span><svg class="swatch" viewBox="0 0 24 6" preserveAspectRatio="none"><line x1="0" x2="24" '
+                       f'y1="3" y2="3" stroke="{c}" stroke-width="6"/></svg>{esc(label)}</span>'
+                       for _, c, label in units.bands)
+    return f'<div class="legend">{swatches}<span>{esc(extra)}</span></div>'
+
+
 def text_width(text, size):
     return len(str(text)) * size * 0.56
 
@@ -753,7 +761,7 @@ def where(prof, units, m):
 
 CSS = """
 @page { size: A4 landscape; margin: 0; }
-* { box-sizing: border-box; }
+* { box-sizing: border-box; -webkit-print-color-adjust: exact; print-color-adjust: exact; }
 body { margin: 0; background: #d9d9d6; font-family: "Segoe UI", Arial, sans-serif; color: #111; }
 .page { width: 297mm; height: 210mm; padding: 9mm 10mm; margin: 6mm auto; background: #fff; position: relative;
         overflow: hidden; break-after: page; display: flex; flex-direction: column; }
@@ -774,7 +782,7 @@ h1 { font-size: 20pt; font-weight: 600; margin: 0 0 1mm; }
 .legend { display: flex; flex-wrap: wrap; gap: 2mm 5mm; font-size: 8pt; color: #333; margin-top: 2mm;
           align-items: center; }
 .legend span { display: inline-flex; align-items: center; gap: 1.5mm; }
-.swatch { width: 6mm; height: 1.4mm; display: inline-block; }
+.swatch { width: 6mm; height: 1.6mm; display: inline-block; }
 table.card { border-collapse: collapse; width: 100%; font-size: 8.6pt; }
 table.card th { text-align: left; font-weight: 600; border-bottom: 0.3mm solid #111; padding: 0.8mm 2mm; }
 table.card td { padding: 0.55mm 2mm; border-bottom: 0.1mm solid #ddd; }
@@ -841,8 +849,6 @@ def render(info, prof, units):
     first_rows, per_column = 36, 42
     pages = []
 
-    legend = "".join(f'<span><i class="swatch" style="background:{c}"></i>{esc(label)}</span>'
-                     for _, c, label in units.bands)
     gaps = ""
     if prof.gaps:
         gaps = (" Short stretches the files couldn't follow the service over (the track is dashed there): " +
@@ -855,7 +861,7 @@ def render(info, prof, units):
         f'<h1>{title}</h1><div class="sub">{route_line} · {length:.1f} {units.unit} · '
         f'{sum(1 for s in prof.stations if s[3])} stops · {esc(info["timetable"])}</div>'
         f'<div class="cols"><div class="left">{overview_map(prof, units)}'
-        f'<div class="legend">{legend}<span>bold: stops</span></div>'
+        f'{legend(units, "bold: stops")}'
         f'<div class="note">Limits for passenger trains, from the route files. A board marks where the front of '
         f'the train meets the new limit; where the limit rises, keep to the lower one until the whole train is past. '
         f'Distances are from the start of the service. Signals shown are the ones facing this way.{gaps}</div>'
@@ -1409,21 +1415,68 @@ ROUTE_CSS = """
 table.index td.num, table.index th.num { text-align: right; font-variant-numeric: tabular-nums; }
 table.index td.sec { font-weight: 700; width: 9mm; }
 .maplink { fill: #fff; stroke: #111; stroke-width: 1.3; }
-.maplinktext { font-size: 10px; font-weight: 700; fill: #111; }
+.maplinktext { font-size: 10.5px; font-weight: 700; fill: #111; }
+.mapfull { position: relative; width: 277mm; height: 179mm; }
+.overview.full { width: 277mm; height: 179mm; border: 0.2mm solid #bbb; }
+.overview.full .maplabel { font-size: 11px; }
+.key { position: absolute; width: 92mm; background: #fff; border: 0.2mm solid #bbb; padding: 2.5mm 3mm; }
+.key.tr { top: 0; right: 0; } .key.tl { top: 0; left: 0; } .key.br { bottom: 0; right: 0; }
+.key.bl { bottom: 0; left: 0; }
+.keytitle { font-size: 15pt; font-weight: 600; line-height: 1.15; }
+.keysub { font-size: 8pt; color: #444; margin: 0.8mm 0 1mm; }
+.key .legend { margin-top: 1mm; gap: 1.2mm 3.5mm; }
+.keyscale { display: flex; align-items: center; gap: 2mm; font-size: 8pt; color: #333; margin: 1.8mm 0 1.5mm; }
+.keyscale .north { margin-left: auto; font-weight: 600; }
+.key table.card { font-size: 8pt; }
+.key .note { font-size: 7.3pt; line-height: 1.35; }
 """
 
 
-def route_overview(sections, units, width=520.0, height=470.0):
-    """A map of the sections, coloured by the lower limit of the two ways, numbered, with the stations."""
+MAP_MM = (277.0, 179.0)     # the whole-route map: all of the first page under its heading
+KEY_MM = 92.0               # how wide the key is, in the map's emptiest corner
+
+
+def route_overview(sections, units, key_height):
+    """A map of the sections filling the page, coloured by the lower limit of the two ways, numbered, with the
+    stations; as large as it can be with a corner left empty for the key (`key_height` mm tall). Returns (svg,
+    the corner: 'tr', 'tl', 'br' or 'bl', map units per metre)."""
+    width = 1000.0
+    height = width * MAP_MM[1] / MAP_MM[0]
+    per_mm = width / MAP_MM[0]
     pts = [(x, y) for s in sections for _, x, y in s.points]
     if len(pts) < 2:
-        return ""
+        return "", "tr", 1.0
     xs, ys = [p[0] for p in pts], [p[1] for p in pts]
     x0, x1, y0, y1 = min(xs), max(xs), min(ys), max(ys)
-    pad = 60.0
-    scale = min((width - 2 * pad) / max(x1 - x0, 1), (height - 2 * pad) / max(y1 - y0, 1))
-    ox = (width - (x1 - x0) * scale) / 2
-    oy = (height - (y1 - y0) * scale) / 2
+    dx, dy = max(x1 - x0, 1.0), max(y1 - y0, 1.0)
+    pad, near = 30.0, 12.0
+    kw, kh = (KEY_MM + 3) * per_mm, (key_height + 3) * per_mm
+    corners = {"tr": (width - kw, 0, width, kh), "tl": (0, 0, kw, kh),
+               "br": (width - kw, height - kh, width, height), "bl": (0, height - kh, kw, height)}
+    full = min((width - 2 * pad) / dx, (height - 2 * pad) / dy)
+
+    def placed(scale, corner, centred=0.0):
+        """Where the map goes at a scale: pushed away from the key's corner, or `centred` (0-1) of the way back
+        to the middle of the page."""
+        spare_x, spare_y = width - 2 * pad - dx * scale, height - 2 * pad - dy * scale
+        fx = (0.0 if corner[1] == "r" else 1.0) * (1 - centred) + 0.5 * centred
+        fy = (1.0 if corner[0] == "t" else 0.0) * (1 - centred) + 0.5 * centred
+        return pad + spare_x * fx, pad + spare_y * fy
+
+    def hits(scale, corner, centred=0.0):
+        ox, oy = placed(scale, corner, centred)
+        a, b, c, d = corners[corner]
+        return sum(1 for x, y in pts
+                   if a - near <= ox + (x - x0) * scale <= c + near and b - near <= oy + (y - y0) * scale <= d + near)
+    layout = next(((full * (1 - 0.04 * k), corner) for k in range(13) for corner in corners
+                   if hits(full * (1 - 0.04 * k), corner) == 0), None)
+    if layout is None:                  # nowhere's empty: the corner the key hides least of
+        layout = (full, min(corners, key=lambda corner: hits(full, corner)))
+        centred = 0.0
+    else:                               # as near the middle as it goes clear of the key
+        centred = next(t / 10 for t in range(10, -1, -1) if hits(*layout, t / 10) == 0)
+    scale, corner = layout
+    ox, oy = placed(scale, corner, centred)
 
     def at(x, y):
         return ox + (x - x0) * scale, oy + (y - y0) * scale
@@ -1431,8 +1484,8 @@ def route_overview(sections, units, width=520.0, height=470.0):
     def lower(s, m):
         vs = [v for v in (s.limit_at(True, m), s.limit_at(False, m)) if v is not None]
         return min(vs) if vs else None
-    o = [f'<svg viewBox="0 0 {width:.0f} {height:.0f}" class="overview">']
-    taken = []
+    o = [f'<svg viewBox="0 0 {width:.0f} {height:.1f}" class="overview full">']
+    taken = [corners[corner]]
     for s in sections:
         run, colour = [], None
         for m, x, y in s.points:
@@ -1452,7 +1505,7 @@ def route_overview(sections, units, width=520.0, height=470.0):
                      'class="line"/>')
 
     def free(box):
-        return box[0] > 4 and box[2] < width - 4 and box[1] > 4 and box[3] < height - 30 and \
+        return box[0] > 4 and box[2] < width - 4 and box[1] > 4 and box[3] < height - 4 and \
             all(box[2] < t[0] or box[0] > t[2] or box[3] < t[1] or box[1] > t[3] for t in taken)
     # section numbers at their middles
     marks = []
@@ -1460,7 +1513,7 @@ def route_overview(sections, units, width=520.0, height=470.0):
         m, x, y = min(s.points, key=lambda p: abs(p[0] - s.length / 2))
         q = at(x, y)
         marks.append((q, s.number))
-        taken.append((q[0] - 8, q[1] - 8, q[0] + 8, q[1] + 8))
+        taken.append((q[0] - 9, q[1] - 9, q[0] + 9, q[1] + 9))
     # stations, each once, labels placed where they don't overlap
     places, seen = [], set()
     for s in sections:
@@ -1473,31 +1526,25 @@ def route_overview(sections, units, width=520.0, height=470.0):
             places.append((sx, sy, name))
             taken.append((sx - 5, sy - 5, sx + 5, sy + 5))
     for sx, sy, name in places:
-        w, h = text_width(name, 10), 10
-        tries = [(8, 4, "start"), (-8, 4, "end"), (0, -8, "middle"), (0, 15, "middle"), (8, -6, "start"),
-                 (-8, -6, "end"), (8, 13, "start"), (-8, 13, "end"), (13, -13, "start"), (-13, -13, "end"),
-                 (13, 20, "start"), (-13, 20, "end")]
-        for dx, dy, anchor in tries + tries[:1]:
-            left = sx + dx - (w if anchor == "end" else w / 2 if anchor == "middle" else 0)
-            box = (left, sy + dy - h + 2, left + w, sy + dy + 2)
+        w, h = text_width(name, 11), 11
+        tries = [(8, 4, "start"), (-8, 4, "end"), (0, -8, "middle"), (0, 16, "middle"), (8, -6, "start"),
+                 (-8, -6, "end"), (8, 14, "start"), (-8, 14, "end"), (13, -13, "start"), (-13, -13, "end"),
+                 (13, 21, "start"), (-13, 21, "end"), (18, 4, "start"), (-18, 4, "end"), (0, -16, "middle"),
+                 (0, 25, "middle"), (20, -18, "start"), (-20, -18, "end"), (20, 26, "start"), (-20, 26, "end")]
+        for tx, ty, anchor in tries + tries[:1]:
+            left = sx + tx - (w if anchor == "end" else w / 2 if anchor == "middle" else 0)
+            box = (left, sy + ty - h + 2, left + w, sy + ty + 2)
             if free(box):
                 break
         taken.append(box)
-        o.append(f'<circle cx="{sx:.1f}" cy="{sy:.1f}" r="3" class="dot"/>'
-                 f'<text x="{sx + dx:.1f}" y="{sy + dy:.1f}" text-anchor="{anchor}" class="maplabel" '
-                 f'style="font-size:10px">{esc(name)}</text>')
+        o.append(f'<circle cx="{sx:.1f}" cy="{sy:.1f}" r="3.3" class="dot"/>'
+                 f'<text x="{sx + tx:.1f}" y="{sy + ty:.1f}" text-anchor="{anchor}" class="maplabel">'
+                 f'{esc(name)}</text>')
     for (qx, qy), number in marks:
-        o.append(f'<circle cx="{qx:.1f}" cy="{qy:.1f}" r="7.5" class="maplink"/>'
-                 f'<text x="{qx:.1f}" y="{qy + 3.5:.1f}" text-anchor="middle" class="maplinktext">{number}</text>')
-    span = (width - 2 * pad) / scale / units.length
-    bar = next(s for s in (0.25, 0.5, 1, 2, 5, 10, 20, 50, 100) if s >= span / 6)
-    bw = bar * units.length * scale
-    o.append(f'<line x1="20" x2="{20 + bw:.1f}" y1="{height - 18}" y2="{height - 18}" class="scalebar"/>'
-             f'<text x="{20 + bw / 2:.1f}" y="{height - 24}" text-anchor="middle" class="axis">'
-             f'{bar:g} {units.unit}</text>'
-             f'<path d="M{width - 22} {height - 40} l7 18 h-14 z" class="north"/>'
-             f'<text x="{width - 22}" y="{height - 8}" text-anchor="middle" class="axis">N</text></svg>')
-    return "".join(o)
+        o.append(f'<circle cx="{qx:.1f}" cy="{qy:.1f}" r="8" class="maplink"/>'
+                 f'<text x="{qx:.1f}" y="{qy + 3.7:.1f}" text-anchor="middle" class="maplinktext">{number}</text>')
+    o.append('</svg>')
+    return "".join(o), corner, scale
 
 
 def render_route(info, sections, units):
@@ -1531,28 +1578,36 @@ def render_route(info, sections, units):
     rows = []
     for s in sections:
         first, last = names[s.number]
-        meets = ", ".join(str(n) for n in sorted({n for _, n in s.links}))
         rows.append(f'<tr><td class="sec">{s.number}</td><td>{esc(first)} – {esc(last)}</td>'
-                    f'<td class="num">{s.length / units.length:.1f}</td><td class="num">{pages_of(s.number)}</td>'
-                    f'<td>{meets}</td></tr>')
+                    f'<td class="num">{s.length / units.length:.1f}</td><td class="num">{pages_of(s.number)}</td></tr>')
     total = sum(s.length for s in sections) / units.length
-    legend = "".join(f'<span><i class="swatch" style="background:{c}"></i>{esc(label)}</span>'
-                     for _, c, label in units.bands)
+    sub = (f'{route_line} · {len(sections)} sections, {total:.1f} {units.unit} of line · from {info["journeys"]} '
+           f'journeys in {info["timetable"]}')
+    notes = ("Limits for passenger trains, from the route files, on the lines the timetabled journeys use (no depot "
+             "moves, crossovers or platform roads). Each strip shows both ways: above the track going left to right "
+             "(▶), below it going right to left (◀). A board is where the front of the train meets the limit; where "
+             "it rises, keep to the lower one until the whole train is past. Where there's more than one track each "
+             "way, the one most journeys use is shown. Signals above the track face ▶ trains, those below ◀ ones. "
+             "Numbered circles are where sections meet. Distances are from the start of each section.")
+    # the key's height in mm, roughly (the lines its text takes), for the map to leave room for it
+    titles = [f"{a} – {b}" for a, b in names.values()]
+    key_height = (9 + 3.5 * math.ceil(len(sub) / 58) + 10 + 7 + 5.5 + sum(4.2 * math.ceil(len(t) / 40) for t in titles)
+                  + 3.3 * math.ceil(len(notes) / 64) + 9)
+    overview, corner, scale = route_overview(sections, units, key_height)
+    per_mm = 1000.0 / MAP_MM[0]
+    bar = max([b for b in (0.25, 0.5, 1, 2, 5, 10, 20, 50, 100) if b * units.length * scale / per_mm <= 32]
+              or [0.25])
+    bar_mm = bar * units.length * scale / per_mm
     first_page = (
-        f'<h1>{esc(info["route"])}</h1><div class="sub">{route_line} · {len(sections)} sections, '
-        f'{total:.1f} {units.unit} of line · from {info["journeys"]} journeys in {esc(info["timetable"])}</div>'
-        f'<div class="cols"><div class="left">{route_overview(sections, units)}'
-        f'<div class="legend">{legend}<span>map: the lower limit of the two ways</span></div></div>'
-        f'<div class="right"><table class="card index"><tr><th></th><th>section</th>'
-        f'<th class="num">{units.unit}</th><th class="num">page</th><th>meets</th></tr>{"".join(rows)}</table>'
-        f'<div class="note">Limits for passenger trains, from the route files, on the lines the timetabled '
-        f'journeys run over (depot moves and short stretches like crossovers and platform roads left out). Each strip '
-        f'shows both ways: above the track the limits going left to right (▶), below it going right to left (◀). '
-        f'A board marks where the front of the train meets the new limit; where the limit rises, keep to the lower '
-        f'one until the whole train is past. Where a line has more than one track each way, the one most journeys '
-        f'use is shown. Signals above the track face left-to-right trains, those below right-to-left ones. '
-        f'A numbered circle on the track is where that section joins or leaves. Distances are from the start of '
-        f'each section.</div></div></div>')
+        f'<div class="mapfull">{overview}<div class="key {corner}">'
+        f'<div class="keytitle">{esc(info["route"])}</div><div class="keysub">{esc(sub)}</div>'
+        f'{legend(units, "line: the lower limit of the two ways")}'
+        f'<div class="keyscale"><svg width="{bar_mm:.1f}mm" height="2.4mm" viewBox="0 0 {bar_mm:.1f} 2.4" '
+        f'preserveAspectRatio="none"><rect x="0" y="0.6" width="{bar_mm:.1f}" height="1.2" fill="#111"/></svg>'
+        f'<span>{bar:g} {units.unit}</span><span class="north">▲ N</span></div>'
+        f'<table class="card index"><tr><th></th><th>section</th><th class="num">{units.unit}</th>'
+        f'<th class="num">page</th></tr>{"".join(rows)}</table>'
+        f'<div class="note">{notes}</div></div></div>')
     pages.insert(0, first_page)
     head_left = f'<b>{esc(info["route"])}</b> &nbsp;whole route'
     out = [f'<!doctype html><html><head><meta charset="utf-8"><title>{esc(info["route"])} speed limits</title>'
