@@ -9,7 +9,8 @@ Checked on Airedale-Wharfedale 2S00: the timetable's AI driver never runs faster
 
 A map of the whole route instead puts every line its passenger journeys use on a few pages, the limits both ways
 on each: the longest stretch of a journey not yet drawn becomes a section, the track alongside it (the other line,
-or the same track the other way) going with it, and so on until what's left is short.
+or the same track the other way) going with it, and so on until what's left is short. Its first page maps them
+with a board at each place to slow down, so it can be printed on its own.
 
     python tsw_routemap.py                    choose a route and a service
     python tsw_routemap.py airedale           list a route's services
@@ -21,6 +22,7 @@ Maps are saved in the folder chosen in the window (tsw_routemap_ui.py), at first
 The limits are those for passenger trains. A board marks where the front of the train meets the limit.
 """
 
+import bisect
 import collections
 import datetime
 import functools
@@ -532,6 +534,7 @@ class Units:
         self.minor = 0.25 if imperial else 0.5
         self.grid = 25 if imperial else 40
         self.bands = BANDS_MPH if imperial else BANDS_KMH
+        self.slow, self.drop = (45, 20) if imperial else (70, 30)      # where to slow down: see slow_stretches
 
     def speed(self, v):
         return round(v / MPH) if self.imperial else round(v * 3.6)
@@ -906,6 +909,8 @@ ABREAST = 10.0          # metres across: track this close alongside (either way)
 WIDER = 30.0            # metres across: how far to look for track running the other way where there's none closer
 SHORTEST = 400.0        # metres: stretches left over shorter than this aren't drawn (crossovers, platform roads)
 SHORT_RISE = 40.0       # metres: a higher limit shorter than this (than a two-car train) can't be used
+SAME_SPOT = 400.0       # metres: where to slow down for the same limit this close (on any sections), one board
+LONG_RUN = 2400.0       # metres: a stretch this long has its limit written beside the line on the map
 
 Sample = collections.namedtuple("Sample", "m x y hx hy key")    # a point of a path: metres, place, heading, bit
 
@@ -1131,6 +1136,32 @@ class Section:
             v = limit
         return v
 
+    def stretches(self, way):
+        """[(from, to, limit)] one way."""
+        limits = self.limits[way]
+        return [(x, nx, v) for (x, v), (nx, _) in zip(limits, limits[1:] + [(self.length, None)]) if nx > x]
+
+    def lower_limits(self):
+        """[(from, to, limit)]: the lower limit of the two ways."""
+        cuts = sorted({0.0} | {x for way in (True, False) for x, _ in self.limits[way] if 0 < x < self.length})
+        out = []
+        for x, nx in zip(cuts, cuts[1:] + [self.length]):
+            vs = [v for v in (self.limit_at(True, x), self.limit_at(False, x)) if v is not None]
+            v = min(vs) if vs else None
+            if out and out[-1][2] == v:
+                out[-1] = (out[-1][0], nx, v)
+            else:
+                out.append((x, nx, v))
+        return out
+
+    def place(self, x):
+        """Where (in the route's coordinates) the line is x metres along."""
+        pts = self.points
+        k = min(max(bisect.bisect_left(pts, (x,)), 1), len(pts) - 1)
+        (xa, pa, qa), (xb, pb, qb) = pts[k - 1], pts[k]
+        f = min(max((x - xa) / (xb - xa), 0.0), 1.0) if xb > xa else 0.0
+        return pa + (pb - pa) * f, qa + (qb - qa) * f
+
     def end_names(self):
         """(first, last): the stations at its ends, or None where it starts or ends away from one."""
         first = self.stations[0][2] if self.stations and self.stations[0][0] < 300 else None
@@ -1153,6 +1184,51 @@ def usable_limits(limits, way, length):
         if not out or out[-1][1] != v:
             out.append((x, v))
     return out
+
+
+def slow_stretches(stretches, units):
+    """The stretches [(from, to, limit)] to slow down for: those at units.slow or less, or units.drop or more
+    below the stretch before or after."""
+    out = []
+    for k, (x1, x2, v) in enumerate(stretches):
+        if v is None:
+            continue
+        near = [units.speed(n[2]) for n in stretches[max(k - 1, 0):k] + stretches[k + 1:k + 2] if n[2] is not None]
+        if units.speed(v) <= units.slow or any(units.speed(v) <= n - units.drop for n in near):
+            out.append((x1, x2, v))
+    return out
+
+
+Spot = collections.namedtuple("Spot", "section x1 x2 limit heading")    # heading: (x, y) the one way it's for
+
+
+def slow_spots(sections, units):
+    """Where to slow down: [Spot], the slow stretches of the lower limit of the two ways, those with the same limit
+    within SAME_SPOT metres of each other (on any of the sections) as one, the longest. A spot slow only one way has
+    that way's heading."""
+    groups = []                                     # [spot, the places of its stretches' ends and middles]
+    for s in sections:
+        slow = {way: slow_stretches(s.stretches(way), units) for way in (True, False)}
+        for x1, x2, v in slow_stretches(s.lower_limits(), units):
+            mid = (x1 + x2) / 2
+            ways = [way for way in (True, False) if any(a < x2 and b > x1 for a, b, _ in slow[way])]
+            heading = None
+            if len(ways) == 1:
+                (ax, ay), (bx, by) = s.place(mid - 15), s.place(mid + 15)
+                d = (1 if ways[0] else -1) / max(math.hypot(bx - ax, by - ay), 0.01)
+                heading = ((bx - ax) * d, (by - ay) * d)
+            spot, places = Spot(s, x1, x2, v, heading), [s.place(x) for x in (x1, mid, x2)]
+            group = next((g for g in groups if units.speed(g[0].limit) == units.speed(v) and
+                          any(math.dist(a, b) < SAME_SPOT for a in places for b in g[1])), None)
+            if group is None:
+                groups.append([spot, places])
+                continue
+            p = group[0]
+            same_way = p.heading and heading and p.heading[0] * heading[0] + p.heading[1] * heading[1] > 0.5
+            keep = spot if x2 - x1 > p.x2 - p.x1 else p
+            group[0] = keep._replace(heading=keep.heading if same_way else None)
+            group[1] += places
+    return [g[0] for g in groups]
 
 
 def route_sections(network, paths, coverage, ends=()):
@@ -1429,6 +1505,13 @@ table.index td.sec { font-weight: 700; width: 9mm; }
 .keyscale .north { margin-left: auto; font-weight: 600; }
 .key table.card { font-size: 8pt; }
 .key .note { font-size: 7.3pt; line-height: 1.35; }
+.leader { stroke: #111; stroke-width: 0.9; }
+.leaderdot, .maparrowhead { fill: #111; }
+.maparrow { stroke: #111; stroke-width: 1.6; }
+.mapboard { fill: #fff; stroke: #111; stroke-width: 1.4; }
+.mapboard.low { stroke: #D2502A; stroke-width: 2; }
+.mapboardtext { font-size: 11px; font-weight: 800; fill: #111; }
+.linespeed { font-size: 10px; font-weight: 600; font-style: italic; fill: #5F5E5A; }
 """
 
 
@@ -1436,10 +1519,18 @@ MAP_MM = (277.0, 179.0)     # the whole-route map: all of the first page under i
 KEY_MM = 92.0               # how wide the key is, in the map's emptiest corner
 
 
-def route_overview(sections, units, key_height):
+def crossing(a, b, c, d):
+    """Whether line a-b crosses line c-d."""
+    def side(p, q, r):
+        return (q[0] - p[0]) * (r[1] - p[1]) - (q[1] - p[1]) * (r[0] - p[0])
+    return side(a, b, c) * side(a, b, d) < 0 and side(c, d, a) * side(c, d, b) < 0
+
+
+def route_overview(sections, units, key_height, spots=()):
     """A map of the sections filling the page, coloured by the lower limit of the two ways, numbered, with the
-    stations; as large as it can be with a corner left empty for the key (`key_height` mm tall). Returns (svg,
-    the corner: 'tr', 'tl', 'br' or 'bl', map units per metre)."""
+    stations, a board at each of the `spots` (slow_spots) and the limit along long stretches; as large as it can be
+    with a corner left empty for the key (`key_height` mm tall). Returns (svg, the corner: 'tr', 'tl', 'br' or
+    'bl', map units per metre)."""
     width = 1000.0
     height = width * MAP_MM[1] / MAP_MM[0]
     per_mm = width / MAP_MM[0]
@@ -1487,22 +1578,28 @@ def route_overview(sections, units, key_height):
     o = [f'<svg viewBox="0 0 {width:.0f} {height:.1f}" class="overview full">']
     taken = [corners[corner]]
     for s in sections:
+        # the line through its points and every place the limit changes, so a short stretch shows its colour
+        cuts = {x for way in (True, False) for x, _ in s.limits[way] if 0 < x < s.length}
+        marks = sorted([(m, x, y, False) for m, x, y in s.points] + [(x, *s.place(x), True) for x in cuts])
         run, colour = [], None
-        for m, x, y in s.points:
-            v = lower(s, m)
+        for (ma, xa, ya, _), (mb, xb, yb, cut) in zip(marks, marks[1:]):
+            v = lower(s, (ma + mb) / 2)
             c = units.colour(v) if v is not None else "#bbb"
-            q = at(x, y)
-            taken.append((q[0] - 2, q[1] - 2, q[0] + 2, q[1] + 2))
-            if c != colour and run:
-                o.append(f'<polyline points="{" ".join(f"{a:.1f},{b:.1f}" for a, b in run + [q])}" '
-                         f'stroke="{colour}" class="line"/>')
-                run = []
-            colour = c
-            if not run or abs(q[0] - run[-1][0]) + abs(q[1] - run[-1][1]) > 1.5:
+            if c != colour:
+                if len(run) > 1:
+                    o.append(f'<polyline points="{" ".join(f"{a:.1f},{b:.1f}" for a, b in run)}" '
+                             f'stroke="{colour}" class="line"/>')
+                run, colour = [at(xa, ya)], c
+            q = at(xb, yb)
+            if cut or mb == marks[-1][0] or abs(q[0] - run[-1][0]) + abs(q[1] - run[-1][1]) > 1.5:
                 run.append(q)
         if len(run) > 1:
             o.append(f'<polyline points="{" ".join(f"{a:.1f},{b:.1f}" for a, b in run)}" stroke="{colour}" '
                      'class="line"/>')
+        for _, x, y in s.points:
+            q = at(x, y)
+            taken.append((q[0] - 2, q[1] - 2, q[0] + 2, q[1] + 2))
+    solid = []                          # what a board's leader mustn't run through: names, boards, circles
 
     def free(box):
         return box[0] > 4 and box[2] < width - 4 and box[1] > 4 and box[3] < height - 4 and \
@@ -1514,6 +1611,7 @@ def route_overview(sections, units, key_height):
         q = at(x, y)
         marks.append((q, s.number))
         taken.append((q[0] - 9, q[1] - 9, q[0] + 9, q[1] + 9))
+        solid.append(taken[-1])
     # stations, each once, labels placed where they don't overlap
     places, seen = [], set()
     for s in sections:
@@ -1525,6 +1623,7 @@ def route_overview(sections, units, key_height):
             sx, sy = at(x, y)
             places.append((sx, sy, name))
             taken.append((sx - 5, sy - 5, sx + 5, sy + 5))
+            solid.append(taken[-1])
     for sx, sy, name in places:
         w, h = text_width(name, 11), 11
         tries = [(8, 4, "start"), (-8, 4, "end"), (0, -8, "middle"), (0, 16, "middle"), (8, -6, "start"),
@@ -1537,9 +1636,85 @@ def route_overview(sections, units, key_height):
             if free(box):
                 break
         taken.append(box)
+        solid.append(box)
         o.append(f'<circle cx="{sx:.1f}" cy="{sy:.1f}" r="3.3" class="dot"/>'
                  f'<text x="{sx + tx:.1f}" y="{sy + ty:.1f}" text-anchor="{anchor}" class="maplabel">'
                  f'{esc(name)}</text>')
+
+    def heading(s, m):
+        (ax, ay), (bx, by) = at(*s.place(m - 40)), at(*s.place(m + 40))
+        d = max(math.hypot(bx - ax, by - ay), 0.01)
+        return (bx - ax) / d, (by - ay) / d
+
+    def around(s, m, w, h, reach, ring=16, leaders=None):
+        """A free box w x h near the line m metres along section s: tried round it at each distance in `reach`,
+        across the line first. With `leaders`, one whose leader doesn't cross another or run through a name or
+        board. Returns (box, where on the line, where the leader meets the box) or None."""
+        ax, ay = at(*s.place(m))
+        hx, hy = heading(s, m)
+        angles = sorted((k * 2 * math.pi / ring for k in range(ring)),
+                        key=lambda a: abs(math.cos(a) * hx + math.sin(a) * hy))
+        for r in reach:
+            for a in angles:
+                cx, cy = ax + r * math.cos(a), ay + r * math.sin(a)
+                box = (cx - w / 2, cy - h / 2, cx + w / 2, cy + h / 2)
+                if not free(box):
+                    continue
+                end = (min(max(ax, box[0]), box[2]), min(max(ay, box[1]), box[3]))
+                if leaders is not None and not clear((ax, ay), end, leaders):
+                    continue
+                return box, (ax, ay), end
+        return None
+
+    def clear(a, b, leaders):
+        length = math.hypot(b[0] - a[0], b[1] - a[1])
+        steps = [(a[0] + (b[0] - a[0]) * t / length, a[1] + (b[1] - a[1]) * t / length)
+                 for t in [6 + 3 * k for k in range(int(max(length - 6, 0) // 3))]]
+        return not any(t[0] <= x <= t[2] and t[1] <= y <= t[3] for x, y in steps for t in solid) and \
+            not any(crossing(a, b, c, d) for c, d in leaders)
+    # boards where to slow down, the lowest placed first, each on a leader to the stretch it's for
+    leaders = []
+    for spot in sorted(spots, key=lambda p: p.limit):
+        s, mid = spot.section, (spot.x1 + spot.x2) / 2
+        text = str(units.speed(spot.limit))
+        w, h = text_width(text, 11) + (21 if spot.heading else 9), 14.0
+        found = around(s, mid, w, h, (16, 24, 34, 46, 60, 76), leaders=leaders) or \
+            around(s, mid, w, h, (16, 24, 34, 46, 60, 76))
+        if found is None:                   # nowhere free: across the line, over whatever is there
+            ax, ay = at(*s.place(mid))
+            hx, hy = heading(s, mid)
+            cx, cy = ax - hy * 18, ay + hx * 18
+            box = (cx - w / 2, cy - h / 2, cx + w / 2, cy + h / 2)
+            found = box, (ax, ay), (min(max(ax, box[0]), box[2]), min(max(ay, box[1]), box[3]))
+        box, (ax, ay), end = found
+        taken.append((box[0] - 2, box[1] - 2, box[2] + 2, box[3] + 2))
+        solid.append(box)
+        leaders.append(((ax, ay), end))
+        tx = box[0] + (w - 12 if spot.heading else w) / 2
+        o.append(f'<line x1="{ax:.1f}" y1="{ay:.1f}" x2="{end[0]:.1f}" y2="{end[1]:.1f}" class="leader"/>'
+                 f'<circle cx="{ax:.1f}" cy="{ay:.1f}" r="2" class="leaderdot"/>'
+                 f'<rect x="{box[0]:.1f}" y="{box[1]:.1f}" width="{w:.1f}" height="{h:.0f}" rx="2" '
+                 f'class="{"mapboard low" if units.speed(spot.limit) <= units.slow else "mapboard"}"/>'
+                 f'<text x="{tx:.1f}" y="{box[1] + 10.8:.1f}" text-anchor="middle" class="mapboardtext">{text}</text>')
+        if spot.heading:                    # for going one way only: an arrow that way
+            angle = math.degrees(math.atan2(spot.heading[1], spot.heading[0]))
+            o.append(f'<g transform="translate({box[2] - 9:.1f},{box[1] + h / 2:.1f}) rotate({angle:.0f})">'
+                     '<line x1="-5" y1="0" x2="1" y2="0" class="maparrow"/><path d="M5,0 L0,-3.4 L0,3.4 Z" '
+                     'class="maparrowhead"/></g>')
+    # the limit beside the line along the long stretches that aren't slow
+    for s in sections:
+        limits = s.lower_limits()
+        slow = slow_stretches(limits, units)
+        for x1, x2, v in limits:
+            if v is None or x2 - x1 < LONG_RUN or (x1, x2, v) in slow:
+                continue
+            text = str(units.speed(v))
+            found = around(s, (x1 + x2) / 2, text_width(text, 10), 10.0, (10, 14, 19), ring=8)
+            if found:
+                box = found[0]
+                taken.append(box)
+                o.append(f'<text x="{(box[0] + box[2]) / 2:.1f}" y="{box[3] - 1.5:.1f}" text-anchor="middle" '
+                         f'class="linespeed">{text}</text>')
     for (qx, qy), number in marks:
         o.append(f'<circle cx="{qx:.1f}" cy="{qy:.1f}" r="8" class="maplink"/>'
                  f'<text x="{qx:.1f}" y="{qy + 3.7:.1f}" text-anchor="middle" class="maplinktext">{number}</text>')
@@ -1583,17 +1758,16 @@ def render_route(info, sections, units):
     total = sum(s.length for s in sections) / units.length
     sub = (f'{route_line} · {len(sections)} sections, {total:.1f} {units.unit} of line · from {info["journeys"]} '
            f'journeys in {info["timetable"]}')
-    notes = ("Limits for passenger trains, from the route files, on the lines the timetabled journeys use (no depot "
-             "moves, crossovers or platform roads). Each strip shows both ways: above the track going left to right "
-             "(▶), below it going right to left (◀). A board is where the front of the train meets the limit; where "
-             "it rises, keep to the lower one until the whole train is past. Where there's more than one track each "
-             "way, the one most journeys use is shown. Signals above the track face ▶ trains, those below ◀ ones. "
-             "Numbered circles are where sections meet. Distances are from the start of each section.")
+    speed = units.speed_unit
+    notes = (f"Boards: where to slow down, to {units.slow} {speed} or less (red edge) or to {units.drop} {speed} or "
+             "more below the limit either side. Each gives the lower limit of the two ways on the coloured stretch it "
+             "points to; one with an arrow is only for trains going that way. Grey numbers: the limit along long "
+             f"stretches. Pages 2-{len(pages) + 1} have every limit both ways, with boards, signals and platforms.")
     # the key's height in mm, roughly (the lines its text takes), for the map to leave room for it
     titles = [f"{a} – {b}" for a, b in names.values()]
     key_height = (9 + 3.5 * math.ceil(len(sub) / 58) + 10 + 7 + 5.5 + sum(4.2 * math.ceil(len(t) / 40) for t in titles)
                   + 3.3 * math.ceil(len(notes) / 64) + 9)
-    overview, corner, scale = route_overview(sections, units, key_height)
+    overview, corner, scale = route_overview(sections, units, key_height, slow_spots(sections, units))
     per_mm = 1000.0 / MAP_MM[0]
     bar = max([b for b in (0.25, 0.5, 1, 2, 5, 10, 20, 50, 100) if b * units.length * scale / per_mm <= 32]
               or [0.25])
@@ -1612,9 +1786,10 @@ def render_route(info, sections, units):
     head_left = f'<b>{esc(info["route"])}</b> &nbsp;whole route'
     out = [f'<!doctype html><html><head><meta charset="utf-8"><title>{esc(info["route"])} speed limits</title>'
            f'<style>{CSS}{ROUTE_CSS}</style></head><body>']
+    strips_line = f'passenger speed limits in {units.speed_unit}: ▶ above the track, ◀ below'
     for n, body in enumerate(pages, 1):
         out.append(f'<section class="page"><div class="head"><span>{head_left}</span>'
-                   f'<span>{route_line} · page {n} of {len(pages)}</span></div>{body}'
+                   f'<span>{route_line if n == 1 else strips_line} · page {n} of {len(pages)}</span></div>{body}'
                    f'<div class="foot"><span>Made from the Train Sim World 7 files on {made} (tsw_routemap.py)'
                    f'</span><span>{esc(info["route"])} · {n}/{len(pages)}</span></div></section>')
     out.append('</body></html>')

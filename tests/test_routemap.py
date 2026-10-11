@@ -1,6 +1,6 @@
 """
 Tests for the whole-route map in tsw_routemap.py, on small made-up track: where a piece of track runs, which way
-each limit is drawn, and the limits no train can use left out.
+each limit is drawn, the limits no train can use left out, and where the first page puts a board to slow down.
 
     python -m unittest discover tests
 """
@@ -33,6 +33,14 @@ def network(*ribbons):
 
 def mph(limits):
     return [(round(x), round(v / MPH) if v else None) for x, v in limits]
+
+
+def route(net, *pieces):
+    """The Sections of journeys over `net`, each given as its path's pieces."""
+    coverage = rm.Coverage(net)
+    paths = [coverage.samples(p) for p in pieces]
+    ends = [s for p in paths for s in (p[0], p[-1])]
+    return rm.route_sections(net, paths, coverage, ends)
 
 
 class Shape(unittest.TestCase):
@@ -78,10 +86,7 @@ class UsableLimits(unittest.TestCase):
 
 class Sections(unittest.TestCase):
     def sections(self, net, *pieces):
-        coverage = rm.Coverage(net)
-        paths = [coverage.samples(p) for p in pieces]
-        ends = [s for p in paths for s in (p[0], p[-1])]
-        return rm.route_sections(net, paths, coverage, ends)
+        return route(net, *pieces)
 
     def test_double_track_is_one_section_with_both_lines(self):
         # eastbound line at y = 0: 40 mph, 60 on its second half; westbound line 4 m away: 30 mph
@@ -126,6 +131,42 @@ class Sections(unittest.TestCase):
         self.assertAlmostEqual(branch.joins[0][1], main.length, delta=15)
         self.assertEqual(mph(branch.limits[True]), [(0, 40)])
         self.assertIn(2, [n for _, n in main.links])
+
+
+
+class SlowSpots(unittest.TestCase):
+    def spots(self, *limits):
+        """The slow spots of 3 km of single track at 90 mph, east from (0, 0), run both ways, with `limits` given
+        as (start, end as fractions, mph, which way: True east, False west, None both)."""
+        net = network(("s", "n1", "n2", (0.0, 0.0), (1.0, 0.0), 3000.0, None, 90))
+        for start, end, limit, way in limits:
+            for forward in (True, False):
+                if way in (None, forward):
+                    net.ribbons["s"].limits[forward].append((start, end, limit * MPH))
+        sections = route(net, [(0.0, "s", 0.0, 1.0)], [(0.0, "s", 1.0, 0.0)])
+        return rm.slow_spots(sections, rm.Units(True))
+
+    def test_a_low_limit_both_ways_is_a_board_for_both(self):
+        spots = self.spots((0.4, 0.5, 40, None))
+        self.assertEqual([round(p.limit / MPH) for p in spots], [40])
+        self.assertAlmostEqual(spots[0].x2 - spots[0].x1, 300, delta=15)
+        self.assertIsNone(spots[0].heading)
+
+    def test_a_limit_low_one_way_points_that_way(self):
+        spots = self.spots((0.4, 0.5, 30, True))
+        self.assertEqual([round(p.limit / MPH) for p in spots], [30])
+        hx, hy = spots[0].heading
+        self.assertAlmostEqual(hx, 1.0, places=2)
+        self.assertAlmostEqual(hy, 0.0, places=2)
+
+    def test_a_big_drop_is_a_slow_spot_and_a_small_one_isnt(self):
+        spots = self.spots((0.2, 0.4, 75, None), (0.6, 0.8, 60, None))
+        self.assertEqual([round(p.limit / MPH) for p in spots], [60])
+
+    def test_the_same_limit_close_by_is_one_board(self):
+        # 40, 150 m of 50, 40: one board for the 40s; the 50 between isn't slow (over 45, higher than either side)
+        spots = self.spots((0.40, 0.45, 40, None), (0.45, 0.50, 50, None), (0.50, 0.55, 40, None))
+        self.assertEqual([round(p.limit / MPH) for p in spots], [40])
 
 
 if __name__ == "__main__":
