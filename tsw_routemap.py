@@ -1565,8 +1565,11 @@ KEY_MM = 92.0               # how wide the key is, in the map's emptiest corner
 MAP_W = 1000.0              # the map's own units across it
 MAP_H = MAP_W * MAP_MM[1] / MAP_MM[0]
 CROWD = (8, 50.0)           # this many names and boards within this many map units (14 mm) is crowded: an inset
+CLOSE = (3, 30.0)           # this many within this many (8 mm) are close together: an inset if there's room
+INSETS = 10                 # insets on a page at most
 INSET_MOST = 180.0          # map units: a crowded stretch longer than this goes in more than one inset
 INSET_ZOOMS = (2, 2.5, 3, 3.5, 4, 5, 6)
+INSET_LAST = 1.5            # the zoom of an inset with no room at the smallest of those
 INSET_TITLE = 16.0          # map units: an inset's title bar
 INSET_NARROWEST = 130.0     # map units: an inset's width at least, for its scale bar
 BOARD_REACH = (16, 24, 34, 46, 60, 76, 95)      # map units: how far from its stretch a board is tried
@@ -1969,13 +1972,10 @@ def overview_layout(sections, key_height):
     return scale, (ox, oy), (x0, y0), corner, corners[corner]
 
 
-def crowded(view, things, stuck=()):
-    """Boxes (map units) round the crowded places of a trial drawing (`view`): where something found no room, or
-    CROWD[0] names and boards (`things`: their map points) are within CROWD[1] map units, or something on the map
-    found no room at all (`stuck`, a place of its own). A place longer than INSET_MOST is cut across into pieces.
-    The busiest first."""
-    count, radius = CROWD
-    points = view.failed + list(stuck) +         [p for p in things if sum(1 for q in things if math.dist(p, q) < radius) >= count]
+def place_boxes(points, things, radius, stuck=()):
+    """[(how many things, box)]: boxes (map units) round the groups of `points` within `radius` of each other (two
+    or more, or one of `stuck`), each taking in what's just outside it; those overlapping as one; one longer than
+    INSET_MOST cut across into pieces, each down to the `things` (map points) in it."""
     groups = []
     for p in points:
         near = [g for g in groups if any(math.dist(p, q) < radius for q in g)]
@@ -1994,8 +1994,8 @@ def crowded(view, things, stuck=()):
     while merged:                           # boxes that overlap are one
         merged = False
         for i, j in itertools.combinations(range(len(boxes)), 2):
-            a, b = boxes[i], boxes[j]
-            if not (a[2] < b[0] or b[2] < a[0] or a[3] < b[1] or b[3] < a[1]):
+            if overlap(boxes[i], boxes[j]):
+                a, b = boxes[i], boxes[j]
                 boxes[i] = [min(a[0], b[0]), min(a[1], b[1]), max(a[2], b[2]), max(a[3], b[3])]
                 del boxes[j]
                 merged = True
@@ -2017,8 +2017,51 @@ def crowded(view, things, stuck=()):
             spare = INSET_NARROWEST / INSET_ZOOMS[0] - (piece[2] - piece[0])
             if spare > 0:
                 piece[0], piece[2] = piece[0] - spare / 2, piece[2] + spare / 2
-            pieces.append((len(mine), piece))
-    return [piece for _, piece in sorted(pieces, key=lambda p: -p[0])]
+            pieces.append([len(mine), piece])
+    apart = False
+    while not apart:                        # widened ones that now overlap
+        apart = True
+        for i, j in itertools.combinations(range(len(pieces)), 2):
+            (na, a), (nb, b) = pieces[i], pieces[j]
+            if a[2] <= b[0] or b[2] <= a[0] or a[3] <= b[1] or b[3] <= a[1]:
+                continue
+            m = [min(a[0], b[0]), min(a[1], b[1]), max(a[2], b[2]), max(a[3], b[3])]
+            if max(m[2] - m[0], m[3] - m[1]) <= INSET_MOST:
+                pieces[i] = [na + nb, m]
+                del pieces[j]
+            elif min(a[2], b[2]) - max(a[0], b[0]) < min(a[3], b[3]) - max(a[1], b[1]):
+                first, second = (a, b) if a[0] < b[0] else (b, a)
+                first[2] = second[0] = (first[2] + second[0]) / 2
+            else:
+                first, second = (a, b) if a[1] < b[1] else (b, a)
+                first[3] = second[1] = (first[3] + second[1]) / 2
+            apart = False
+            break
+    return [tuple(p) for p in pieces]
+
+
+def overlap(a, b):
+    return not (a[2] < b[0] or b[2] < a[0] or a[3] < b[1] or b[3] < a[1])
+
+
+def crowded(view, things, stuck=()):
+    """Boxes (map units) round the crowded places of a trial drawing (`view`): where something found no room, or
+    CROWD[0] names and boards (`things`: their map points) are within CROWD[1] map units, or something on the map
+    found no room at all (`stuck`, a place of its own). The busiest first."""
+    count, radius = CROWD
+    points = view.failed + list(stuck) + \
+        [p for p in things if sum(1 for q in things if math.dist(p, q) < radius) >= count]
+    return [b for _, b in sorted(place_boxes(points, things, radius, stuck), key=lambda nb: -nb[0])]
+
+
+def close_together(things, boxes):
+    """Boxes (map units) round the places, outside the `boxes` already found, where CLOSE[0] names and boards
+    (`things`) are within CLOSE[1] map units: shown larger too where the page has room. The closest first."""
+    count, radius = CLOSE
+    points = [p for p in things if not any(within(b, p) for b in boxes) and
+              sum(1 for q in things if math.dist(p, q) < radius) >= count]
+    found = [(n, b) for n, b in place_boxes(points, things, radius) if not any(overlap(b, o) for o in boxes)]
+    return [b for n, b in sorted(found, key=lambda nb: -nb[0] / max((nb[1][2] - nb[1][0]) * (nb[1][3] - nb[1][1]), 1))]
 
 
 def route_overview(sections, units, key_height, spots=(), stations=()):
@@ -2045,6 +2088,7 @@ def route_overview(sections, units, key_height, spots=(), stations=()):
     stuck = []
     for _ in range(3):                      # what the map itself has no room for gets a box too
         boxes = crowded(trial, things, stuck)
+        boxes += close_together(things, boxes)
 
         def boxed(p):
             return any(within(b, p) for b in boxes)
@@ -2060,15 +2104,14 @@ def route_overview(sections, units, key_height, spots=(), stations=()):
         if not main.stuck:
             break
         stuck += main.stuck
-    main.line_speeds(sections, units, skip=boxes)
     empty = Occupancy()
     for box in main.drawn + [tuple(b) for b in boxes]:
         empty.add(box)
 
-    defs, insets, framed = [], [], []
+    defs, insets, framed, shown = [], [], [], []
     for b in boxes:
         letter = chr(ord("A") + len(framed))
-        made = inset(sections, units, spots, stations, main, b, empty, letter)
+        made = inset(sections, units, spots, stations, main, b, empty, letter) if len(framed) < INSETS else None
         if made is None:                    # no room for it: its names and boards go on the map after all
             main.taken.remove(tuple(b))
             main.names([(n, q) for n, q in placed if within(b, q)])
@@ -2076,6 +2119,7 @@ def route_overview(sections, units, key_height, spots=(), stations=()):
             continue
         frame, clip, svg, outline = made
         framed.append(frame)
+        shown.append(b)
         defs.append(clip)
         insets.append(svg)
         main.take(outline, solid=False)
@@ -2092,6 +2136,7 @@ def route_overview(sections, units, key_height, spots=(), stations=()):
                       f'class="frame"/><rect x="{tx:.1f}" y="{ty:.1f}" width="13" height="13" class="insettag"/>'
                       f'<text x="{tx + 6.5:.1f}" y="{ty + 10:.1f}" text-anchor="middle" class="insettagtext small">'
                       f'{letter}</text>')
+    main.line_speeds(sections, units, skip=shown)
     main.draw_numbers([n for n in numbers if not any(within(f, n[0]) for f in framed)])
     return (f'<svg viewBox="0 0 {MAP_W:.0f} {MAP_H:.1f}" class="overview full"><defs>{"".join(defs)}</defs>'
             f'{"".join(main.o)}{"".join(insets)}</svg>', corner, scale)
@@ -2114,10 +2159,12 @@ def inset(sections, units, spots, stations, main, box, empty, letter):
         view.line_speeds(sections, units)
         return view
     best = None
-    for zoom in INSET_ZOOMS:
+    for zoom in INSET_ZOOMS + (INSET_LAST,):
+        if zoom == INSET_LAST and best:
+            break
         w, h = (box[2] - box[0]) * zoom, (box[3] - box[1]) * zoom
         if w > 0.75 * MAP_W or h + INSET_TITLE > 0.97 * MAP_H:
-            break
+            continue
         view = draw(MapView(main.scale * zoom, 0, 0, world[0], world[1], (0, 0, w, h)))
         # cut down to what's drawn, keeping room for the title and the scale bar
         shown = [d for d in view.drawn if d[2] > 0 and d[0] < w and d[3] > 0 and d[1] < h]
@@ -2131,20 +2178,22 @@ def inset(sections, units, spots, stations, main, box, empty, letter):
             c2 = min(c0 + narrowest, w)
             c0 = c2 - narrowest
         cw, ch = c2 - c0, c3 - c1
-        spot = empty.empty(cw, ch + INSET_TITLE + 12, centre)
+        outer = max(cw, min(text_width(" – ".join(ends), 10) + 30, 400))
+        spot = empty.empty(outer, ch + INSET_TITLE + 12, centre)
         if spot is None:
             continue
         fails = (len(view.stuck), len(view.failed))
         if best is None or fails < best[0]:
-            best = (fails, zoom, view, (c0, c1, c2, c3), spot)
+            best = (fails, zoom, view, (c0, c1, c2, c3), spot, outer)
         if fails[0] == 0 and fails[1] <= 1:
             break
     if best is None:
         return None
-    _, zoom, trial, (c0, c1, c2, c3), (px, py) = best
+    _, zoom, trial, (c0, c1, c2, c3), (ox, py), outer = best
     cw, ch = c2 - c0, c3 - c1
+    px = ox + (outer - cw) / 2              # the drawing's left
     top = py + INSET_TITLE
-    room = cw - 30                          # the title: both ends, or the first, or as much of it as fits
+    room = outer - 30                       # the title: both ends, or the first, or as much of it as fits
     title = next((tt for tt in (" – ".join(ends), ends[0] if ends else "") if text_width(tt, 10) <= room), None)
     if title is None:
         title = ends[0]
@@ -2164,13 +2213,13 @@ def inset(sections, units, spots, stations, main, box, empty, letter):
     height = ch
     if sx is None:
         sx, sy, height = px + cw - need - 4, top + ch, ch + 12
-    outline = (px, py, px + cw, top + height)
+    outline = (ox, py, ox + outer, top + height)
     frame0, frame1 = main.at(*corner), main.at(*view.back(px + cw, top + ch))
-    svg = (f'<g class="inset"><rect x="{px:.1f}" y="{py:.1f}" width="{cw:.1f}" height="{top + height - py:.1f}" '
-           f'class="insetbox"/><rect x="{px:.1f}" y="{py:.1f}" width="{INSET_TITLE:.0f}" '
-           f'height="{INSET_TITLE:.0f}" class="insettag"/><text x="{px + 8:.1f}" y="{py + 12:.1f}" '
-           f'text-anchor="middle" class="insettagtext">{letter}</text><text x="{px + 22:.1f}" y="{py + 12:.1f}" '
-           f'class="insettitle">{esc(title)}</text><line x1="{px + INSET_TITLE:.1f}" x2="{px + cw:.1f}" '
+    svg = (f'<g class="inset"><rect x="{ox:.1f}" y="{py:.1f}" width="{outer:.1f}" height="{top + height - py:.1f}" '
+           f'class="insetbox"/><rect x="{ox:.1f}" y="{py:.1f}" width="{INSET_TITLE:.0f}" '
+           f'height="{INSET_TITLE:.0f}" class="insettag"/><text x="{ox + 8:.1f}" y="{py + 12:.1f}" '
+           f'text-anchor="middle" class="insettagtext">{letter}</text><text x="{ox + 22:.1f}" y="{py + 12:.1f}" '
+           f'class="insettitle">{esc(title)}</text><line x1="{ox + INSET_TITLE:.1f}" x2="{ox + outer:.1f}" '
            f'y1="{top:.1f}" y2="{top:.1f}" class="insetrule"/><g clip-path="url(#clip{letter})">{"".join(view.o)}</g>'
            f'<text x="{sx:.1f}" y="{sy + 8:.1f}" class="insetscale">{esc(label)}</text>'
            f'<rect x="{sx + need - length - 2:.1f}" y="{sy + 5:.1f}" width="{length:.1f}" height="2.5" '
