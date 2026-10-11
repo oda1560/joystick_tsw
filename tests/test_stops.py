@@ -35,6 +35,8 @@ class FakeApi:
             return len(self.cars)
         if path.endswith(".Function.GetCurrentOutputValue"):
             return 1.0 if path.split(".Function")[0] in self.open_doors else 0.0
+        if path.endswith(".ObjectClass"):
+            return "PushButtonComponent" if "Button" in path or "Release" in path else "RailVehicleDoorComponent"
         return None
 
     def list(self, path):
@@ -55,6 +57,44 @@ class Doors(unittest.TestCase):
         self.assertTrue(tracker._doors_open())
         self.assertEqual(tracker.door_nodes, ["CurrentFormation/0/PassengerDoor_FL",
                                               "CurrentFormation/1/PassengerDoor_BR"])
+
+    def test_class_350_doors(self):
+        # node names of a Class 350 coach, seen live (one door is spelt Passsenger)
+        car = ["Door_PasssengerDoor_FL", "Door_PassengerDoor_FR", "Door_GangwayDoor_F", "Door_InternalCabDoor",
+               "PushButton_PassengerDoor_Open_Ext_FL", "PassengerDoorManager", "CabToPassengerDoor"]
+        tracker = tsw_stops.StopTracker()
+        tracker.api = FakeApi([car], open_doors={"CurrentFormation/0/Door_PasssengerDoor_FL"})
+        self.assertTrue(tracker._doors_open())
+        self.assertEqual(tracker.door_nodes, ["CurrentFormation/0/Door_PasssengerDoor_FL",
+                                              "CurrentFormation/0/Door_PassengerDoor_FR"])
+
+    def test_a_button_named_after_a_door_is_not_one(self):
+        tracker = tsw_stops.StopTracker()
+        tracker.api = FakeApi([["PassengerDoor_FL", "PassengerDoor_Release_L (PushButton)"]],
+                              open_doors={"CurrentFormation/0/PassengerDoor_Release_L (PushButton)"})
+        self.assertFalse(tracker._doors_open())
+        self.assertEqual(tracker.door_nodes, ["CurrentFormation/0/PassengerDoor_FL"])
+
+
+class DoorNames(unittest.TestCase):
+    def test_passenger_doors(self):
+        for name in ("PassengerDoor_FL", "Door_PassengerDoor_FR", "Door_PasssengerDoor_FL", "Door_Passenger_BL",
+                     "RailVehicleDoor_FL", "SingleDoor_FC", "DoubleDoors_L", "BerthingDoor_L1", "CoachDoor_R",
+                     "PassengerDoor_FL (DoorControl)", "VehiclePassengerDoors", "Door_T1"):
+            self.assertTrue(tsw_stops.passenger_door(name), name)
+
+    def test_other_doors(self):
+        for name in ("Door_GangwayDoor_F", "GangWayDoor_B", "Door_InternalCabDoor", "CabDoorInt", "IntDoor_F",
+                     "DriverDoor", "FirstClassDoor", "VestibuleDoor_L", "CompartmentDoor_1", "PassengerDoorManager",
+                     "PushButton_PassengerDoor_Open_Ext_FL", "CabToPassengerDoor", "PassengerDoorWindow_L_A",
+                     "ButtonDoorIndicatorLogicController", "Horn"):
+            self.assertFalse(tsw_stops.passenger_door(name), name)
+
+    def test_door_classes(self):
+        self.assertTrue(tsw_stops.door_class("RailVehicleDoorComponent"))
+        self.assertTrue(tsw_stops.door_class("DoorV2Component"))
+        self.assertFalse(tsw_stops.door_class("PushButtonComponent"))
+        self.assertFalse(tsw_stops.door_class("BP_EMK_LNWR_Class350-2_PassengerDoorManager_C"))
 
 
 class Timetable(unittest.TestCase):

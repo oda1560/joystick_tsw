@@ -7,7 +7,7 @@ What the game gives (seen on a Class 150, Cardiff valleys 1M56):
 - CurrentDrivableActor.Function.HUD_GetAcceleration: the change of speed in m/s², in the game's own time. Working
   it out from the speed by the wall clock doesn't do: the game moves on at most 50 ms a frame, so below 20 fps it
   runs slower than the wall clock (by up to 40% on that drive). TimeOfDay's clock is the game's time.
-- PassengerCargoModel.Function.GetPassengerCount on each passenger car (a car with passenger doors).
+- PassengerCargoModel.Function.GetPassengerCount on each passenger car (Passenger_CargoModel on DB N-Wagen coaches).
 - HUD_GetTrainBrakeHandle {"HandlePosition": 0..1, "IsActive"} (steps of a third on the 150; on the Class 331's
   power / brake handle the brake side, smoothly) and HUD_GetPowerHandle {"Power", "IsNegative"} (notches on the
   150; on the 331 percent of the effort, negative while braking), for when the brake is eased. Both read
@@ -24,8 +24,10 @@ Stopping on full service, that train braked harder and harder as it slowed, 1.8 
 then nothing within a second: the jolt. Easing the brake off in the last few seconds avoids it. How long before
 the stop the warning comes depends on how quickly the train's brake eases off: that's measured each time you step
 the brake down while braking (no power, nothing else moved), kept per train (brake_ease.json), and 3 s until then.
-All this on passenger trains (a car has passenger doors), empty ones too: a 331 on 2V04 had nobody aboard, and
-showed nothing when it was only for trains with passengers. Freight and light engines are left out.
+All this on passenger trains (a car has a passenger model), empty ones too: a 331 on 2V04 had nobody aboard, and
+showed nothing when it was only for trains with passengers. Freight and light engines are left out: in the game files
+no locomotive or wagon has a passenger model. It used to take a car with nodes named PassengerDoor_* as well, which
+left out a third of the passenger vehicles (the Class 350's are Door_PassengerDoor_*) and showed nothing on them.
 
     watch = ComfortWatch(); watch.start()
     watch.coach              # None, or what the comfort panel says:
@@ -57,7 +59,8 @@ SUBSCRIPTION = 31              # the API subscription number used here
 RESUBSCRIBE_SECONDS = 5.0      # with no train to read, how often to subscribe again
 COUNT_SECONDS = 5.0            # how often the passengers are counted while stopped (they don't change on the move)
 MAX_CARS = 16
-STOPPED = 0.1                  # m/s: slower than this the train has stopped
+CARGO_MODELS = ("PassengerCargoModel", "Passenger_CargoModel")   # a passenger car's node for its passengers
+STOPPED = 0.1                 # m/s: slower than this the train has stopped
 MOVING = 2.0                   # m/s: it has to have gone faster than this since the last stop for a stop to count
 LAST = 1.0                     # m/s: the braking slower than this is what passengers feel as the train stops
 JOLT = 0.7                     # m/s²: braking harder than this as it stops is a jolt
@@ -269,6 +272,14 @@ class Judge:
             self.harsh_since = self.harsh = None
         return said
 
+    def lost(self):
+        """Out of the cab, or into another train: how the last one was moving is forgotten. Getting into an 807
+        standing still after leaving a 331 on the move read as the 331 stopping with a jolt."""
+        self.accs.clear()
+        self.coach = self.alert = self.approach = self.harsh_since = self.harsh = None
+        self.moved, self.braking = False, 0.0
+        self.learner = BrakeLearner()
+
     def _time(self, now, clock):
         """How fast the game's time goes against the wall clock (slower below 20 fps)."""
         if clock is None or (self.clocks and clock == self.clocks[-1][1]):
@@ -470,14 +481,18 @@ class ComfortWatch(threading.Thread):
         now = time.monotonic()
         if speed is None or acc is None:  # not in a cab
             self._gone()
+            with self.lock:
+                self.judge.lost()
             if now - self.subscribed_at > RESUBSCRIBE_SECONDS:
                 self.feed.subscribed = False        # in case it was tied to a train that's gone
             time.sleep(0.5)
             return
         train = _first(got["train"])
-        if train != self.train:
+        if train is not None and train != self.train:    # (None: that entry missing from this answer)
             self.train = train
-            self.judge.ease = (self.eases.get(train) or {}).get("ease")
+            with self.lock:
+                self.judge.lost()
+                self.judge.ease = (self.eases.get(train) or {}).get("ease")
         clock = (got["clock"] or {}).get("LocalTime")
         brake, power = got["brake"] or {}, got["power"] or {}
         demand = brake.get("HandlePosition") if brake.get("IsActive") else None
@@ -516,7 +531,7 @@ class ComfortWatch(threading.Thread):
                      f"the stop warning comes {lead:.1f} s before")
 
     def _count(self):
-        """The passengers aboard: the cars with passenger doors are looked for when the train changes."""
+        """The passengers aboard: the passenger cars are looked for when the train changes."""
         api = self.api
         self.counted = time.monotonic()
         n = int(api.get_value("CurrentFormation.FormationLength") or 0)
@@ -528,8 +543,9 @@ class ComfortWatch(threading.Thread):
             for i in range(min(n, MAX_CARS)):
                 names = core.node_names(api.list(f"CurrentFormation/{i}"))
                 answered = answered and bool(names)
-                if "PassengerCargoModel" in names and any(name.startswith("PassengerDoor_") for name in names):
-                    cars.append(f"CurrentFormation/{i}/PassengerCargoModel")
+                model = next((m for m in CARGO_MODELS if m in names), None)
+                if model:
+                    cars.append(f"CurrentFormation/{i}/{model}")
             # a car that didn't answer is looked at again at the next count, not left out for good
             self.cars, self.formation = cars, n if answered else None
         counts = [api.get_value(car + ".Function.GetPassengerCount") for car in self.cars]

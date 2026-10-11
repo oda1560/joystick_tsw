@@ -54,6 +54,18 @@ MAX_CARS = 16
 DANGER = {"Stop", "Danger"}    # signal aspects to wait at
 DANGER_METRES = 400.0          # ... when the signal is this close
 PLATFORM = re.compile(r"^(.*?)[\s,-]+((?:platform|plat|pl|gleis|track|bahnsteig|voie|binario)\.?\s*\S+)$", re.I)
+# Passenger doors are named differently on each train: PassengerDoor_FL (331, 150, 807), Door_PassengerDoor_FR and
+# Door_PasssengerDoor_FL (350), Door_Passenger_BL (153), RailVehicleDoor_FL (N-Wagen), SingleDoor / DoubleDoors,
+# BerthingDoor_L1 (38 stock), "PassengerDoor_FL (DoorControl)" (385)... Taken by name: a door that isn't a cab,
+# gangway or inside one (words of the name); and by its class: a door, not a button or lever named after one
+# (DoorWindow, PassengerDoorStep, the Mk3's PassengerDoor_Release_L). Checked on every passenger vehicle in the game
+# files (2026-10-11): all but the trams get their doors, and the 331, 150 and 807 the same ones as before.
+OTHER_DOORS = {"cab", "cabin", "driver", "drivers", "gangway", "gang", "interior", "internal", "int", "inner",
+               "compartment", "vestibule", "vestabule", "staff", "crew", "guard", "guards", "corridor", "toilet", "wc",
+               "luggage", "cabinet", "kitchen", "nose", "cage", "first", "floor", "quiet", "end", "back", "rto", "bse",
+               "trap", "trapdoor", "window", "step", "panel", "manager", "manger", "temp", "platform", "operation",
+               "electrical", "indicator", "logic", "button", "conductor", "closing", "simulation"}
+NOT_DOOR_CLASSES = ("button", "lever", "manager", "proxy")
 
 
 def api_guid(raw):
@@ -61,6 +73,18 @@ def api_guid(raw):
     four 32-bit parts little-endian, the API prints them as numbers."""
     b = bytes.fromhex(raw)
     return "".join(b[i:i + 4][::-1].hex() for i in range(0, 16, 4)).upper()
+
+
+def passenger_door(name):
+    """Whether a node's name is a passenger door's (or a button's named after one: its class tells)."""
+    words = [w.lower() for w in re.findall(r"[A-Z]?[a-z]+|[A-Z]+(?![a-z])|\d+", name.split(" (")[0])]
+    return any(w.startswith("door") for w in words) and not OTHER_DOORS.intersection(words)
+
+
+def door_class(cls):
+    """Whether a node's ObjectClass is a door's: RailVehicleDoorComponent, DoorV2Component, a blueprint door."""
+    cls = cls.lower()
+    return "door" in cls and not any(word in cls for word in NOT_DOOR_CLASSES)
 
 
 def split_platform(destination):
@@ -574,7 +598,12 @@ class StopTracker(threading.Thread):
                     if known:
                         return self.doors_open        # look again next time
                     break
-                nodes += [f"CurrentFormation/{i}/{n}" for n in names if n.startswith("PassengerDoor_")]
+                for name in filter(passenger_door, names):
+                    cls = api.get_value(f"CurrentFormation/{i}/{name}.ObjectClass")
+                    if not isinstance(cls, str):
+                        return self.doors_open        # no answer: look again next time
+                    if door_class(cls):
+                        nodes.append(f"CurrentFormation/{i}/{name}")
             self.door_nodes = nodes
         self.doors_open = any((api.get_value(n + ".Function.GetCurrentOutputValue") or 0.0) > 0.05
                               for n in self.door_nodes)

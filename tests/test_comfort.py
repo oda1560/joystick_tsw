@@ -134,6 +134,15 @@ class MadeUpStops(unittest.TestCase):
             judge.new_leg("2P27")
         self.assertEqual(judge.service_so_far("2P27"), {"rides": 3, "smooth": 2, "passengers": 30})
 
+    def test_another_train_standing_is_not_a_stop(self):
+        judge = tsw_comfort.Judge()
+        for i in range(20):                           # a 331 braking at 20 m/s ...
+            judge.feed(i * 0.07, 20.0 - i * 0.07, -1.0, 11)
+        judge.lost()                                  # ... left for an 807 standing still
+        said = [e for i in range(20) for e in judge.feed(10 + i * 0.07, 0.0, 0.0, 390)]
+        self.assertEqual(said, [])
+        self.assertIsNone(judge.panel)
+
 
 def brake_drive(steps, lag=0.4, tau=1.0, wall_dt=0.08, game_dt=0.05, power_at=None):
     """A brake whose force follows the handle after `lag` with a first-order lag `tau`, in slow motion (game time
@@ -329,10 +338,20 @@ class FakeApi:
 class Passengers(unittest.TestCase):
     def test_counted_on_cars_with_passenger_doors(self):
         watch = tsw_comfort.ComfortWatch()
-        watch.api = FakeApi([["PassengerCargoModel", "PassengerDoor_FL"], ["PassengerCargoModel", "Engine"],
+        watch.api = FakeApi([["PassengerCargoModel", "PassengerDoor_FL"], ["Engine"],
                              ["PassengerCargoModel", "PassengerDoor_BR"]], [4, 99, 6])
         watch._count()
         self.assertEqual(watch.passengers, 10)                  # not the loco's 99
+
+    def test_whatever_the_doors_are_called(self):
+        # a Class 350's coach (Door_PassengerDoor_FR, seen live) and a DB N-Wagen's (Passenger_CargoModel)
+        watch = tsw_comfort.ComfortWatch()
+        watch.api = FakeApi([["PassengerCargoModel", "Door_PassengerDoor_FR", "PassengerDoorManager"],
+                             ["Passenger_CargoModel", "RailVehicleDoor_FL"]], [0, 6])
+        watch._count()
+        self.assertEqual(watch.passengers, 6)
+        self.assertEqual(watch.cars, ["CurrentFormation/0/PassengerCargoModel",
+                                      "CurrentFormation/1/Passenger_CargoModel"])
 
     def test_a_car_that_didnt_answer_is_looked_at_again(self):
         watch = tsw_comfort.ComfortWatch()
