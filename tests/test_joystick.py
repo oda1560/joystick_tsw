@@ -5,9 +5,12 @@ without a control (a Class 331 was driven with "no reverser found" after one did
     python -m unittest discover tests
 """
 
+import io
 import os
 import sys
 import unittest
+import urllib.error
+from unittest import mock
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 os.environ.setdefault("PYGAME_HIDE_SUPPORT_PROMPT", "1")
@@ -29,6 +32,98 @@ class Flaky:
 
     def list(self, path):
         return {}
+
+
+class LateAnswer(unittest.TestCase):
+    """The game stalls for a moment as it saves on arriving at a stop: a request it answers late is asked again
+    (one that timed out made the bridge drop the train, and the brake stayed where it was)."""
+
+    def answers(self, *outcomes):
+        """The game's answers in turn: an error raised, or the answer's body."""
+        calls = []
+
+        def urlopen(request, timeout):
+            calls.append(request.full_url)
+            outcome = outcomes[len(calls) - 1]
+            if isinstance(outcome, Exception):
+                raise outcome
+            return io.BytesIO(outcome)
+
+        api = core.TSWApi()
+        api.key = "key"
+        return api, calls, mock.patch.object(core.urllib.request, "urlopen", urlopen)
+
+    def test_a_late_answer_is_asked_for_again(self):
+        api, calls, game = self.answers(TimeoutError("timed out"),
+                                        b'{"Result": "Success", "Values": {"InputValue": 0.5}}')
+        with game:
+            self.assertEqual(api.get_value("CurrentDrivableActor/Throttle.InputValue"), 0.5)
+        self.assertEqual(len(calls), 2)
+
+    def test_late_twice_is_no_answer(self):
+        api, calls, game = self.answers(TimeoutError("timed out"), TimeoutError("timed out"))
+        with game, self.assertRaises(TimeoutError) as raised:
+            api.set("CurrentDrivableActor/Throttle.InputValue", 0.5)
+        self.assertTrue(core.no_answer(raised.exception))
+
+    def test_an_error_the_game_answers_with_isnt_asked_again(self):
+        api, calls, game = self.answers(urllib.error.HTTPError("url", 403, "Forbidden", None, None))
+        with game, self.assertRaises(urllib.error.HTTPError) as raised:
+            api.get_value("CurrentDrivableActor.ObjectClass")
+        self.assertEqual(len(calls), 1)
+        self.assertFalse(core.no_answer(raised.exception))
+
+    def test_what_is_no_answer(self):
+        for error in (TimeoutError("timed out"), ConnectionAbortedError(10053, "aborted"),
+                      urllib.error.URLError("timed out")):
+            self.assertTrue(core.no_answer(error), error)
+        for error in (urllib.error.HTTPError("url", 404, "Not Found", None, None), ValueError("bad"),
+                      IOError("the game listed no controls for the train")):
+            self.assertFalse(core.no_answer(error), error)
+
+
+class Hand:
+    """An API where the next `fails` sends aren't answered, keeping what's sent: (what, value)."""
+    key = "key"
+
+    def __init__(self, fails):
+        self.fails, self.sent = fails, []
+
+    def get_value(self, path):
+        return None
+
+    def set(self, path, value):
+        if self.fails:
+            self.fails -= 1
+            raise TimeoutError("timed out")
+        self.sent.append((path.rsplit(".", 1)[-1], value))
+
+
+class HeldInPlace(unittest.TestCase):
+    """A control is held in place as a hand would (the game's Interacting flag) once the game has the hold: one it
+    didn't answer is sent again with the next press, not taken as done."""
+
+    def test_a_button(self):
+        api = Hand(fails=1)
+        button = core.PushButton(api, "AWS_Reset")
+        with self.assertRaises(TimeoutError):
+            button.set(True)
+        self.assertFalse(button.held)
+        button.set(True)
+        self.assertEqual(api.sent, [("Interacting", 1.0), ("InputValue", 1.0)])
+        self.assertTrue(button.held)
+
+    def test_a_release_hold_apply_valve(self):
+        api = Hand(fails=1)
+        valve = core.Lever.__new__(core.Lever)
+        valve.api, valve.name, valve.path = api, "TrainBrake", "CurrentDrivableActor/TrainBrake.InputValue"
+        valve.positions, valve.held, valve._last_sent = [0.0, 0.5, 1.0], False, (None, 0.0)
+        valve.safe_lo, valve.safe_hi, valve.notches = 0.0, 1.0, None
+        with self.assertRaises(TimeoutError):
+            valve.set_value(1.0)                   # into Apply: held there
+        self.assertFalse(valve.held)
+        valve.set_value(1.0)
+        self.assertEqual(api.sent, [("Interacting", 1.0), ("InputValue", 1.0)])
 
 
 class LeverWorks(unittest.TestCase):
@@ -62,12 +157,40 @@ class FakeReverser:
         return self.moves[-1] if self.moves else "forward"
 
 
+class Refusing(FakeReverser):
+    """A reverser that stays in Forward (master key out, say), and doesn't answer the first `silent` reads of where
+    it is."""
+
+    def __init__(self, silent):
+        super().__init__(fails=0)
+        self.silent = silent
+
+    def position(self):
+        if self.silent:
+            self.silent -= 1
+            raise TimeoutError("timed out")
+        return "forward"
+
+
 class FakeControls:
     def __init__(self, reverser, speed=0.0):
         self.reverser, self._speed = reverser, speed
 
     def speed(self):
         return self._speed
+
+
+class Clock:
+    """Stands in for the time module, so waits take no real time."""
+
+    def __init__(self):
+        self.now = 1000.0
+
+    def time(self):
+        return self.now
+
+    def sleep(self, seconds):
+        self.now += seconds
 
 
 class ReverserSync(unittest.TestCase):
@@ -87,6 +210,22 @@ class ReverserSync(unittest.TestCase):
         sync.update(controls, "neutral")
         sync.update(controls, "neutral")
         self.assertEqual(controls.reverser.moves, [])
+
+    def test_a_check_the_game_doesnt_answer_is_made_again(self):
+        log, clock = [], Clock()
+        controls = FakeControls(Refusing(silent=1))
+        with mock.patch.object(core, "time", clock):
+            sync = core.ReverserSync(log.append)
+            sync.update(controls, "forward")
+            sync.update(controls, "neutral")       # moved, and checked a moment later ...
+            clock.sleep(1.0)
+            sync.update(controls, "neutral")       # ... when the game doesn't answer: no error, no verdict
+            refused = [line for line in log if line.startswith("Reverser is at")]
+            self.assertEqual(refused, [])
+            sync.update(controls, "neutral")       # checked again
+        refused = [line for line in log if line.startswith("Reverser is at")]
+        self.assertEqual(refused, ["Reverser is at forward, not neutral - the train may need the master key in "
+                                   "or the brake applied first"])
 
 
 class Detect(unittest.TestCase):
@@ -143,11 +282,33 @@ class Class484(core.TSWApi):
         return {"Result": "Success", "Values": values} if values else {"Result": "Error"}
 
 
+class Class807(Class484):
+    """A power/brake handle (the 484's stands in) beside brake pipe hoses, which the game lists with the controls,
+    as on the Class 807: BrakePipe_F has "brake" in its name but isn't a control (an AirHoseComponent). Taken for a
+    train brake that didn't answer, it had the 807 looked at again five times on each drive (2026-10-11)."""
+
+    def __init__(self):
+        super().__init__()
+        del self.levers["TrainBrake (Irregular Lever)"]
+
+    def _req(self, method, path, params=None):
+        if path == "list/CurrentDrivableActor":
+            return {"Result": "Success",
+                    "Nodes": [{"Name": n} for n in [*self.levers, "BrakePipe_F", "BrakePipe_B"]]}
+        return super()._req(method, path, params)
+
+
 class PowerBrakeHandle(unittest.TestCase):
     def detect(self, api):
         controls = core.TrainControls(api)
         controls.detect()
         return controls
+
+    def test_a_brake_hose_is_neither_a_brake_nor_a_control_to_look_for_again(self):
+        controls = self.detect(Class807())
+        self.assertEqual(controls.throttle.name, "Throttle (Irregular Lever)")
+        self.assertIsNone(controls.brake)
+        self.assertEqual(controls.missing, [])
 
     def test_a_brake_the_game_gives_no_input_isnt_used_beside_a_power_brake_handle(self):
         controls = self.detect(Class484())

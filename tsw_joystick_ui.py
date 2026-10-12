@@ -85,6 +85,10 @@ CAB_BUTTONS = {"aws_button": "aws", "alerter_button": "alerter",
                "door_open_left_button": "door_open_left", "door_open_right_button": "door_open_right",
                "door_close_left_button": "door_close_left", "door_close_right_button": "door_close_right"}
 LIGHTS = {"aws_button": "AWS", "alerter_button": "Alerter"}    # shown in the live view while held
+BUTTON_NAMES = {"aws": "AWS", "alerter": "alerter", "door_open_left": "open left doors",
+                "door_open_right": "open right doors", "door_close_left": "close left doors",
+                "door_close_right": "close right doors"}           # cab buttons, as the log names them
+BUTTON_AGAIN_SECONDS = 5.0     # a cab button press the game doesn't answer is made again for this long
 # keys that can show the next stop while held -> Windows key code. TSW7 binds none of them, in its controls or the
 # engine's (DefaultInput.ini, BaseInput.ini, BaseEngine.ini); F4 / F5 / F9 and the number pad's digits, + and - have
 # debug bindings, ` opens the console, F12 is Steam's screenshot, and Num . is Delete (TPWS / PZB) with Num Lock off
@@ -199,6 +203,8 @@ class Bridge(threading.Thread):
         self.speed = None             # m/s, for display
         self.last_poll = 0.0
         self.button_queue = queue.Queue()   # (cab button "aws" / "door_open_left" etc., pressed) from the UI
+        self.button_again = None      # (button, pressed, until): a press the game didn't answer, made again
+        self.send_failed = False      # the stick's last send got no answer: sent again until it does
 
     def set_game(self, level, text):
         if (level, text) != self.game_status:
@@ -216,15 +222,31 @@ class Bridge(threading.Thread):
 
     def _handle_buttons(self, controls):
         while True:
-            try:
-                name, down = self.button_queue.get_nowait()
-            except queue.Empty:
-                return
+            if self.button_again is not None:
+                (name, down, until), self.button_again = self.button_again, None
+            else:
+                try:
+                    name, down = self.button_queue.get_nowait()
+                except queue.Empty:
+                    return
+                until = time.monotonic() + BUTTON_AGAIN_SECONDS
             if controls is None:
                 continue
             if down and not self.enabled:
                 continue              # paused: ignore presses, but always pass releases through
-            message = controls.press(name, down)
+            try:
+                message = controls.press(name, down)
+            except Exception as e:
+                if not core.no_answer(e):
+                    raise
+                if time.monotonic() < until:
+                    # the game stalled (it does as it saves on arriving at a stop): press or let go again next
+                    # time round, before anything pressed since (an AWS acknowledge lost would brake the train)
+                    self.button_again = (name, down, until)
+                    return
+                self.log(f"The game didn't answer: the {BUTTON_NAMES[name]} button wasn't "
+                         f"{'pressed' if down else 'let go'}")
+                continue
             if message:
                 self.log(message)
 
@@ -293,7 +315,11 @@ class Bridge(threading.Thread):
         if now - self.last_poll > 0.5:
             self.last_poll = now
             self.speed = controls.speed()
-            self.rev_actual = controls.reverser.position() if controls.reverser else None
+            try:
+                self.rev_actual = controls.reverser.position() if controls.reverser else None
+            except Exception as e:
+                if not core.no_answer(e):
+                    raise                 # (no answer: the game stalled, read it next time round)
 
         if not self.enabled:
             controls.let_go()
@@ -309,15 +335,28 @@ class Bridge(threading.Thread):
             return
         if self.last_sent is None:
             self.last_sent = y        # don't snap levers until the stick actually moves
+            self.send_failed = False
             return
-        if abs(y - self.last_sent) < core.SEND_THRESHOLD:
+        if abs(y - self.last_sent) < core.SEND_THRESHOLD and not self.send_failed:
             return                    # stick not moved: leave levers alone so the keyboard still works
         try:
             controls.apply(y)
-            self.last_sent = y
         except Exception as e:
-            self.log(f"Send failed: {e}")
-            self.drop_train()
+            if not core.no_answer(e):
+                self.log(f"Send failed: {e}")
+                self.drop_train()
+                return
+            # the game stalled (it does as it saves on arriving at a stop): keep the train and send where the stick
+            # is again next time round, even if it's back where it was (the send may have got there). Dropping the
+            # train left the handle where it was until the stick moved again, which can be as you ease the brake
+            if not self.send_failed:
+                self.log(f"Send failed ({e}) - sending again")
+            self.send_failed = True
+            return
+        if self.send_failed:
+            self.log("Sent again")
+        self.send_failed = False
+        self.last_sent = y
 
 
 # ---------------------------------------------------------------- popups over the game

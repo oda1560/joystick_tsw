@@ -167,8 +167,8 @@ class TSWApi:
                     return json.loads(r.read().decode("utf-8") or "{}")
             except urllib.error.HTTPError:
                 raise
-            except (urllib.error.URLError, ConnectionError):
-                if attempt:                # the game occasionally drops a connection: retry once
+            except (urllib.error.URLError, ConnectionError, TimeoutError):
+                if attempt:                # the game occasionally drops a connection, or answers late: retry once
                     raise
                 time.sleep(0.05)
 
@@ -189,6 +189,13 @@ class TSWApi:
         for v in values.values():
             return v
         return None
+
+
+def no_answer(error):
+    """Whether an error is the game not answering (it stalls for a moment as it saves on arriving at a stop, or it
+    dropped the connection), rather than answering with an error: worth sending again."""
+    return isinstance(error, (urllib.error.URLError, ConnectionError, TimeoutError)) \
+        and not isinstance(error, urllib.error.HTTPError)
 
 
 def node_names(listing):
@@ -556,8 +563,8 @@ class Lever:
             self._interact(False)
 
     def _interact(self, on):
-        self.held = on
         self.api.set(f"CurrentDrivableActor/{self.name}.Interacting", 1.0 if on else 0.0)
+        self.held = on                 # once the game has it: a send it didn't answer is made again
 
     def let_go(self):
         """Stop holding the handle, so it goes where the game takes it (a valve springs back to Hold). Done
@@ -1386,8 +1393,8 @@ class PushButton:
             self._interact(False)
 
     def _interact(self, on):
-        self.held = on
         self.api.set(f"{self.node}.Interacting", 1.0 if on else 0.0)
+        self.held = on                 # once the game has it: a press it didn't answer is made again
 
     def let_go(self):
         """Back to where the button rests and stop holding it, if it's held (see TrainControls.let_go)."""
@@ -1439,11 +1446,16 @@ class ReverserSync:
             return
         now = time.time()
         if self.verify and now >= self.verify[0]:
-            expected, self.verify = self.verify[1], None
-            actual = rev.position()
-            if actual != expected:
-                self.log(f"Reverser is at {actual or '?'}, not {expected} - the train may need "
-                         f"the master key in or the brake applied first")
+            try:
+                actual = rev.position()
+            except Exception as e:
+                if not no_answer(e):
+                    raise                  # (no answer: the game stalled, look again next time round)
+            else:
+                expected, self.verify = self.verify[1], None
+                if actual != expected:
+                    self.log(f"Reverser is at {actual or '?'}, not {expected} - the train may need "
+                             f"the master key in or the brake applied first")
         if self.last is None:
             self.last = zone          # don't move the reverser until the slider actually moves
             return
