@@ -260,10 +260,9 @@ class Package:
             if imp["class"] == "Package":
                 return Ref(imp["name"], imp["name"], None)
             outer = self.ref(imp["outer"]) if imp["outer"] else None
-            pkg = outer
-            while pkg is not None and pkg.name is not None:
-                pkg = pkg.outer
-            return Ref(imp["name"], pkg.package if pkg is not None else None, imp["name"],
+            # the outer already knows its package, however far up that is (a parent blueprint's component
+            # sits in its class, in its package: walking up lost it, so the Class 484 lost its base's settings)
+            return Ref(imp["name"], outer.package if outer is not None else None, imp["name"],
                        outer if outer is not None and outer.name is not None else None)
         return None
 

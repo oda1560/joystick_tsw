@@ -1972,9 +1972,17 @@ class TrainControls:
             not_brakes = OTHER_BRAKE_IDS + THROTTLE_IDS
             b = next((n for n in pick_all(names, BRAKE_NAMES, EXCLUDE) if n != t and is_lever(n)
                       and not any(x in id_of.get(n, "").lower() for x in not_brakes)), None)
-        if t:
-            lever = Lever(self.api, t, id_of.get(t, ""), train=self.train_id, model=handles.get(t))
-            self.throttle = lever if lever.works() else None
+        throttle = Lever(self.api, t, id_of.get(t, ""), train=self.train_id, model=handles.get(t)) if t else None
+        if (b and throttle and throttle.combined and throttle.brake_end is not None
+                and id_of.get(t) and not id_of.get(b)):
+            # a "brake" found only by its name, which the game gives no input to, beside a power handle that has
+            # brake notches of its own: that handle is the brake, the other one something else. Class 484 / 385:
+            # a train brake left over from the base train, which brakes nothing (seen in the game: the stick
+            # moved it to Braking 2 and the train coasted on); SNG: the Quick Brake cut-in switch; Class 166: a
+            # virtual lever that can't move
+            b = None
+        if throttle:
+            self.throttle = throttle if throttle.works() else None
             if self.throttle is None:
                 self.missing.append(t)
         if b:

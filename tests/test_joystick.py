@@ -96,6 +96,72 @@ class Detect(unittest.TestCase):
             controls.detect()
 
 
+def named(*places):
+    return [{"valueSource": "Output", "valueRange": {"min": v, "max": v}, "displayName": n} for n, v in places]
+
+
+class Class484(core.TSWApi):
+    """The Isle of Wight Class 484's power/brake handle and its TrainBrake, as the game reported them
+    (2026-10-11): the TrainBrake has no input identifier and braked nothing when moved."""
+    LEVERS = {
+        "Throttle (Irregular Lever)": dict(
+            ident="Throttle", inputs=(-1, 1), outputs=(-4, 7), notches=12,
+            places=named(("Emergency Brake", -4), ("Full Service", -3), ("Braking 2", -2), ("Braking 1", -1),
+                         ("Off", 0), *((str(k), k) for k in range(1, 8)))),
+        "TrainBrake (Irregular Lever)": dict(
+            ident="None", inputs=(0, 1), outputs=(0, 4), notches=5,
+            places=named(("Release", 4), ("Braking 1", 3), ("Braking 2", 2), ("Full Service", 1),
+                         ("Emergency", 0))),
+    }
+
+    def __init__(self, train_brake_ident="None"):
+        super().__init__()
+        self.key = "key"
+        self.levers = {n: dict(v) for n, v in self.LEVERS.items()}
+        self.levers["TrainBrake (Irregular Lever)"]["ident"] = train_brake_ident
+
+    def _req(self, method, path, params=None):
+        if path == "list/CurrentDrivableActor":
+            return {"Result": "Success", "Nodes": [{"Name": n} for n in self.levers]}
+        node, _, endpoint = path[len("get/CurrentDrivableActor/"):].partition(".")
+        lever = self.levers.get(node)
+        if not path.startswith("get/CurrentDrivableActor/") or lever is None:
+            return {"Result": "Error"}
+        values = {
+            "Property.InputIdentifier": {"identifier": lever["ident"]},
+            "Property.DisplayInfo": {"namedValues": lever["places"]},
+            "Property.bCustomOutputValueMapping": {"Value": False},
+            "Property.bInputEnabled": {"Value": True},
+            "ObjectClass": {"ObjectClass": "IrregularLeverComponent"},
+            "InputValue": {"InputValue": 0.0},
+            "Function.GetMinimumInputValue": {"ReturnValue": lever["inputs"][0]},
+            "Function.GetMaximumInputValue": {"ReturnValue": lever["inputs"][1]},
+            "Function.GetMinimumOutputValue": {"ReturnValue": lever["outputs"][0]},
+            "Function.GetMaximumOutputValue": {"ReturnValue": lever["outputs"][1]},
+            "Function.GetNotchCount": {"ReturnValue": lever["notches"]},
+        }.get(endpoint)
+        return {"Result": "Success", "Values": values} if values else {"Result": "Error"}
+
+
+class PowerBrakeHandle(unittest.TestCase):
+    def detect(self, api):
+        controls = core.TrainControls(api)
+        controls.detect()
+        return controls
+
+    def test_a_brake_the_game_gives_no_input_isnt_used_beside_a_power_brake_handle(self):
+        controls = self.detect(Class484())
+        self.assertEqual(controls.throttle.name, "Throttle (Irregular Lever)")
+        self.assertIsNone(controls.brake)
+        throttle = controls.throttle
+        self.assertLess(controls.targets(-1.0)[throttle], throttle.neutral)     # stick back: the handle brakes
+        self.assertIn("power+brake lever", controls.describe())
+
+    def test_a_train_brake_the_game_drives_is_still_used(self):
+        controls = self.detect(Class484(train_brake_ident="TrainBrake"))
+        self.assertEqual(controls.brake.name, "TrainBrake (Irregular Lever)")
+
+
 class DoorDesk:
     """A cab's door buttons: `off` are switched off, `silent` don't answer."""
     key = "key"
