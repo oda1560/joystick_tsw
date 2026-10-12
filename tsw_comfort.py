@@ -48,7 +48,8 @@ anywhere.
                              #   {"phase": "firm" / "harsh", "kind": "brake" / "power", "felt": m/s², "passengers"}
                              #   {"phase": "lost", "level": "firm" / "harsh", "kind", "cost", "mark", "score",
                              #    "passengers"}: for a moment after a firm or harsh stretch that cost points
-    watch.report(service)    # the ride since the last station, None off passenger trains: {"stop": None / "smooth" /
+    watch.report(service)    # the ride since the last station, None off passenger trains, at a service's first
+                             #   stop (no ride to it) and if it was on another service: {"stop": None / "smooth" /
                              #   "jolt" (the stop you're at), "braking": as it stopped, "harsh": [["brake" / "power",
                              #   worst m/s², seconds]], "firm": {"brake" / "power": seconds}, "way": braking at each
                              #   stop with a jolt on the way (signals), "passengers": most aboard, "mark": out of 100,
@@ -56,7 +57,8 @@ anywhere.
                              #   "smooth": rides this service without a jolt or a harsh moment, "rides": of them}
     watch.service(service, station)   # this service so far, the ride to `station` too if it's over: {"rides",
                              #   "smooth", "passengers": most aboard, "comfort": score, "marks": [ride (_ride)]}
-    watch.new_leg(service, station)   # on leaving a station: the ride to it is done
+    watch.new_leg(service, station, first)   # on leaving a station: the ride to it is done; leaving the service's
+                             #   first stop (first=True) starts the service afresh, whatever came before it
 """
 
 import collections
@@ -114,9 +116,10 @@ PATHS = {"speed": A + "Function.HUD_GetSpeed", "acc": A + "Function.HUD_GetAccel
          **{"hold " + node: f"CurrentDrivableActor/Simulation/{node}.BrakeHoldActive" for node in HOLD_NODES}}
 
 
-def _leg():
+def _leg(service=None):
+    """A ride from a station on `service` (None: the bridge started on the way, so it isn't known)."""
     return {"stop": None, "braking": None, "harsh": [], "firm": {"brake": 0.0, "power": 0.0}, "way": [],
-            "passengers": 0, "judged": False}
+            "passengers": 0, "judged": False, "service": service}
 
 
 def _smooth(leg):
@@ -465,10 +468,18 @@ class Judge:
             self.alert = None
         return level
 
-    def report(self, service):
+    def _ours(self, service):
+        """The ride going on is one on `service`. A ride on another doesn't carry into it: a Class 484 stopping at
+        a signal on 2U02 with a jolt, then 2W18_1 started on a 350, showed that jolt at 2W18_1's first stop and
+        kept it as the ride there (seen live)."""
+        return self.leg["service"] in (None, service)
+
+    def report(self, service, first=False):
+        """The ride to the stop you're at on `service`; `first`: that's the service's first stop, there's no ride
+        to it."""
         leg = self.leg
         lost = losses(leg)
-        if not leg["judged"] or (leg["stop"] is None and not lost):
+        if first or not leg["judged"] or not self._ours(service) or (leg["stop"] is None and not lost):
             return None
         done = self.done if service == self.service else []
         ended = done + ([_ride(leg)] if leg["stop"] is not None else [])
@@ -481,22 +492,26 @@ class Judge:
         ride now (to `station`) if it has ended at a stop."""
         leg = self.leg
         same = service == self.service
+        ours = self._ours(service)
         done = list(self.done) if same else []
-        if leg["judged"] and leg["stop"] is not None:
+        if ours and leg["judged"] and leg["stop"] is not None:
             done.append(_ride(leg, station))
+        aboard = leg["passengers"] if ours else 0
         return {"rides": len(done), "smooth": sum(r["smooth"] for r in done),
-                "passengers": max(self.most, leg["passengers"]) if same else leg["passengers"],
-                "comfort": score(done), "marks": done}
+                "passengers": max(self.most, aboard) if same else aboard, "comfort": score(done), "marks": done}
 
-    def new_leg(self, service, station=None):
-        """Leaving `station`: the ride to it is done. That ride as kept, or None if it wasn't judged."""
+    def new_leg(self, service, station=None, first=False):
+        """Leaving `station`: the ride to it is done. That ride as kept, or None if it wasn't judged. `first`: the
+        service's first stop: the service starts here (again, if it was started over), and how the train went
+        before isn't a ride of it."""
         leg, ride = self.leg, None
-        if service != self.service:
-            self.service, self.done, self.most = service, [], leg["passengers"]
-        if leg["judged"] and leg["stop"] is not None:
+        ours = not first and self._ours(service) and leg["judged"] and leg["stop"] is not None
+        if first or service != self.service:
+            self.service, self.done, self.most = service, [], leg["passengers"] if ours else 0
+        if ours:
             ride = _ride(leg, station)
             self.done.append(ride)
-        self.leg = _leg()
+        self.leg = _leg(service)
         self.harsh = None                 # a harsh moment going on carries on into the next ride uncounted ...
         self.harsh_time = 0.0             # ... and what's left of it is firm there
         return ride
@@ -600,17 +615,17 @@ class ComfortWatch(threading.Thread):
     def coach(self):
         return self.judge.panel
 
-    def report(self, service):
+    def report(self, service, first=False):
         with self.lock:
-            return self.judge.report(service)
+            return self.judge.report(service, first)
 
     def service(self, service, station=None):
         with self.lock:
             return self.judge.service_so_far(service, station)
 
-    def new_leg(self, service, station=None):
+    def new_leg(self, service, station=None, first=False):
         with self.lock:
-            ride = self.judge.new_leg(service, station)
+            ride = self.judge.new_leg(service, station, first)
             done = len(self.judge.done)
             total = score(self.judge.done)
         if ride:

@@ -25,7 +25,8 @@ at the first stop.
                        #  "signal" (wait for it) / "end" (of the service), "station": name, "now", "departs" (game
                        #  seconds after midnight; departs None if not timed), "left": seconds to departure,
                        #  "doors": open, "points": tsw_score.Points.read(), "service": its name, "schedule": this
-                       #  stop and the rest (ServicePath.stops), "route": the route's name, "train": its class};
+                       #  stop and the rest (ServicePath.stops), "first": it's the service's first stop, "route":
+                       #  the route's name, "train": its class};
                        #  for a while after moving off, phase "departed" and "moved": when the train moved off
 """
 
@@ -575,10 +576,11 @@ class StopTracker(threading.Thread):
             phase = "close"
         else:
             phase = "wait"
+        schedule = path.stops(self.dwell)
         self.stop = {"phase": phase, "station": path.station(self.dwell), "now": now, "departs": departs,
                      "left": left, "doors": doors, "points": self.points.read({self.service, path.name}, clock),
-                     "service": self.service, "schedule": path.stops(self.dwell), "route": self.route,
-                     "train": self.train}
+                     "service": self.service, "schedule": schedule, "first": len(schedule) == len(path.stops()),
+                     "route": self.route, "train": self.train}
 
     def _doors_open(self):
         """Whether any passenger door of the train is open (looked at once a second)."""

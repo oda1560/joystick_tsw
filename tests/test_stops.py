@@ -121,6 +121,28 @@ class Timetable(unittest.TestCase):
         self.assertIsNone(tracker.match_again)                   # and gives up after a few
 
 
+class FirstStop(unittest.TestCase):
+    def at(self, instruction, key):
+        """The stop the tracker shows standing at the LoadUnload `instruction` of A -> B -> C (Shipley-like: two
+        steps at A, the second untimed)."""
+        tracker = tsw_stops.StopTracker()
+        tracker.service = "2P27"
+        tracker.points = types.SimpleNamespace(read=lambda names, clock: {})
+        tracker._doors_open = lambda: False
+        instructions = [("LoadUnload", True, None, []), ("LoadUnload", True, None, []), ("GoTo", True, "B", []),
+                        ("LoadUnload", True, None, []), ("GoTo", True, "C", []), ("LoadUnload", True, None, [])]
+        tracker.path = tsw_stops.ServicePath("2P27", [(i, None) for i in range(len(instructions))], [], {},
+                                             instructions, {"origin": "A", "end": "C"})
+        tracker._at_stop((instruction, None), key, 0.0, 36000.0, {})
+        return tracker.stop
+
+    def test_the_service_s_first_stop(self):
+        self.assertTrue(self.at(0, 0)["first"])
+        self.assertTrue(self.at(1, 1)["first"])               # the second step there
+        self.assertFalse(self.at(3, 3)["first"])
+        self.assertFalse(self.at(5, 5)["first"])
+
+
 class RouteName(unittest.TestCase):
     def test_from_the_timetable_id(self):
         self.assertEqual(tsw_stops.route_name("/MedwayValley/Map/MVL:PersistentLevel.SandboxRouteTimetable_1.T"),

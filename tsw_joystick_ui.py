@@ -903,6 +903,7 @@ class App:
         self.comfort = tsw_comfort.ComfortWatch(self.log)
         self.at_station = None        # service you're stopped at a station of, for the ride report
         self.at_name = None           # ... and that station
+        self.at_first = False         # ... and it's the service's first stop
         self.ride = None              # ride report for that station
         self.history = tsw_history.History()
         self.history_window = None
@@ -1788,10 +1789,10 @@ class App:
         """The ride report for the station you're stopped at (tsw_stops.StopTracker.stop): it follows the ride as
         the judging catches up with the stop, and stays as it was once you've left; leaving starts the next ride."""
         if stop and stop["phase"] != "departed":
-            self.at_station, self.at_name = stop["service"], stop["station"]
-            self.ride = self.comfort.report(stop["service"])
+            self.at_station, self.at_name, self.at_first = stop["service"], stop["station"], bool(stop.get("first"))
+            self.ride = self.comfort.report(stop["service"], self.at_first)
         elif self.at_station is not None:
-            self.comfort.new_leg(self.at_station, self.at_name)
+            self.comfort.new_leg(self.at_station, self.at_name, self.at_first)
             self.at_station = None
         return self.ride if stop else None
 

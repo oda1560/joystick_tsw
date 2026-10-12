@@ -386,6 +386,44 @@ class Marks(unittest.TestCase):
         self.assertEqual(json.loads(json.dumps(done)), done)                     # kept in the history as it is
 
 
+class AnotherService(unittest.TestCase):
+    def test_a_ride_on_another_service_doesnt_carry_into_the_next(self):
+        judge = tsw_comfort.Judge()
+        judge.new_leg("2U02", "Ryde Pier Head", first=True)
+        stop_at(judge, 1.4, 0.0, passengers=2)               # a 484 stopping at a signal with a jolt, then left
+        self.assertIsNone(judge.report("2W18_1", first=True))     # 2W18_1 started on a 350, at its first stop
+        self.assertIsNone(judge.report("2W18_1"))
+        self.assertIsNone(judge.new_leg("2W18_1", "Birmingham New Street", first=True))
+        done = judge.service_so_far("2W18_1")
+        self.assertEqual((done["rides"], done["passengers"], done["comfort"]), (0, 0, None))
+
+    def test_a_service_s_first_stop_has_no_ride_to_it(self):
+        judge = tsw_comfort.Judge()                           # the bridge started with the train on the way
+        t = stop_at(judge, 1.4, 0.0, passengers=2)
+        self.assertIsNone(judge.report("2W18_1", first=True))
+        self.assertIsNone(judge.new_leg("2W18_1", "Birmingham New Street", first=True))
+        stop_at(judge, 0.5, t, passengers=150)
+        self.assertEqual(judge.report("2W18_1")["mark"], 100)
+        ride = judge.new_leg("2W18_1", "Smethwick Galton Bridge")
+        self.assertEqual((ride["station"], ride["mark"], ride["passengers"]), ("Smethwick Galton Bridge", 100, 150))
+
+    def test_started_over_from_the_first_stop(self):
+        judge = tsw_comfort.Judge()
+        judge.new_leg("2W18_1", "Birmingham New Street", first=True)
+        stop_at(judge, 1.4, 0.0, passengers=150)
+        judge.new_leg("2W18_1", "Smethwick Galton Bridge")
+        self.assertEqual(judge.service_so_far("2W18_1")["rides"], 1)
+        judge.new_leg("2W18_1", "Birmingham New Street", first=True)    # back to the start
+        done = judge.service_so_far("2W18_1")
+        self.assertEqual((done["rides"], done["passengers"]), (0, 0))
+
+    def test_the_ride_where_the_bridge_started_still_counts(self):
+        judge = tsw_comfort.Judge()
+        stop_at(judge, 0.8, 0.0, passengers=20)
+        self.assertEqual(judge.report("2P27")["stop"], "jolt")
+        self.assertEqual(judge.new_leg("2P27", "Frizinghall")["mark"], 97)
+
+
 class BrakeTiming(unittest.TestCase):
     def test_air_brake(self):
         timed, ratio = brake_drive([(5.0, 0.33)])
