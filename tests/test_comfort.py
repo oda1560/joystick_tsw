@@ -1,7 +1,8 @@
 """
 Tests for tsw_comfort.py: a drive logged in the game (Class 150, Cardiff valleys 1M56, full service to a stand at
-the end: data/class150_1M56.csv, with time, speed, acceleration, gradient, power notch and brake handle), made-up
-stops and brakes, and the subscription feed against a stand-in for the game's API.
+the end: data/class150_1M56.csv, with time, speed, acceleration, gradient, power notch and brake handle), a Class
+350 stop with its own holding brake (2W09: data/class350_2W09.csv), made-up stops and brakes, and the subscription
+feed against a stand-in for the game's API.
 
     python -m unittest discover tests
 """
@@ -156,6 +157,84 @@ class MadeUpStops(unittest.TestCase):
         said = [e for i in range(20) for e in judge.feed(10 + i * 0.07, 0.0, 0.0, 390)]
         self.assertEqual(said, [])
         self.assertIsNone(judge.panel)
+
+
+DRIVE_350 = os.path.join(HERE, "data", "class350_2W09.csv")
+
+
+def replay_350(hold=True):
+    """A Class 350 stop logged in the game (2W09; time, speed, acceleration, power on, brake handle and the train's
+    own holding brake, game time): eased to the lowest brake step, then the holding brake came on at 0.62 m/s and
+    the braking went from 0.37 to 0.86 m/s². (the stopped panel, said)."""
+    judge, said, stopped = tsw_comfort.Judge(), [], None
+    with open(DRIVE_350) as f:
+        for r in csv.DictReader(f):
+            t = float(r["t"])
+            said += judge.feed(t, float(r["speed"]), float(r["acc"]), 140, t, float(r["brake"]), r["power"] == "1",
+                               r["hold"] == "1" if hold else None)
+            p = judge.panel
+            if p and p["phase"] == "stopped":
+                stopped = stopped or p
+    return stopped, said
+
+
+def held_stop(demand_at, hold_at=0.62, hold_braking=1.0):
+    """A made-up stop on a train whose own holding brake comes on slower than `hold_at` m/s and brakes it at least
+    `hold_braking` m/s², the brake handle at demand_at(speed) (1.2 m/s² a full handle): (stopped panel, said)."""
+    judge, t, v, dt, said = tsw_comfort.Judge(), 0.0, 8.0, 0.07, []
+    while t < 60:
+        demand, hold = demand_at(v), v < hold_at
+        d = max(1.2 * demand, hold_braking if hold else 0.0) if v > 0.02 else 0.0
+        v = max(0.0, v - d * dt) if v > 0.02 else 0.0
+        said += judge.feed(t, v, -d, 20, None, demand, False, hold)
+        p = judge.panel
+        if p and p["phase"] == "stopped":
+            return p, said
+        t += dt
+    return None, said
+
+
+class HoldingBrake(unittest.TestCase):
+    def test_the_train_s_own_holding_brake_isnt_a_jolt(self):
+        stopped, said = replay_350()
+        self.assertFalse(stopped["jolt"])
+        self.assertAlmostEqual(stopped["braking"], 0.37, delta=0.05)
+        hold = [e for e in said if e[0] == "hold"]
+        self.assertEqual(len(hold), 1)
+        self.assertAlmostEqual(hold[0][1], 0.62, delta=0.03)
+
+    def test_without_it_every_stop_on_a_350_was_a_jolt(self):
+        stopped, said = replay_350(hold=False)
+        self.assertTrue(stopped["jolt"])
+        self.assertGreater(stopped["braking"], 0.7)
+
+    def test_eased_off(self):
+        stopped, said = held_stop(lambda v: 0.25 if v > 1.5 else 0.15)
+        self.assertFalse(stopped["jolt"])
+        self.assertAlmostEqual(stopped["braking"], 0.18, delta=0.01)
+        self.assertEqual([e[0] for e in said], ["hold", "stop"])
+
+    def test_braking_hard_as_it_came_on_is_the_driver_s(self):
+        stopped, said = held_stop(lambda v: 0.75)
+        self.assertTrue(stopped["jolt"])
+        self.assertAlmostEqual(stopped["braking"], 0.9, delta=0.01)
+
+    def test_braking_harder_after_it_came_on_counts(self):
+        stopped, said = held_stop(lambda v: 0.15 if v > 0.5 else 1.0)
+        self.assertTrue(stopped["jolt"])
+        self.assertAlmostEqual(stopped["braking"], 1.2, delta=0.01)
+
+    def test_on_all_the_way_changes_nothing(self):
+        stopped, said = held_stop(lambda v: 0.75, hold_at=math.inf, hold_braking=0.0)
+        self.assertTrue(stopped["jolt"])
+        self.assertNotIn("hold", [e[0] for e in said])
+
+    def test_said_for_the_log(self):
+        logged = []
+        watch = tsw_comfort.ComfortWatch(log=logged.append)
+        watch._say(("hold", 0.62, 0.37))
+        self.assertEqual(logged, ["Comfort: the train's own holding brake came on at 0.62 m/s; braking over "
+                                  "0.37 m/s² from there isn't counted"])
 
 
 def brake_drive(steps, lag=0.4, tau=1.0, wall_dt=0.08, game_dt=0.05, power_at=None):
@@ -405,6 +484,14 @@ class Feed(unittest.TestCase):
         self.assertEqual(got["acc"], {"Acceleration (ms2)": -0.8})
         self.assertIsNone(got["clock"])                        # nothing there: None
         self.assertEqual(len(FakeGame.subs[tsw_comfort.SUBSCRIPTION]), len(tsw_comfort.PATHS))
+
+    def test_holding_brake_read_where_the_train_has_one(self):
+        # a Class 350 has DirectBrakeControlPowered (seen live); the other names are missing on it
+        FakeGame.values["CurrentDrivableActor/Simulation/DirectBrakeControlPowered.BrakeHoldActive"] = \
+            {"BrakeHoldActive": True}
+        got = self.feed.read("key")
+        self.assertEqual(got["hold DirectBrakeControlPowered"], {"BrakeHoldActive": True})
+        self.assertIsNone(got["hold EP_BrakeControl"])
 
     def test_a_connection_per_request(self):
         for _ in range(3):

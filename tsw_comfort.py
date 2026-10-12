@@ -12,6 +12,7 @@ What the game gives (seen on a Class 150, Cardiff valleys 1M56):
   power / brake handle the brake side, smoothly) and HUD_GetPowerHandle {"Power", "IsNegative"} (notches on the
   150; on the 331 percent of the effort, negative while braking), for when the brake is eased. Both read
   IsActive false until the cab is in use.
+- CurrentDrivableActor/Simulation/<node>.BrakeHoldActive: the train's own holding brake is on (HOLD_NODES).
 All of these but the passengers come in one request a game tick, by an API subscription.
 
 What's judged is how hard the train speeds up and slows down, not the slope: on a hill passengers lean a little all
@@ -24,6 +25,10 @@ Stopping on full service, that train braked harder and harder as it slowed, 1.8 
 then nothing within a second: the jolt. Easing the brake off in the last few seconds avoids it. How long before
 the stop the warning comes depends on how quickly the train's brake eases off: that's measured each time you step
 the brake down while braking (no power, nothing else moved), kept per train (brake_ease.json), and 3 s until then.
+Some trains brake by themselves in the last moments of a stop: a Class 350's holding brake comes on at 0.62 m/s
+with no power, and braked it at 0.9-1.0 m/s² with the handle off (seen live, 2W09), so every stop read as a jolt
+however well it was driven. In the game files the 331, 333, 350 and 380 have one, and the 710 and DB 423 something
+like it. From when it comes on, braking harder than just before isn't counted, unless the handle goes on harder.
 All this on passenger trains (a car has a passenger model), empty ones too: a 331 on 2V04 had nobody aboard, and
 showed nothing when it was only for trains with passengers. Freight and light engines are left out: in the game files
 no locomotive or wagon has a passenger model. It used to take a car with nodes named PassengerDoor_* as well, which
@@ -96,10 +101,17 @@ MAX_STEP = 0.5                 # s (game): a longer gap between readings counts 
 RATIO_SECONDS = 3.0            # game time against the wall clock over this long
 BRAKE_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "brake_ease.json")
 
+HELD_HARDER = 0.05             # the brake handle this much further on after the train's own holding brake came on:
+                               # what it brakes counts again
+# the simulation nodes that apply a train's own holding brake: these four names (LevellingValve, the fifth of the
+# kind, is air suspension) are all the game files have, and a train has only some of them
+HOLD_NODES = ("DirectBrakeControlPowered", "DirectBrakeControlUnpowered", "DirectBrakeControl", "EP_BrakeControl")
+
 A = "CurrentDrivableActor."
 PATHS = {"speed": A + "Function.HUD_GetSpeed", "acc": A + "Function.HUD_GetAcceleration",
          "brake": A + "Function.HUD_GetTrainBrakeHandle", "power": A + "Function.HUD_GetPowerHandle",
-         "train": A + "ObjectClass", "clock": "TimeOfDay.Data"}
+         "train": A + "ObjectClass", "clock": "TimeOfDay.Data",
+         **{"hold " + node: f"CurrentDrivableActor/Simulation/{node}.BrakeHoldActive" for node in HOLD_NODES}}
 
 
 def _leg():
@@ -238,6 +250,9 @@ class Judge:
         self.moved = False            # faster than MOVING since the last stop
         self.approach = None          # hardest braking slower than LAST on the way into a stop
         self.braking = 0.0            # braking at the reading before
+        self.hold = False             # the train's own holding brake on at the reading before
+        self.held = None              # since it came on as the train stopped: {"cap": the most braking counted,
+                                      #   "demand": brake handle then}
         self.harsh_since = None       # when braking or speeding up went over harsh
         self.harsh_kind = None        # ... which of them
         self.harsh_time = 0.0         # ... and for how long since (game)
@@ -264,12 +279,13 @@ class Judge:
         ease = self.ease if self.ease is not None else DEFAULT_EASE
         return min(max(REACTION * self.ratio + ease, LEAD_MIN), LEAD_MAX)
 
-    def feed(self, now, speed, acc, passengers, clock=None, brake=None, power=False):
+    def feed(self, now, speed, acc, passengers, clock=None, brake=None, power=False, hold=None):
         """`now`: wall clock seconds; `speed`: m/s, signed; `acc`: the change of speed in m/s² (the game's sign);
         `passengers`: aboard (0 on an empty passenger train), None if not a passenger train or not known; `clock`:
-        game seconds; `brake`: the brake handle, None if not known; `power`: under power. What happened, for the
-        log: [("stop", jolt, braking), ("harsh", kind, worst) once a harsh moment is over, ("ease", seconds) the
-        brake was timed easing off]."""
+        game seconds; `brake`: the brake handle, None if not known; `power`: under power; `hold`: the train's own
+        holding brake is on, None if it hasn't one. What happened, for the log: [("stop", jolt, braking),
+        ("harsh", kind, worst) once a harsh moment is over, ("ease", seconds) the brake was timed easing off,
+        ("hold", speed, braking) the train's holding brake came on as it stopped, braking this much just before]."""
         self.accs.append(acc)
         acc = sorted(self.accs)[len(self.accs) // 2]     # the middle of the last three: a slow frame can read
         v = abs(speed)                                   # one far out (-1.09 between -0.76 and -0.70)
@@ -284,6 +300,8 @@ class Judge:
         eased = self.learner.feed(game, braking, brake, power, v)
         if eased:
             said.append(("ease", eased))
+        braking = self._held(v, braking, brake, hold, said)
+        along = -braking
         if self.coach and self.coach["phase"] == "stopped" and now > self.coach_until:
             self.coach = None
         if self.loss and now > self.loss_until:
@@ -350,10 +368,32 @@ class Judge:
         self._episode(now, v, kind, level, passengers, self._spent() - spent)
         return said
 
+    def _held(self, v, braking, demand, hold, said):
+        """The braking that's down to the driver. Some trains put their brakes on by themselves in the last moments
+        of a stop and hold them there: a Class 350's holding brake comes on at 0.62 m/s with no power and fills the
+        brake cylinders to 1.5 bar whatever the handle says (seen live, 2W09), braking 0.9-1.0 m/s² with the
+        handle off. From when it comes on, no more braking counts than just before, unless the brake handle is put
+        on harder."""
+        if hold and not self.hold and self.moved and v >= STOPPED:
+            cap = max(min(self.braking, braking), 0.0)
+            self.held = {"cap": cap, "demand": demand}
+            said.append(("hold", v, cap))
+        elif not hold:
+            self.held = None
+        self.hold = bool(hold)
+        held = self.held
+        if held is not None:
+            if demand is not None and held["demand"] is not None and demand > held["demand"] + HELD_HARDER:
+                self.held = None                    # braking harder: that's the driver's
+            else:
+                braking = min(braking, held["cap"])
+        return braking
+
     def lost(self):
         """Out of the cab, or into another train: how the last one was moving is forgotten. Getting into an 807
         standing still after leaving a 331 on the move read as the 331 stopping with a jolt."""
         self.accs.clear()
+        self.hold, self.held = False, None
         self.coach = self.alert = self.approach = self.harsh_since = self.harsh = None
         self.episode = self.loss = self.last_time = None
         self.moved, self.braking = False, 0.0
@@ -628,10 +668,14 @@ class ComfortWatch(threading.Thread):
             # one it's the handle; on the Class 331 Power follows the braking effort, a moment behind the handle
             demand = abs(power.get("Power") or 0.0) / 100 if power.get("IsNegative") else 0.0
         power_on = bool(power.get("IsActive")) and not power.get("IsNegative") and (power.get("Power") or 0) > 0
+        holds = [_first(got["hold " + node]) for node in HOLD_NODES]
+        holds = [h for h in holds if h is not None]
+        hold = any(holds) if holds else None       # None: the train has no holding brake of its own
         if self.cars is None or (abs(speed) < STOPPED and now - self.counted > COUNT_SECONDS):
             self._count()
         with self.lock:
-            said = self.judge.feed(now, speed, acc, self.passengers, clock / 1e7 if clock else None, demand, power_on)
+            said = self.judge.feed(now, speed, acc, self.passengers, clock / 1e7 if clock else None, demand, power_on,
+                                   hold)
         for event in said:
             self._say(event)
 
@@ -641,6 +685,9 @@ class ComfortWatch(threading.Thread):
                      f"it stopped, {self.passengers} passengers")
         elif event[0] == "harsh":
             self.log(f"Comfort: harsh {'braking' if event[1] == 'brake' else 'acceleration'}, {event[2]:.1f} m/s²")
+        elif event[0] == "hold":
+            self.log(f"Comfort: the train's own holding brake came on at {event[1]:.2f} m/s; braking over "
+                     f"{event[2]:.2f} m/s² from there isn't counted")
         elif event[0] == "ease" and self.train:
             old = self.eases.get(self.train) or {"ease": event[1], "n": 0}
             n = old["n"] + 1
