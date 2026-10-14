@@ -199,6 +199,13 @@ At each stop, the what-to-do panel shows the ride you've just had, for example "
 
 Full service held all the way to a stand on a Class 150 marks about 28: the game's 150 brakes harder and harder as it slows (1.8 m/s² just before it stops), so ease off before the end.
 
+The comfort score goes with the game's saves, just as the points do. Each time the game saves (when you save from the menu, and at its checkpoint on arriving at and leaving each stop) the bridge keeps the comfort so far with it, in `comfort_saves.json`. Load that save later and the comfort picks up where it was:
+
+- Save, quit and carry on another day: the rides before the save still count.
+- Load an earlier save to try a stop again: the attempt you gave up is dropped, and the stop counts once.
+
+This only works for saves made while the bridge was running. Loading an older save, the bridge drops the rides from after it and starts the ride in progress afresh.
+
 ### End of service and service history
 
 At the last stop, a **Service complete** table compares this run with your best run of the same service before: points, comfort, stops on time, stop accuracy, smooth rides and passengers. Better values are green. Arriving up to 60 s late counts as on time, and so does arriving early.
@@ -286,6 +293,7 @@ All of these sit in the project folder and are left out of git. Deleting one sta
 | `handle_speed.json` | Handle speed for each train class |
 | `lever_calibration.json` | Where Off and full brake really are on combined levers, learned per train |
 | `brake_ease.json` | How long each train's brake takes to ease off, for the comfort warning |
+| `comfort_saves.json` | The comfort score kept with each of the game's saves, so a loaded save carries on with it |
 | `service_history.json` | Services driven to the end. A damaged file is moved to `.bad`, not overwritten |
 | `routemap_settings.json` | The Route maps save folder |
 | `bridge.log`, `bridge.log.1` | The log. A new file starts past 1 MB, keeping one older |

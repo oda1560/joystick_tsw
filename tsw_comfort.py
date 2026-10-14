@@ -40,6 +40,15 @@ over the firm limit, 10 for a harsh moment and 2 a second it goes on past the fi
 the passengers aboard: how the ride felt to the average passenger. The weights are a starting point, not taken from
 anywhere.
 
+The comfort so far goes with the game's saves, as the points do. Each time the game writes a save (its own, Save in
+the menu, or the checkpoint it makes on arriving at and leaving each stop) the rides done and the ride going on are
+kept with that file (comfort_saves.json). When the game's time jumps to where one of them was made, that save has
+been loaded (or the bridge has just started on it), and the comfort goes back to what was kept with it: a service
+carries on after quitting, and a stop tried again from a save counts once. Going back to a save with nothing kept
+with it (made while the bridge wasn't running), the rides from after it are dropped and the ride going on starts
+afresh. Before, the comfort lived only as long as the bridge, which closes with the game: 9Y06 saved at Smethwick
+Galton Bridge one evening and finished the next showed comfort 100 from the one ride after it, not about 95 from five.
+
     watch = ComfortWatch(); watch.start()
     watch.coach              # None, or what the comfort panel says:
                              #   {"phase": "ease", "seconds": to the stop (wall clock), "braking": m/s²}
@@ -57,11 +66,15 @@ anywhere.
                              #   "smooth": rides this service without a jolt or a harsh moment, "rides": of them}
     watch.service(service, station)   # this service so far, the ride to `station` too if it's over: {"rides",
                              #   "smooth", "passengers": most aboard, "comfort": score, "marks": [ride (_ride)]}
-    watch.new_leg(service, station, first)   # on leaving a station: the ride to it is done; leaving the service's
-                             #   first stop (first=True) starts the service afresh, whatever came before it
+    watch.new_leg(service, station, first, restores)   # on leaving a station: the ride to it is done; leaving the
+                             #   service's first stop (first=True) starts the service afresh, whatever came before
+                             #   it. Left alone if the comfort has been put back to a save's since `restores`
+    watch.restores           # times the comfort has been put back to a save's: a station you were at before that
+                             #   is no ride's end
 """
 
 import collections
+import glob
 import http.client
 import json
 import math
@@ -71,6 +84,7 @@ import time
 import urllib.parse
 
 import tsw_joystick as core
+import tsw_score
 
 POLL_SECONDS = 1 / 15          # a poll this often at most (each waits for the game's next tick, 30-65 ms);
                                # each is a connection of its own, so not every tick
@@ -102,6 +116,15 @@ LOSS_SECONDS = 4.0             # what a firm / harsh stretch cost stays up this 
 MAX_STEP = 0.5                 # s (game): a longer gap between readings counts as this long
 RATIO_SECONDS = 3.0            # game time against the wall clock over this long
 BRAKE_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "brake_ease.json")
+COPIES_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "comfort_saves.json")
+SAVE_FILES = ("TSWSaveGame_*.sav", tsw_score.SAVE_GLOB)   # the game's own save (Save in the menu), its checkpoint
+SAVE_POLL_SECONDS = 0.25       # how often the save files are looked at: saving and quitting, the game was gone 2 s
+                               # after writing its save (seen in the log)
+JUMP_SECONDS = 30.0            # the game's time on more than this ahead of the wall clock: it jumped
+RESUME_SECONDS = 120.0         # a save is the one loaded if the game's time jumped to at most this after it
+COPY_SECONDS = 15.0            # a save is kept with the comfort read up to this long (game) after it was made ...
+STOPPING_SECONDS = 10.0        # ... once the stop going on as it was made has been judged, waiting at most this long
+PENDING_SECONDS = 60.0         # a save the comfort doesn't come to the time of in this long isn't kept with it
 
 HELD_HARDER = 0.05             # the brake handle this much further on after the train's own holding brake came on:
                                # what it brakes counts again
@@ -117,9 +140,10 @@ PATHS = {"speed": A + "Function.HUD_GetSpeed", "acc": A + "Function.HUD_GetAccel
 
 
 def _leg(service=None):
-    """A ride from a station on `service` (None: the bridge started on the way, so it isn't known)."""
+    """A ride from a station on `service` (None: the bridge started on the way, so it isn't known). "until": game
+    seconds the train last moved on it (None: no game time read), so a ride from after a save can be told."""
     return {"stop": None, "braking": None, "harsh": [], "firm": {"brake": 0.0, "power": 0.0}, "way": [],
-            "passengers": 0, "judged": False, "service": service}
+            "passengers": 0, "judged": False, "service": service, "until": None}
 
 
 def _smooth(leg):
@@ -161,10 +185,11 @@ def score(rides):
 
 
 def _ride(leg, station=None):
-    """A ride as it's kept: {"station", "mark", "passengers", "smooth", "lost": losses()}."""
+    """A ride as it's kept: {"station", "mark", "passengers", "smooth", "lost": losses(), "at": game seconds it
+    arrived}."""
     lost = [[round(x, 2) if isinstance(x, float) else x for x in loss] for loss in losses(leg)]
     return {"station": station, "mark": round(mark(leg), 1), "passengers": leg["passengers"], "smooth": _smooth(leg),
-            "lost": lost}
+            "lost": lost, "at": leg.get("until")}
 
 
 class BrakeLearner:
@@ -251,6 +276,7 @@ class Judge:
         self.alert = None             # firm / harsh going on
         self.alert_until = 0.0
         self.moved = False            # faster than MOVING since the last stop
+        self.v = 0.0                  # m/s at the last reading
         self.approach = None          # hardest braking slower than LAST on the way into a stop
         self.braking = 0.0            # braking at the reading before
         self.hold = False             # the train's own holding brake on at the reading before
@@ -309,6 +335,9 @@ class Judge:
             self.coach = None
         if self.loss and now > self.loss_until:
             self.loss = None
+        if judged and clock is not None and (v >= STOPPED or self.moved):
+            self.leg["until"] = clock
+        self.v = v
         if v > MOVING:
             self.moved = True
             if judged:
@@ -516,6 +545,29 @@ class Judge:
         self.harsh_time = 0.0             # ... and what's left of it is firm there
         return ride
 
+    def state(self):
+        """What's been judged, to keep with a game save: {"service", "done", "most", "leg"} (a copy)."""
+        return json.loads(json.dumps({"service": self.service, "done": self.done, "most": self.most,
+                                      "leg": self.leg}))
+
+    def restore(self, state):
+        """Back to what was kept with a game save (state()), that save having been loaded."""
+        state = json.loads(json.dumps(state))
+        self.lost()
+        self.service, self.done, self.most = state["service"], state["done"], state["most"]
+        self.leg = dict(_leg(), **state["leg"])
+
+    def rewind(self, clock):
+        """The game went back to `clock` (game seconds) with nothing kept for it: the rides that arrived after it
+        are dropped, and the ride going on starts afresh if the train moved on it after. How many were dropped."""
+        kept = [r for r in self.done if r.get("at") is None or r["at"] <= clock + 1.0]
+        gone, self.done = len(self.done) - len(kept), kept
+        self.lost()
+        if self.leg["until"] is not None and self.leg["until"] > clock + 1.0:
+            self.leg = _leg(self.leg["service"])
+        self.most = max([r["passengers"] for r in self.done] + [self.leg["passengers"]])
+        return gone
+
 
 class Feed:
     """Readings by an API subscription: all of them in one request, answered at the game's next tick. read()
@@ -592,6 +644,75 @@ def load_eases():
         return {}
 
 
+def _clock_text(seconds):
+    """Game seconds as the time of day: 10:41:45."""
+    s = int(seconds) % 86400
+    return f"{s // 3600:02d}:{s // 60 % 60:02d}:{s % 60:02d}"
+
+
+def _save_name(key):
+    return "checkpoint" if "Checkpoint" in key else "save"
+
+
+class SaveCopies:
+    """The comfort kept with each of the game's save files (comfort_saves.json), one copy a file: the game writes
+    over its save and its checkpoint, so only the copy of what's in each now can be wanted. A copy goes with the
+    service and game time the file was saved at, so it's only taken for that save."""
+
+    def __init__(self, path=COPIES_FILE, save_dir=None, read=None):
+        self.path = path
+        self.save_dir = save_dir or tsw_score.SAVE_DIR
+        self.read = read or tsw_score.read_save
+        self.files = {}               # save file (under the save folder) -> (modified, service, game seconds)
+        self.looked = False           # the save files have been looked at once
+        try:
+            with open(path, encoding="utf-8") as f:
+                self.copies = {k: c for k, c in json.load(f).items()
+                               if isinstance(c, dict) and {"service", "at", "state"} <= set(c)}
+        except (OSError, ValueError, AttributeError):
+            self.copies = {}          # file -> {"service", "at", "state": Judge.state(), "kept": when}
+
+    def scan(self):
+        """({file: (service, game seconds)} of the save files there now, [files the game has written since the
+        last look]). A file is read again only when the game has written it."""
+        found, written = {}, []
+        for pattern in SAVE_FILES:
+            for path in glob.glob(os.path.join(self.save_dir, "*", pattern)):
+                key = os.path.relpath(path, self.save_dir).replace(os.sep, "/")
+                old = self.files.get(key)
+                try:
+                    modified = os.path.getmtime(path)
+                    if old is None or old[0] != modified:
+                        service, at, _ = self.read(path)
+                        if self.looked:
+                            written.append(key)
+                        self.files[key] = old = (modified, service, at)
+                except tsw_score.READ_ERRORS:
+                    pass                  # the game is writing it, say: as it was, until it reads
+                if old is not None and old[2] is not None:
+                    found[key] = old[1:]
+        self.looked = True
+        return found, written
+
+    def find(self, key, service, at):
+        """The comfort kept with that save, or None."""
+        copy = self.copies.get(key)
+        if copy and copy["service"] == service and abs(copy["at"] - at) < 0.5:
+            return copy["state"]
+        return None
+
+    def keep(self, key, service, at, state):
+        self.copies[key] = {"service": service, "at": at, "state": state,
+                            "kept": time.strftime("%Y-%m-%dT%H:%M:%S")}
+        self.copies = {k: c for k, c in self.copies.items() if k in self.files or k == key}
+        try:
+            with open(self.path + ".new", "w", encoding="utf-8") as f:
+                json.dump(self.copies, f, indent=1)
+            os.replace(self.path + ".new", self.path)
+        except OSError:
+            pass
+
+
 class ComfortWatch(threading.Thread):
     """Reads the train's motion and passengers on a thread of its own and judges the ride."""
 
@@ -610,6 +731,15 @@ class ComfortWatch(threading.Thread):
         self.passengers = None
         self.counted = 0.0
         self.subscribed_at = 0.0
+        self.copies = SaveCopies()
+        self.clock = None             # game seconds at the last reading
+        self.clock_at = None          # ... read then (monotonic)
+        self.jump = None              # the game's time jumped (a save loaded, or the bridge just started), until the
+                                      #   saves are looked at: {"from": game seconds before, None at the start}
+        self.pending = {}             # saves the game has written, to keep the comfort with once it's come to
+                                      #   their time: file -> (service, game seconds, monotonic time seen)
+        self.restores = 0             # times the comfort was put back to a save's
+        self.save_error = None
 
     @property
     def coach(self):
@@ -623,8 +753,10 @@ class ComfortWatch(threading.Thread):
         with self.lock:
             return self.judge.service_so_far(service, station)
 
-    def new_leg(self, service, station=None, first=False):
+    def new_leg(self, service, station=None, first=False, restores=None):
         with self.lock:
+            if restores is not None and restores != self.restores:
+                return                    # the comfort has gone back to a save's since you were at that station
             ride = self.judge.new_leg(service, station, first)
             done = len(self.judge.done)
             total = score(self.judge.done)
@@ -634,7 +766,89 @@ class ComfortWatch(threading.Thread):
                      f"{f' ({why})' if why else ''}, {ride['passengers']} passengers; "
                      f"{service} so far {total:.0f} over {done} ride{'s' * (done != 1)}")
 
+    def _clock(self, clock, now):
+        """Notes the game's time, and when it jumps: back (a save loaded), on further than time has gone by (a
+        later save loaded), or the first time it's read (the bridge just started, maybe on a save)."""
+        if clock is None:
+            return
+        with self.lock:
+            last, then = self.clock, self.clock_at
+            if last is None or clock < last - 1.0 or clock - last > now - then + JUMP_SECONDS:
+                if self.jump is None:
+                    self.jump = {"from": last}
+            self.clock, self.clock_at = clock, now
+
+    def saves_step(self, now):
+        """Looks at the game's saves: keeps the comfort with a save the game has written, and once its time has
+        jumped, puts the comfort back to what was kept with the save it jumped to."""
+        found, written = self.copies.scan()
+        for key in written:
+            if key in found:
+                self.pending[key] = found[key] + (now,)
+        said, keep = [], []
+        with self.lock:
+            if self.jump is not None and self.clock is not None:
+                jump, self.jump = self.jump, None
+                said.append(self._resume(found, self.clock, jump))
+            for key, (service, at, seen) in list(self.pending.items()):
+                if self.clock is None or not -2.0 <= self.clock - at <= COPY_SECONDS:
+                    if now - seen > PENDING_SECONDS:
+                        del self.pending[key]
+                    continue              # not read at the save's time yet: written as another save loaded, say
+                judge = self.judge
+                if judge.moved and judge.v < MOVING and now - seen < STOPPING_SECONDS:
+                    continue              # saved on arriving: once the stop is judged
+                del self.pending[key]
+                keep.append((key, service, at, judge.state()))
+        for key, service, at, state in keep:
+            self.copies.keep(key, service, at, state)
+            rides = len(state["done"]) if state["service"] == service else 0
+            said.append(f"Comfort: kept with the game's {_save_name(key)} of {service} at {_clock_text(at)}: "
+                        f"{rides} ride{'s' * (rides != 1)} done")
+        for text in said:
+            if text:
+                self.log(text)
+
+    def _resume(self, found, clock, jump):
+        """The game's time jumped to `clock`. If one of its saves was made just before, that's the one loaded:
+        the comfort goes back to what was kept with it. Gone back with nothing kept for it, the rides from after it
+        are dropped. What to log, or None."""
+        saves = sorted(((at, key, service) for key, (service, at) in found.items()
+                        if -2.0 <= clock - at <= RESUME_SECONDS), reverse=True)
+        for at, key, service in saves:
+            state = self.copies.find(key, service, at)
+            if state is not None:
+                self.judge.restore(state)
+                self.restores += 1
+                rides = len(state["done"]) if state["service"] == service else 0
+                comfort = score(state["done"]) if rides else None
+                return (f"Comfort: the game's {_save_name(key)} of {service} at {_clock_text(at)} loaded: back to "
+                        f"{rides} ride{'s' * (rides != 1)} done"
+                        + (f", comfort {comfort:.0f}" if comfort is not None else ""))
+        if jump["from"] is not None and clock < jump["from"] - 1.0:
+            gone = self.judge.rewind(clock)
+            self.restores += 1
+            return (f"Comfort: the game went back to {_clock_text(clock)}, nothing kept with a save there: "
+                    f"{gone} ride{'s' * (gone != 1)} from after it dropped, {len(self.judge.done)} left")
+        if saves:
+            return (f"Comfort: on the game's {_save_name(saves[0][1])} of {saves[0][2]} at "
+                    f"{_clock_text(saves[0][0])}, nothing kept with it")
+        return None
+
+    def _watch_saves(self):
+        while self.running:
+            try:
+                self.saves_step(time.monotonic())
+                self.save_error = None
+            except Exception as e:        # a broken save file, say: said once
+                if str(e) != self.save_error:
+                    self.save_error = str(e)
+                    self.log(f"Comfort: looking at the game's saves: {e}")
+                time.sleep(5)
+            time.sleep(SAVE_POLL_SECONDS)
+
     def run(self):
+        threading.Thread(target=self._watch_saves, daemon=True).start()
         while self.running:
             started = time.monotonic()
             try:
@@ -661,6 +875,9 @@ class ComfortWatch(threading.Thread):
         got = self.feed.read(api.key)
         speed, acc = _first(got["speed"]), _first(got["acc"])
         now = time.monotonic()
+        ticks = (got["clock"] or {}).get("LocalTime")
+        clock = ticks / 1e7 if ticks else None
+        self._clock(clock, now)
         if speed is None or acc is None:  # not in a cab
             self._gone()
             with self.lock:
@@ -675,7 +892,6 @@ class ComfortWatch(threading.Thread):
             with self.lock:
                 self.judge.lost()
                 self.judge.ease = (self.eases.get(train) or {}).get("ease")
-        clock = (got["clock"] or {}).get("LocalTime")
         brake, power = got["brake"] or {}, got["power"] or {}
         demand = brake.get("HandlePosition") if brake.get("IsActive") else None
         if demand is None and power.get("IsActive"):
@@ -689,8 +905,7 @@ class ComfortWatch(threading.Thread):
         if self.cars is None or (abs(speed) < STOPPED and now - self.counted > COUNT_SECONDS):
             self._count()
         with self.lock:
-            said = self.judge.feed(now, speed, acc, self.passengers, clock / 1e7 if clock else None, demand, power_on,
-                                   hold)
+            said = self.judge.feed(now, speed, acc, self.passengers, clock, demand, power_on, hold)
         for event in said:
             self._say(event)
 

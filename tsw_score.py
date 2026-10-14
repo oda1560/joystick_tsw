@@ -27,6 +27,8 @@ SAVE_DIR = os.path.join(os.path.dirname(os.path.dirname(core.KEY_FILE)), "SaveGa
 SAVE_GLOB = "TSWCheckpointSaveGame_*.sav"
 CHUNK_TAG = 0x9E2A83C1            # Unreal's compressed chunk tag
 STALE_SECONDS = 3 * 3600          # a save made more than this game time ago is from another run
+# what read_save may raise (a save the game is half way through writing, say)
+READ_ERRORS = (OSError, ValueError, KeyError, IndexError, TypeError, struct.error, zlib.error)
 
 
 class _Save(tsw_paks.Package):
@@ -146,7 +148,7 @@ class Points:
             self.seen = seen
             try:
                 save = read_save(path)
-            except (OSError, ValueError, KeyError, IndexError, TypeError, struct.error, zlib.error):
+            except READ_ERRORS:
                 save = None                 # half written, say: the one before stands until the game next writes
             if save is not None:
                 if self.save and self.save[0] == save[0]:

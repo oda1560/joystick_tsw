@@ -549,6 +549,15 @@ class Feed(unittest.TestCase):
         self.feed.unsubscribe()
         self.assertEqual(FakeGame.subs, {})
 
+    def test_the_game_s_time_noted(self):
+        watch = tsw_comfort.ComfortWatch()
+        watch.feed, watch.api = self.feed, FakeApi([["PassengerCargoModel"]], [50])
+        FakeGame.values["TimeOfDay.Data"] = {"LocalTime": 636987841059202300}    # 9Y06's save, 10:41:45
+        watch.step()
+        self.assertAlmostEqual(watch.clock, 63698784105.92023, places=3)
+        self.assertEqual(watch.jump, {"from": None})                         # the first time it's read
+        self.assertAlmostEqual(watch.judge.leg["until"], watch.clock, places=3)
+
 
 class FakeApi:
     """TSWApi for counting passengers: car i lists `cars[i]` (None: doesn't answer)."""
@@ -598,6 +607,186 @@ class Passengers(unittest.TestCase):
         watch.api.cars[1] = ["PassengerCargoModel", "PassengerDoor_BR"]
         watch._count()
         self.assertEqual(watch.passengers, 10)
+
+
+def read_fake_save(path):
+    """tsw_score.read_save for the stand-in save files below: (service, game seconds, record)."""
+    with open(path) as f:
+        save = json.load(f)
+    return save["service"], save["at"], {}
+
+
+def drive_to(watch, t, decel=0.5, firm=0.0, passengers=100):
+    """The train runs into a stop braking at `decel` from 10 m/s, from `t` game seconds (the wall clock going the
+    same), after braking firm (1 m/s²) for `firm` seconds; standing a second at the end. The game time after."""
+    v = 10.0
+    for _ in range(round(firm / 0.07)):
+        t = feed(watch, t, 10.0, -1.0, passengers)
+    while v > 0:
+        v = max(0.0, v - decel * 0.07)
+        t = feed(watch, t, v, -decel if v else 0.0, passengers)
+    return stand(watch, t, 1.0, passengers)
+
+
+def stand(watch, t, seconds, passengers=100):
+    end = t + seconds
+    while t < end:
+        t = feed(watch, t, 0.0, 0.0, passengers)
+    return t
+
+
+def feed(watch, t, v, acc, passengers=100):
+    watch._clock(t, t)
+    with watch.lock:
+        watch.judge.feed(t, v, acc, passengers, t)
+    return t + 0.07
+
+
+class GameSaves(unittest.TestCase):
+    """The comfort kept with the game's saves and put back when one is loaded (stand-in save files)."""
+
+    def setUp(self):
+        self.dir = tempfile.mkdtemp()
+        os.makedirs(os.path.join(self.dir, "SaveGames", "7656"))
+        self.modified = 1.7e9
+        self.said = []
+
+    def save(self, kind, service, at):
+        """The game writes its save (kind "TSWSaveGame") or checkpoint ("TSWCheckpointSaveGame")."""
+        path = os.path.join(self.dir, "SaveGames", "7656", f"{kind}_cb06.sav")
+        with open(path, "w") as f:
+            json.dump({"service": service, "at": at}, f)
+        self.modified += 10
+        os.utime(path, (self.modified, self.modified))
+
+    def watch(self):
+        """The bridge started: its comfort watch, the saves looked at once."""
+        watch = tsw_comfort.ComfortWatch(self.said.append)
+        watch.copies = tsw_comfort.SaveCopies(os.path.join(self.dir, "comfort_saves.json"),
+                                              os.path.join(self.dir, "SaveGames"), read_fake_save)
+        watch.saves_step(0.0)
+        return watch
+
+    def test_carries_on_from_the_game_s_save_after_quitting(self):
+        # 9Y06 saved at Smethwick Galton Bridge one evening, finished the next: comfort 100 from the one ride after
+        # the save, not about 95 from five
+        watch = self.watch()
+        watch.new_leg("9Y06", "Rugeley Trent Valley", first=True)
+        t = drive_to(watch, 36000.0, firm=5.0)
+        watch.saves_step(1.0)
+        watch.new_leg("9Y06", "Stafford")
+        t = drive_to(watch, t + 60.0, passengers=140)
+        self.save("TSWSaveGame", "9Y06", t)                    # at Penkridge, then quit
+        watch.saves_step(2.0)
+        self.assertIn("Comfort: kept with the game's save of 9Y06 at 10:01:47: 1 ride done", self.said)
+        before = watch.service("9Y06", "Penkridge")
+        self.assertEqual(before["rides"], 2)
+
+        later = self.watch()                                   # the next evening, the save loaded
+        feed(later, t + 0.5, 0.0, 0.0)
+        later.saves_step(1.0)
+        self.assertIn("Comfort: the game's save of 9Y06 at 10:01:47 loaded: back to 1 ride done, comfort 95",
+                      self.said)
+        self.assertEqual(later.service("9Y06", "Penkridge"), before)
+        later.new_leg("9Y06", "Penkridge", restores=later.restores)
+        drive_to(later, t + 60.0)
+        done = later.service("9Y06", "Wolverhampton")
+        self.assertEqual([r["station"] for r in done["marks"]], ["Stafford", "Penkridge", "Wolverhampton"])
+        self.assertEqual(done["passengers"], 140)
+
+    def test_a_stop_tried_again_from_a_save_counts_once(self):
+        watch = self.watch()
+        watch.new_leg("9Y06", "Stafford", first=True)
+        t = drive_to(watch, 36000.0)
+        watch.saves_step(1.0)
+        t = stand(watch, t, 30.0)
+        self.save("TSWCheckpointSaveGame", "9Y06", t)          # leaving Penkridge
+        watch.saves_step(2.0)
+        watch.new_leg("9Y06", "Penkridge")
+        drive_to(watch, t + 30.0, decel=1.4)                   # into Wolverhampton with a jolt
+        restores = watch.restores
+        self.assertEqual(watch.service("9Y06", "Wolverhampton")["rides"], 2)
+
+        feed(watch, t + 0.5, 0.0, 0.0)                         # the checkpoint loaded to try again
+        watch.saves_step(3.0)
+        self.assertEqual(watch.restores, restores + 1)
+        self.assertIn("Comfort: the game's checkpoint of 9Y06 at 10:00:51 loaded: back to 0 rides done", self.said)
+        watch.new_leg("9Y06", "Wolverhampton", restores=restores)     # the stop given up isn't left
+        self.assertEqual([r["station"] for r in watch.service("9Y06", "Penkridge")["marks"]], ["Penkridge"])
+        watch.new_leg("9Y06", "Penkridge", restores=watch.restores)
+        drive_to(watch, t + 30.0)
+        done = watch.service("9Y06", "Wolverhampton")
+        self.assertEqual([(r["station"], r["mark"]) for r in done["marks"]],
+                         [("Penkridge", 100), ("Wolverhampton", 100)])
+
+    def test_going_back_to_a_save_kept_without_the_bridge_drops_what_came_after(self):
+        self.save("TSWSaveGame", "9Y06", 36100.0)              # saved while the bridge wasn't running
+        watch = self.watch()
+        watch.new_leg("9Y06", "Stafford", first=True)
+        drive_to(watch, 36000.0)
+        watch.saves_step(1.0)
+        watch.new_leg("9Y06", "Penkridge")
+        drive_to(watch, 36200.0)
+        watch.new_leg("9Y06", "Wolverhampton")
+        drive_to(watch, 36300.0, decel=1.4)
+        self.assertEqual(watch.service("9Y06", "Smethwick Galton Bridge")["rides"], 3)
+
+        feed(watch, 36100.5, 0.0, 0.0)                         # that save loaded
+        watch.saves_step(2.0)
+        self.assertIn("Comfort: the game went back to 10:01:40, nothing kept with a save there: 1 ride from after it "
+                      "dropped, 1 left", self.said)
+        done = watch.service("9Y06", "Smethwick Galton Bridge")
+        self.assertEqual([r["station"] for r in done["marks"]], ["Penkridge"])   # the ride going on started afresh
+
+    def test_kept_once_the_stop_it_was_saved_at_is_judged(self):
+        watch = self.watch()
+        watch.new_leg("9Y06", "Stafford", first=True)
+        t, v = 36000.0, 10.0
+        while v > 1.5:
+            v -= 1.2 * 0.07
+            t = feed(watch, t, v, -1.2)
+        self.save("TSWCheckpointSaveGame", "9Y06", t)          # the game's arrival, a moment before it stops
+        watch.saves_step(1.0)
+        self.assertEqual(watch.copies.copies, {})
+        while v > 0:
+            v = max(0.0, v - 1.2 * 0.07)
+            t = feed(watch, t, v, -1.2 if v else 0.0)
+        watch.saves_step(2.0)
+        leg = watch.copies.copies["7656/TSWCheckpointSaveGame_cb06.sav"]["state"]["leg"]
+        self.assertEqual(leg["stop"], "jolt")
+
+    def test_a_save_written_as_one_is_loaded_is_kept_with_what_was_loaded(self):
+        watch = self.watch()
+        watch.new_leg("9Y06", "Stafford", first=True)
+        t = drive_to(watch, 36000.0)
+        watch.saves_step(1.0)
+        self.save("TSWSaveGame", "9Y06", t)
+        watch.saves_step(2.0)
+        kept = watch.judge.state()
+        watch.new_leg("9Y06", "Penkridge")
+        drive_to(watch, t + 300.0, decel=1.4)
+
+        self.save("TSWCheckpointSaveGame", "9Y06", t + 0.2)    # the game loading the save writes its checkpoint
+        watch.saves_step(3.0)                                   # before the game's time is read again
+        self.assertNotIn("7656/TSWCheckpointSaveGame_cb06.sav", watch.copies.copies)
+        feed(watch, t + 0.5, 0.0, 0.0)
+        watch.saves_step(4.0)
+        self.assertIn("Comfort: the game's save of 9Y06 at 10:00:21 loaded: back to 0 rides done", self.said)
+        self.assertEqual(watch.copies.copies["7656/TSWCheckpointSaveGame_cb06.sav"]["state"], kept)
+
+    def test_the_game_s_time_jumps_when_a_save_is_loaded(self):
+        watch = self.watch()
+        watch._clock(36000.0, 100.0)
+        self.assertEqual(watch.jump, {"from": None})            # the bridge just started
+        watch.jump = None
+        watch._clock(36100.0, 300.0)                           # paused for a while, the wall clock went on
+        watch._clock(36400.0, 680.0)                           # the game running slow
+        self.assertIsNone(watch.jump)
+        watch._clock(36300.0, 681.0)                           # back: a save loaded
+        self.assertEqual(watch.jump, {"from": 36400.0})
+        watch.jump = None
+        watch._clock(38000.0, 700.0)                           # on further than time went by: a later one
+        self.assertEqual(watch.jump, {"from": 36300.0})
 
 
 class BrakeFile(unittest.TestCase):

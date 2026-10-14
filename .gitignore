@@ -13,3 +13,5 @@ service_history.json
 service_history.json.bad
 bridge.log
 bridge.log.1
+comfort_saves.json
+comfort_saves.json.new
