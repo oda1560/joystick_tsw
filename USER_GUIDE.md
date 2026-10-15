@@ -1,6 +1,6 @@
 # TSW Joystick User Guide
 
-Last updated 2026-10-10
+Last updated 2026-10-14
 
 ## What it does
 
@@ -13,6 +13,7 @@ It also shows small panels over the game while you drive:
 - **Speeding**: the limit pops up by itself when you go over it.
 - **Passenger comfort**: a warning on firm or harsh braking and acceleration, and a prompt to ease off the brake just before you stop.
 - **End of service**: how the run went against your best before.
+- **Route map**: press button 12 or F7 for a small see-through map of where you are on your service's line, following you.
 
 Two tools work without driving: **Route maps** prints a speed-limit map for any service or a whole route, and the **train checker** tests the bridge against every train you own.
 
@@ -93,6 +94,8 @@ The stick drives power and brake, the base slider sets the reverser, the twist l
 | Base buttons | 9 / 10 | Close the left / right doors |
 | Base button | 11 | Hold to show the next stop (see On-screen panels) |
 | Keyboard | F6 | Hold to show the next stop, like button 11 |
+| Base button | 12 | Press to show the route map, press again to hide it |
+| Keyboard | F7 | Shows and hides the route map, like button 12. The game also uses F7: it steps the destination display back |
 | Pause button | Not set | Pauses and resumes the bridge |
 
 ### Power and brake
@@ -125,7 +128,7 @@ The bridge only sends a value when you move the stick, so the keyboard and mouse
 
 ## On-screen panels
 
-Five panels appear over the game by themselves, or while you hold a button. They never take focus from the game, and clicks pass through them.
+Five panels appear over the game by themselves, or while you hold a button, and the route map when you ask for it. They never take focus from the game, and clicks pass through them.
 
 | Panel | Where | When it shows | Turn off with |
 | --- | --- | --- | --- |
@@ -134,6 +137,7 @@ Five panels appear over the game by themselves, or while you hold a button. They
 | Speeding | Under the next stop panel | While over the limit | Show the limit when speeding |
 | Passenger comfort | Under the speeding panel | Firm or harsh braking or acceleration and what it cost, and the last seconds of a stop | Show passenger comfort |
 | Service complete | Top right, in place of the schedule | At the last stop of a service | Show what to do at stops |
+| Route map | Bottom left (or another corner), under the other panels | From a press of button 12 or F7 to the next | Press again |
 
 Distances and speeds follow where the train is: miles, yards and mph in Great Britain, Ireland and the US, kilometres, metres and km/h elsewhere.
 
@@ -214,6 +218,18 @@ Under it, **Rides** lists each ride's comfort mark and what cost it points. On a
 
 Click **Service history** in Settings to see every service you've driven to the end, newest first, with each service's best run in green. Restart the bridge at the terminus and it updates the same run rather than adding a new one.
 
+### Route map
+
+Press button 12 or F7 for a small see-through window with the map around you: a blue dot where you are and an arrow the way you're going; press again to hide it. The window follows you, a little ahead of you so you see more of what's coming. It's the map of the service you're driving, both ways along its line, drawn like the first page of a whole-route map (see Offline tools) but larger: limit colours, boards where to slow down, every station, the limit along long stretches, and landmarks. In the corner are the service and a scale bar. At the start it shows about 5.6 km (3.5 miles) across.
+
+- **The first time**: the map is made when you first press, and from then on as you start each service. A service's map takes about 15 s; the first time on a route, the tunnels, bridges and water take half a minute more, so the map comes without them first. Then the window draws the part you're in first (about half a second a piece), the rest of the line after, so "Drawing this part of the map..." shows only briefly. Maps are kept, so after that it's there at once.
+- **No service**: free roaming, or a service the files don't have, gives the whole route's map from the timetable the game is running.
+- **See-through, size, corner and zoom**: under **Route map view** and **Route map zoom** in Settings. A new zoom is made like a new service (about 15 s), the old one shown till then. Clicks pass through the window, and the other panels stay on top of it.
+- **F7 is also the game's**: in Train Sim World 7 it steps the destination display back, so pressing it changes the destination on trains that have one. Button 12 does nothing else; to use a key the game leaves free, pick one under **Route map key** (F10, F11, 6, 7, -, =, Num *, Num /, Scroll Lock, Pause).
+- **Where you are** comes from the latitude and longitude the game gives, placed the way the game lays out its world. Checked on Airedale & Wharfedale, where it's within a few metres of the track. If the panel says you're not on the map's line, the route lays its world out differently: the bridge log says how far off it was.
+
+The maps need Microsoft Edge (or Google Chrome) to draw them; nothing opens on the screen while they're made.
+
 ## Offline tools
 
 Two tools read the game's files directly and work with the game closed: route maps to learn a route from, and a checker that tests the bridge on every train you own.
@@ -272,8 +288,11 @@ Everything is set in the bridge window and saved as soon as you change it. The a
 | Reverser: Use slider · axis · Invert | Turns slider control of the reverser on or off, and which axis it is |
 | Look: Use twist · axis · Invert · angle | Turns twist look on or off, and how far full twist turns the view (±30–150°) |
 | Look smoothing | Quick to Smooth: how gently the view follows the twist |
-| AWS, Alerter, Open / Close doors, Next stop, Pause button | Click **Assign**, then press the joystick button. **Clear** unsets it |
+| AWS, Alerter, Open / Close doors, Next stop, Route map, Pause button | Click **Assign**, then press the joystick button. **Clear** unsets it |
 | Next stop key | The keyboard key that shows the next stop while held (F6), or Not set |
+| Route map key | The keyboard key that shows and hides the route map (F7), or Not set. One key can't do both this and the next stop |
+| Route map view: See-through · Size · Where | How much of the game shows through the map (0–70%), how much of the screen's width it takes (27% to start), and which corner it's in |
+| Route map zoom | How close the map is: 3 to 30 metres a pixel (8 to start); the label says how far across that shows |
 | Keep this window on top | Keeps the bridge window over other windows |
 | Show the limit when speeding | The speeding panel |
 | Show what to do at stops | The stop, schedule and service complete panels |
@@ -299,6 +318,8 @@ All of these sit in the project folder and are left out of git. Deleting one sta
 | `bridge.log`, `bridge.log.1` | The log. A new file starts past 1 MB, keeping one older |
 | `error.log` | Written only if the window fails to start |
 | `train_check_report.txt` | The train checker's last report |
+| `live_maps` (folder) | The route maps made for showing over the game, in pieces, and each route's scenery |
+| `livemap_error.log` | Written only if making a route map fails unexpectedly |
 
 ## Troubleshooting
 
@@ -320,6 +341,8 @@ Read `bridge.log` in the project folder first. Each run starts with a "bridge st
 | Joystick: "Not found" | Plug it in, then pick it under **Joystick**. `python tsw_joystick.py --axes` shows its raw axis values |
 | Look bar: "game not focused" or "cursor active" | Click into the game, and close any menu or mouse cursor |
 | Panels don't appear over the game | Switch the game to borderless windowed |
+| Route map: "You're not on this map's line" | The route lays out its world in a way the bridge doesn't know. The `Route map:` line in the log says how far off it was |
+| Route map: "Edge or Chrome is needed…" | Install Microsoft Edge, which draws the maps |
 | Next stop shows "≈" | This route's timetable data has no signal references, so the distance is an estimate from the last stop |
 | No points on the stop panel | Points come from the game's save, written as you arrive. Wait a moment |
 | The window doesn't open | Look in `error.log`, or start **Start TSW Joystick (console).bat** to see the error |

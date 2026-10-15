@@ -6,8 +6,9 @@ its key (F6) is held, it shows over the game how far the next stop is (tsw_stops
 while you're stopped at a stop, whether to wait, shut the doors or go, with the times, your points (tsw_score.py)
 and how the ride felt to the passengers, and at the end of a service how the run went against your best before
 (tsw_history.py, all runs in the Service history window); while you're over the speed limit, the limit
-(tsw_speed.py); and while braking or speeding up is firm or harsh for the passengers, and in the last seconds of
-a hard stop to ease the brake off before the train stops (tsw_comfort.py).
+(tsw_speed.py); while braking or speeding up is firm or harsh for the passengers, and in the last seconds of
+a hard stop to ease the brake off before the train stops (tsw_comfort.py); and at a press of another button or
+key (F7), a small see-through map of where you are on the service's line, following you (tsw_livemap.py).
 The bridge itself (game API, lever detection, emergency exclusion) lives in tsw_joystick.py.
 
 Usage:
@@ -36,6 +37,7 @@ import tsw_autostart as autostart
 import tsw_joystick as core   # sets SDL env vars before pygame is imported
 import tsw_comfort
 import tsw_history
+import tsw_livemap
 import tsw_speed
 import tsw_stops
 import tsw_units
@@ -60,6 +62,8 @@ DEFAULTS = {"axis": core.Y_AXIS, "invert": core.INVERT_Y, "deadzone": core.DEADZ
             "door_close_left_button": core.DOOR_CLOSE_LEFT_BUTTON,
             "door_close_right_button": core.DOOR_CLOSE_RIGHT_BUTTON,
             "stop_button": core.STOP_BUTTON, "stop_key": "F6",
+            "map_button": core.MAP_BUTTON, "map_key": "F7", "map_opacity": 0.7, "map_window": 0.27,
+            "map_zoom": tsw_livemap.ZOOM, "map_corner": "Bottom left",
             "look_enabled": core.USE_LOOK, "look_axis": core.LOOK_AXIS, "look_invert": core.LOOK_INVERT,
             "look_deadzone": core.LOOK_DEADZONE, "look_angle": core.LOOK_MAX_ANGLE,
             "look_smoothing": core.LOOK_SMOOTHING}
@@ -79,6 +83,7 @@ BUTTON_ACTIONS = {"aws_button": ("AWS button", "acknowledges AWS"),
                   "door_close_left_button": ("Close left doors", "closes the left doors"),
                   "door_close_right_button": ("Close right doors", "closes the right doors"),
                   "stop_button": ("Next stop", "shows the next stop while held"),
+                  "map_button": ("Route map", "shows / hides the route map"),
                   "toggle_button": ("Pause button", "pauses / resumes")}
 # cab buttons held down for as long as their joystick button is held: setting -> TrainControls attribute
 CAB_BUTTONS = {"aws_button": "aws", "alerter_button": "alerter",
@@ -94,6 +99,10 @@ BUTTON_AGAIN_SECONDS = 5.0     # a cab button press the game doesn't answer is m
 # debug bindings, ` opens the console, F12 is Steam's screenshot, and Num . is Delete (TPWS / PZB) with Num Lock off
 STOP_KEYS = {"F6": 0x75, "F10": 0x79, "F11": 0x7A, "6": 0x36, "7": 0x37, "-": 0xBD, "=": 0xBB,
              "Num *": 0x6A, "Num /": 0x6F, "Scroll Lock": 0x91, "Pause": 0x13}
+# keys that show and hide the route map: those, and F7 (asked for), which the game also uses: it steps the
+# destination display back (DestinationToggle) on trains that have one
+MAP_KEYS = {"F7": 0x76, **STOP_KEYS}
+MAP_CORNERS = ("Bottom left", "Bottom right", "Top left", "Top right", "Middle")    # where the route map goes
 NO_KEY = "Not set"
 
 
@@ -150,6 +159,14 @@ def load_settings():
             used.add(s[key])
     if s["stop_key"] not in STOP_KEYS:
         s["stop_key"] = None
+    if s["map_key"] not in MAP_KEYS or s["map_key"] == s["stop_key"]:
+        s["map_key"] = None
+    s["map_opacity"] = min(1.0, max(0.3, float(s["map_opacity"])))
+    s["map_window"] = min(0.6, max(0.15, float(s["map_window"])))
+    if s["map_zoom"] not in tsw_livemap.ZOOMS:
+        s["map_zoom"] = tsw_livemap.ZOOM
+    if s["map_corner"] not in MAP_CORNERS:
+        s["map_corner"] = DEFAULTS["map_corner"]
     return s
 
 
@@ -431,8 +448,16 @@ class Overlay:
 
     def keep_on_top(self):
         """Back on top if another program's window has come over it. The game's window is always on top too, so
-        going back to the game from another window puts the game over anything already shown."""
+        going back to the game from another window puts the game over anything already shown. Returns whether it
+        had to."""
         if self.shown and self._covered():
+            self.raise_()
+            return True
+        return False
+
+    def raise_(self):
+        """On top of the others, as when it's first shown."""
+        if self.shown:
             self.set_pos(self.hwnd, self.TOPMOST, 0, 0, 0, 0, self.RAISE)
 
     def _covered(self):
@@ -859,6 +884,186 @@ class ComfortOverlay(Overlay):
             self.set((f"{phase.upper()} {what}", colour), (f"{coach['felt']:.1f} m/s²", colour), (note, FG))
         super().show()
 
+class MapOverlay(Overlay):
+    """The route map over the game in a small see-through window that follows you (tsw_livemap.py): the part of
+    the line you're on, with a dot where you are and an arrow the way you're going, the window's middle a little
+    ahead of you. Until the map is made, what's happening."""
+    DOT, RING, EDGE = "#1f6fe0", "#ffffff", "#111111"
+    EASE = 0.2                    # share of the way to where it should be that the view moves each time round
+    MARGIN = 24                   # pixels from the screen's edges
+
+    def __init__(self, root, k, opacity, size, corner):
+        super().__init__(root, k, 0.0, [(12, True)])
+        self.win.attributes("-alpha", opacity)
+        self.corner = corner          # one of MAP_CORNERS
+        c = self.canvas = tk.Canvas(self.box, bg="#ffffff", highlightthickness=0, bd=0)
+        self.map = None               # the map shown (MapWatch.map); None: the line of what's happening
+        self.pieces = {}              # (column, row) -> (PhotoImage, canvas item, the drawing it's of)
+        self.view = None              # the map's pixel at the window's top left
+        self.arrow = c.create_polygon(0, 0, 0, 0, 0, 0, fill=self.DOT, outline=self.EDGE,
+                                      width=max(1, round(1.5 * k)), state="hidden")
+        self.under = c.create_oval(0, 0, 0, 0, fill=self.EDGE, outline="", state="hidden")
+        self.dot = c.create_oval(0, 0, 0, 0, fill=self.DOT, outline=self.RING, width=max(2, round(2.5 * k)),
+                                 state="hidden")
+        self.caption_box = c.create_rectangle(0, 0, 0, 0, fill="#ffffff", outline="")
+        self.caption = c.create_text(0, 0, anchor="sw", text="", fill=self.EDGE, font=(FONT, 9, "bold"))
+        self.bar = c.create_line(0, 0, 0, 0, fill=self.EDGE, width=max(2, round(3 * k)))
+        self.bar_text = c.create_text(0, 0, anchor="w", text="", fill=self.EDGE, font=(FONT, 9))
+        self.note = c.create_text(0, 0, anchor="n", text="", fill=self.EDGE, font=(FONT, 10, "bold"))
+        self.border = c.create_rectangle(0, 0, 0, 0, outline="#333333", width=1)
+        self.size = None
+        self.resize(size)
+
+    def set_opacity(self, opacity):
+        self.win.attributes("-alpha", opacity)
+
+    def resize(self, size):
+        """`size`: (width, height) in pixels."""
+        self.size = size
+        w, h = size
+        self.canvas.config(width=w, height=h)
+        self.canvas.coords(self.border, 0, 0, w - 1, h - 1)
+        self.canvas.coords(self.note, w / 2, round(8 * self.k))
+        self._caption()
+        self.win.update_idletasks()
+        self._place()
+
+    def show(self, watch):
+        self.update(watch)
+        super().show()
+
+    def update(self, watch):
+        if watch.map is not self.map:
+            self._load(watch.map)
+        if self.map is None:
+            self.set((watch.status, FG))
+            return
+        if not watch.off_line:
+            self._follow(watch.centre)
+        missing = self._pieces(watch.done) if self.view is not None else True
+        self._mark(watch, missing)
+
+    def _place(self):
+        """In its corner of the screen."""
+        sw, sh = self.root.winfo_screenwidth(), self.root.winfo_screenheight()
+        w, h, m = self.win.winfo_reqwidth(), self.win.winfo_reqheight(), round(self.MARGIN * self.k)
+        x = m if self.corner.endswith("left") else sw - w - m if self.corner.endswith("right") else (sw - w) // 2
+        y = m if self.corner.startswith("Top") else sh - h - m if self.corner.startswith("Bottom") else (sh - h) // 2
+        place = (max(0, x), max(0, y))
+        if place != self.place:
+            self.place = place
+            self.win.geometry(f"+{place[0]}+{place[1]}")
+
+    def _load(self, meta):
+        """Another map: another service's or zoom's starts afresh; the same one drawn again (with its scenery) keeps
+        the pieces it has till the new ones come."""
+        old, self.map = self.map, meta
+        if meta is None or old is None or meta["key"] != old["key"]:
+            self.view = None
+            for _, item, _ in self.pieces.values():
+                self.canvas.delete(item)
+            self.pieces = {}
+        if meta is None:
+            self.canvas.pack_forget()
+            self.box.config(padx=round(22 * self.k), pady=round(8 * self.k))
+            return
+        self.set(("", FG))
+        self.box.config(padx=0, pady=0)
+        self.canvas.pack()
+        self._caption()
+        self.win.update_idletasks()
+        self._place()
+
+    def _caption(self):
+        """The service and a scale bar, in the bottom left corner."""
+        c, k, meta = self.canvas, self.k, self.map
+        if meta is None:
+            return
+        w, h = self.size
+        bar = max([b for b in (0.1, 0.25, 0.5, 1, 2, 5, 10, 20) if b * meta["unit_m"] / meta["zoom"] <= w * 0.25]
+                  or [0.1])
+        length, pad = bar * meta["unit_m"] / meta["zoom"], 6 * k
+        y = h - pad - 7 * k
+        c.coords(self.bar, 2 * pad, y, 2 * pad + length, y)
+        c.coords(self.bar_text, 3 * pad + length, y)
+        c.itemconfigure(self.bar_text, text=f"{bar:g} {meta['unit']}")
+        c.coords(self.caption, 2 * pad, y - 7 * k)
+        c.itemconfigure(self.caption, text=meta["title"])
+        x0, y0, x1, y1 = c.bbox(self.caption, self.bar, self.bar_text) or (0, 0, 0, 0)
+        c.coords(self.caption_box, x0 - pad, y0 - pad / 2, x1 + pad, y1 + pad / 2)
+
+    def _follow(self, centre):
+        """The view moves smoothly to where it should be, or jumps there from far away."""
+        if centre is None:
+            return
+        w, h = self.size
+        target = (centre[0] - w / 2, centre[1] - h / 2)
+        if self.view is None or math.dist(target, self.view) > max(w, h):
+            self.view = target
+        else:
+            self.view = (self.view[0] + (target[0] - self.view[0]) * self.EASE,
+                         self.view[1] + (target[1] - self.view[1]) * self.EASE)
+
+    def _pieces(self, done):
+        """The map's pieces in view, one more loaded each time round (each takes a few hundredths of a second),
+        those far away let go. Returns whether some of the view isn't drawn yet."""
+        c, size, meta = self.canvas, tsw_livemap.CHUNK, self.map
+        vx, vy = round(self.view[0]), round(self.view[1])
+        w, h = self.size
+        mw, mh = meta["size"]
+        cells = [(i, j) for i in range(max(0, vx // size), min((vx + w - 1) // size, (mw - 1) // size) + 1)
+                 for j in range(max(0, vy // size), min((vy + h - 1) // size, (mh - 1) // size) + 1)]
+        missing, loaded = False, False
+        for cell in cells:
+            have = self.pieces.get(cell)
+            if have and have[2] == meta["stamp"]:
+                continue
+            if cell not in done or loaded:
+                missing = missing or cell not in done
+                continue
+            try:
+                image = tk.PhotoImage(file=tsw_livemap.chunk_file(meta, cell))
+            except tk.TclError:                 # drawn again just now
+                continue
+            if have:
+                c.delete(have[1])
+            item = c.create_image(0, 0, anchor="nw", image=image)
+            c.tag_lower(item)
+            self.pieces[cell] = (image, item, meta["stamp"])
+            loaded = True
+        for (i, j), (_, item, _) in list(self.pieces.items()):
+            if not (vx - size - w < i * size < vx + w + size and vy - size - h < j * size < vy + h + size):
+                c.delete(item)
+                del self.pieces[(i, j)]
+            else:
+                c.coords(item, i * size - vx, j * size - vy)
+        return missing
+
+    def _mark(self, watch, missing):
+        c, k = self.canvas, self.k
+        items = (self.arrow, self.under, self.dot)
+        if watch.position is None or watch.off_line or self.view is None:
+            for item in items:
+                c.itemconfigure(item, state="hidden")
+        else:
+            px, py = tsw_livemap.to_px(self.map, *watch.position)
+            x, y, r, edge = px - round(self.view[0]), py - round(self.view[1]), 7 * k, 2 * k
+            c.coords(self.under, x - r - edge, y - r - edge, x + r + edge, y + r + edge)
+            c.coords(self.dot, x - r, y - r, x + r, y + r)
+            if watch.heading:
+                hx, hy = watch.heading
+                tip, back, half = r + 17 * k, r - 2 * k, 8 * k        # its base under the dot
+                c.coords(self.arrow, x + hx * tip, y + hy * tip, x + hx * back - hy * half,
+                         y + hy * back + hx * half, x + hx * back + hy * half, y + hy * back - hx * half)
+            for item in items:
+                c.itemconfigure(item, state="normal" if item != self.arrow or watch.heading else "hidden")
+        note = ("You're not on this map's line" if watch.off_line
+                else "Where you are isn't known yet" if watch.position is None
+                else watch.draw_failed if watch.draw_failed and missing
+                else "Drawing this part of the map..." if missing else "")
+        if c.itemcget(self.note, "text") != note:
+            c.itemconfigure(self.note, text=note)
+
 
 # ---------------------------------------------------------------- window
 class HistoryWindow:
@@ -940,6 +1145,9 @@ class App:
         self.tracker = tsw_stops.StopTracker(self.log)
         self.speed_watch = tsw_speed.SpeedWatch()
         self.comfort = tsw_comfort.ComfortWatch(self.log)
+        self.map_watch = tsw_livemap.MapWatch(self.log)
+        self.map_shown = False        # the route map is shown (its button or key toggles it)
+        self.map_key_down = False     # its key was down last time round
         self.at_station = None        # service you're stopped at a station of, for the ride report
         self.at_name = None           # ... and that station
         self.at_first = False         # ... and it's the service's first stop
@@ -979,6 +1187,7 @@ class App:
         self.speed_overlay.under = (self.overlay,)
         self.comfort_overlay = ComfortOverlay(root, self.k)
         self.comfort_overlay.under = (self.overlay, self.speed_overlay)
+        self.map_overlay = MapOverlay(root, self.k, self.s["map_opacity"], self._map_view(), self.s["map_corner"])
         self._refresh_toggle()
         self._refresh_button_label()
         root.attributes("-topmost", bool(self.s["on_top"]))
@@ -988,6 +1197,9 @@ class App:
         self.tracker.start()
         self.speed_watch.start()
         self.comfort.start()
+        self.map_watch.view, self.map_watch.zoom = self._map_view(), self.s["map_zoom"]
+        self.map_watch.unit_px = tsw_livemap.UNIT_PX * self.k
+        self.map_watch.start()
         self.log("Bridge started" + (" (paused)" if start_paused else ""))
         self.tick()
         if with_game:
@@ -1167,6 +1379,56 @@ class App:
         self.stop_key_combo.bind("<<ComboboxSelected>>", self.on_stop_key)
         ttk.Label(key_row, text="hold in the game to show the next stop",
                   style="Muted.TLabel").pack(side="left", padx=(8, 0))
+        row += 1
+        ttk.Label(grid, text="Route map key", style="Muted.TLabel").grid(row=row, column=0, sticky="w",
+                                                                        pady=3, padx=(0, 14))
+        map_key_row = ttk.Frame(grid, style="Panel.TFrame")
+        map_key_row.grid(row=row, column=1, columnspan=3, sticky="w", pady=3)
+        self.map_key_combo = ttk.Combobox(map_key_row, state="readonly", width=11, values=[NO_KEY, *MAP_KEYS])
+        self.map_key_combo.set(self.s["map_key"] or NO_KEY)
+        self.map_key_combo.pack(side="left")
+        self.map_key_combo.bind("<<ComboboxSelected>>", self.on_map_key)
+        ttk.Label(map_key_row, text="press in the game to show / hide the map (F7 also steps the destination back)",
+                  style="Muted.TLabel").pack(side="left", padx=(8, 0))
+        row += 1
+        ttk.Label(grid, text="Route map view", style="Muted.TLabel").grid(row=row, column=0, sticky="w",
+                                                                         pady=3, padx=(0, 14))
+        map_row = ttk.Frame(grid, style="Panel.TFrame")
+        map_row.grid(row=row, column=1, columnspan=3, sticky="w", pady=3)
+        ttk.Label(map_row, text="See-through", style="Muted.TLabel").pack(side="left", padx=(0, 6))
+        self.map_opacity_scale = ttk.Scale(map_row, from_=1.0, to=0.3, length=round(110 * self.k),
+                                           value=float(self.s["map_opacity"]), command=self.on_map_opacity)
+        self.map_opacity_scale.pack(side="left")
+        self.map_opacity_scale.bind("<ButtonRelease-1>", lambda e: save_settings(self.s))
+        self.map_opacity_label = ttk.Label(map_row, text="", style="Panel.TLabel", width=5)
+        self.map_opacity_label.pack(side="left", padx=(6, 12))
+        self.on_map_opacity(self.s["map_opacity"])
+        ttk.Label(map_row, text="Size", style="Muted.TLabel").pack(side="left", padx=(0, 6))
+        self.map_size_scale = ttk.Scale(map_row, from_=0.15, to=0.6, length=round(110 * self.k),
+                                        value=float(self.s["map_window"]), command=self.on_map_size)
+        self.map_size_scale.pack(side="left")
+        self.map_size_scale.bind("<ButtonRelease-1>", self.on_map_size_done)
+        self.map_size_label = ttk.Label(map_row, text="", style="Panel.TLabel", width=12)
+        self.map_size_label.pack(side="left", padx=(6, 12))
+        ttk.Label(map_row, text="Where", style="Muted.TLabel").pack(side="left", padx=(0, 6))
+        self.map_corner_combo = ttk.Combobox(map_row, state="readonly", width=12, values=MAP_CORNERS)
+        self.map_corner_combo.set(self.s["map_corner"])
+        self.map_corner_combo.pack(side="left")
+        self.map_corner_combo.bind("<<ComboboxSelected>>", self.on_map_corner)
+        row += 1
+        ttk.Label(grid, text="Route map zoom", style="Muted.TLabel").grid(row=row, column=0, sticky="w",
+                                                                         pady=3, padx=(0, 14))
+        zoom_row = ttk.Frame(grid, style="Panel.TFrame")
+        zoom_row.grid(row=row, column=1, columnspan=3, sticky="w", pady=3)
+        ttk.Label(zoom_row, text="Closer", style="Muted.TLabel").pack(side="left", padx=(0, 6))
+        self.map_zoom_scale = ttk.Scale(zoom_row, from_=0, to=len(tsw_livemap.ZOOMS) - 1, length=round(110 * self.k),
+                                        value=tsw_livemap.ZOOMS.index(self.s["map_zoom"]), command=self.on_map_zoom)
+        self.map_zoom_scale.pack(side="left")
+        self.map_zoom_scale.bind("<ButtonRelease-1>", self.on_map_zoom_done)
+        ttk.Label(zoom_row, text="Further", style="Muted.TLabel").pack(side="left", padx=(6, 10))
+        self.map_zoom_label = ttk.Label(zoom_row, text="", style="Panel.TLabel")
+        self.map_zoom_label.pack(side="left")
+        self.on_map_size(self.s["map_window"])
 
         bottom = ttk.Frame(setp, style="Panel.TFrame")
         bottom.pack(fill="x", pady=(8, 0))
@@ -1252,8 +1514,73 @@ class App:
     def on_stop_key(self, _event=None):
         key = self.stop_key_combo.get()
         self.s["stop_key"] = key if key in STOP_KEYS else None
+        if self.s["stop_key"] and self.s["map_key"] == key:      # one key can't do two things
+            self.s["map_key"] = None
+            self.map_key_combo.set(NO_KEY)
         save_settings(self.s)
         self.log(f"{key} now shows the next stop while held" if self.s["stop_key"] else "Next stop key cleared")
+
+    def on_map_key(self, _event=None):
+        key = self.map_key_combo.get()
+        self.s["map_key"] = key if key in MAP_KEYS else None
+        if self.s["map_key"] and self.s["stop_key"] == key:
+            self.s["stop_key"] = None
+            self.stop_key_combo.set(NO_KEY)
+        save_settings(self.s)
+        self.log(f"{key} now shows and hides the route map" if self.s["map_key"] else "Route map key cleared")
+
+    def on_map_opacity(self, value):
+        self.s["map_opacity"] = round(float(value), 2)
+        self.map_opacity_label.config(text=f"{round((1 - self.s['map_opacity']) * 100)}%")
+        if getattr(self, "map_overlay", None) is not None:
+            self.map_overlay.set_opacity(self.s["map_opacity"])
+
+    def on_map_size(self, value):
+        self.s["map_window"] = round(float(value), 2)
+        w, h = self._map_view()
+        self.map_size_label.config(text=f"{w} × {h} px")
+        self._show_map_zoom()
+
+    def on_map_size_done(self, _event=None):
+        save_settings(self.s)
+        self.map_watch.view = self._map_view()
+        self.map_overlay.resize(self.map_watch.view)
+
+    def on_map_zoom(self, value):
+        self.s["map_zoom"] = tsw_livemap.ZOOMS[round(float(value))]
+        self._show_map_zoom()
+
+    def on_map_zoom_done(self, _event=None):
+        self.map_zoom_scale.set(tsw_livemap.ZOOMS.index(self.s["map_zoom"]))
+        save_settings(self.s)
+        if self.map_watch.zoom != self.s["map_zoom"]:
+            self.map_watch.zoom = self.s["map_zoom"]
+            self.map_watch.last_check = 0.0           # drawn at that zoom (about 15 s the first time)
+
+    def _show_map_zoom(self):
+        across = self._map_view()[0] * self.s["map_zoom"]
+        self.map_zoom_label.config(text=f"{self.s['map_zoom']:g} m a pixel: {across / 1000:.1f} km "
+                                        f"({across / 1609.344:.1f} mi) across")
+
+    def on_map_corner(self, _event=None):
+        self.s["map_corner"] = self.map_corner_combo.get()
+        save_settings(self.s)
+        self.map_overlay.corner = self.s["map_corner"]
+        self.map_overlay._place()
+
+    def _map_view(self):
+        """The route map's size on the screen, (width, height) in pixels: its share of the screen's width."""
+        sw, sh = self.root.winfo_screenwidth(), self.root.winfo_screenheight()
+        w = int(sw * self.s["map_window"]) // 4 * 4
+        return w, min(int(w * 0.68) // 4 * 4, int(sh * 0.9))
+
+    def _toggle_map(self):
+        """Its joystick button or key shows the route map, or hides it."""
+        self.map_shown = not self.map_shown
+        self.map_watch.shown = self.map_shown
+        if self.map_shown:
+            self.map_watch.wanted = True          # from now on, maps are made as services start
+            self.map_watch.last_check = 0.0
 
     def on_joystick(self, _event=None):
         self.s["joystick"] = self.joy_combo.get()
@@ -1395,6 +1722,7 @@ class App:
         self.tracker.running = False
         self.speed_watch.running = False
         self.comfort.running = False
+        self.map_watch.stop()
         self.log("Bridge closed")
         self._drain_log()
         if self.log_file is not None:
@@ -1455,7 +1783,10 @@ class App:
 
     def _stop_key_held(self):
         """The next stop key is down while the game or this window has the focus (not while typing elsewhere)."""
-        vk = STOP_KEYS.get(self.s["stop_key"])
+        return App._key_held(self, STOP_KEYS.get(self.s["stop_key"]))
+
+    def _key_held(self, vk):
+        """A key (Windows key code) is down while the game or this window has the focus."""
         if not vk or not ctypes.windll.user32.GetAsyncKeyState(vk) & 0x8000:
             return False
         pid = autostart.foreground_pid()
@@ -1481,6 +1812,8 @@ class App:
                     self._set_held(cab_button, down)
                 elif ev.button == self.s["stop_button"]:
                     self._show_stop("button", down)
+                elif down and ev.button == self.s["map_button"]:
+                    self._toggle_map()
                 elif down and ev.button == self.s["toggle_button"]:
                     self.toggle()
 
@@ -1845,6 +2178,10 @@ class App:
             self._sync_handle_speed()
             self._poll_joystick()
             self._show_stop("key", self._stop_key_held())
+            map_key = self._key_held(MAP_KEYS.get(self.s["map_key"]))
+            if map_key and not self.map_key_down:
+                self._toggle_map()
+            self.map_key_down = map_key
             self._update_status()
             self._draw()
             stop = self.tracker.stop
@@ -1877,9 +2214,19 @@ class App:
                 self.comfort_overlay.show(coach)             # after the speeding popup: it goes under that
             else:
                 self.comfort_overlay.hide()
+            raised = False                           # the map goes under the panels
+            if self.map_shown:
+                raised = not self.map_overlay.shown
+                self.map_overlay.show(self.map_watch)
+            else:
+                self.map_overlay.hide()
+            raised = self.map_overlay.keep_on_top() or raised
             for overlay in (self.dwell_overlay, self.schedule_overlay, self.summary_overlay, self.overlay,
                             self.speed_overlay, self.comfort_overlay):
-                overlay.keep_on_top()
+                if raised:
+                    overlay.raise_()
+                else:
+                    overlay.keep_on_top()
             self._drain_log()
         except Exception as e:
             self.log(f"UI error: {e}")

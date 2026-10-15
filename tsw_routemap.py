@@ -3068,6 +3068,59 @@ def inset(sections, units, spots, stations, main, box, empty, letter, landmarks=
     return (frame0[0], frame0[1], frame1[0], frame1[1]), clip, svg, outline
 
 
+
+def map_page(info, sections, units, places, landmarks, on_page):
+    """The whole-route map's first page under its heading: the map filling it, and its key in the emptiest corner.
+    `on_page`: {section number: [pages its strips are on]}, for the key's list of the sections."""
+    route_line = f'passenger speed limits in {units.speed_unit}, both ways'
+    names = {s.number: section_title(s, sections) for s in sections}
+    def pages_of(numbers):
+        p = sorted({n for number in numbers for n in on_page[number]})
+        return f"{p[0]}" if len(p) == 1 else f"{p[0]}-{p[-1]}"
+    rows = []
+    long_ones = [s for s in sections if s.length >= units.length]
+    short = [s for s in sections if s.length < units.length]
+    for s in long_ones:
+        first, last = names[s.number]
+        rows.append(f'<tr><td class="sec">{s.number}</td><td>{esc(first)} – {esc(last)}</td>'
+                    f'<td class="num">{s.length / units.length:.1f}</td><td class="num">{pages_of([s.number])}</td>'
+                    f'</tr>')
+    if short:                               # numbered on their strips, not on the map
+        rows.append(f'<tr><td class="sec"></td><td colspan="2" class="shortsec">{len(short)} short loops and '
+                    f'crossovers: {", ".join(str(s.number) for s in short)}</td>'
+                    f'<td class="num">{pages_of([s.number for s in short])}</td></tr>')
+    total = sum(s.length for s in sections) / units.length
+    sub = (f'{route_line} · {len(sections)} sections, {total:.1f} {units.unit} of line · from {info["journeys"]} '
+           f'journeys in {info["timetable"]}')
+    speed = units.speed_unit
+    notes = (f"Boards: where to slow down, to {units.slow} {speed} or less (red edge) or to {units.drop} {speed} "
+             "or more below the limit either side. Each gives the lower limit of the two ways on the coloured "
+             "stretch it points to; one with an arrow is only for trains going that way. Grey numbers: the limit "
+             "along long stretches. A lettered frame is drawn larger in the box with its letter. Pages "
+             f"2-{max(n for p in on_page.values() for n in p)} have every limit both ways, with boards, signals "
+             "and platforms.")
+    titles = [f"{a} – {b}" for s in long_ones for a, b in [names[s.number]]]
+    if short:
+        titles.append(f"{len(short)} short loops and crossovers: " + ", ".join(str(s.number) for s in short))
+    index = (f'<table class="card index"><tr><th></th><th>section</th><th class="num">{units.unit}</th>'
+             f'<th class="num">page</th></tr>{"".join(rows)}</table><div class="note">{notes}</div>')
+    extra = sum(1.4 + 3.5 * math.ceil(len(t) / 28) for t in titles) + 3.3 * math.ceil(len(notes) / 64)
+    # the key's height in mm, roughly (the lines its text takes), for the map to leave room for it
+    key_height = 9 + 3.5 * math.ceil(len(sub) / 58) + 10 + 7 + 5.5 + (9 if landmarks else 0) + extra + 9
+    overview, corner, scale = route_overview(sections, units, key_height, slow_spots(sections, units),
+                                             route_stations(sections, places), landmarks)
+    per_mm = MAP_W / MAP_MM[0]
+    bar = max([b for b in (0.25, 0.5, 1, 2, 5, 10, 20, 50, 100) if b * units.length * scale / per_mm <= 32]
+              or [0.25])
+    bar_mm = bar * units.length * scale / per_mm
+    return (f'<div class="mapfull">{overview}<div class="key {corner}">'
+            f'<div class="keytitle">{esc(info["route"])}</div><div class="keysub">{esc(sub)}</div>'
+            f'{legend(units, "line: the lower limit of the two ways", landmark_legend(landmarks))}'
+            f'<div class="keyscale"><svg width="{bar_mm:.1f}mm" height="2.4mm" viewBox="0 0 {bar_mm:.1f} 2.4" '
+            f'preserveAspectRatio="none"><rect x="0" y="0.6" width="{bar_mm:.1f}" height="1.2" fill="#111"/></svg>'
+            f'<span>{bar:g} {units.unit}</span><span class="north">▲ N</span></div>{index}</div></div>')
+
+
 def render_route(info, sections, units, places=None, landmarks=None):
     """The printable document of a whole route. `places`: {station: [(x, y)]} the journeys run past; `landmarks`:
     route_landmarks."""
@@ -3094,53 +3147,7 @@ def render_route(info, sections, units, places=None, landmarks=None):
     if page:
         pages.append('<div class="strips">' + "".join(page) + '</div>')
 
-    def pages_of(numbers):
-        p = sorted({n for number in numbers for n in on_page[number]})
-        return f"{p[0]}" if len(p) == 1 else f"{p[0]}-{p[-1]}"
-    rows = []
-    long_ones = [s for s in sections if s.length >= units.length]
-    short = [s for s in sections if s.length < units.length]
-    for s in long_ones:
-        first, last = names[s.number]
-        rows.append(f'<tr><td class="sec">{s.number}</td><td>{esc(first)} – {esc(last)}</td>'
-                    f'<td class="num">{s.length / units.length:.1f}</td><td class="num">{pages_of([s.number])}</td>'
-                    f'</tr>')
-    if short:                               # numbered on their strips, not on the map
-        rows.append(f'<tr><td class="sec"></td><td colspan="2" class="shortsec">{len(short)} short loops and '
-                    f'crossovers: {", ".join(str(s.number) for s in short)}</td>'
-                    f'<td class="num">{pages_of([s.number for s in short])}</td></tr>')
-    total = sum(s.length for s in sections) / units.length
-    sub = (f'{route_line} · {len(sections)} sections, {total:.1f} {units.unit} of line · from {info["journeys"]} '
-           f'journeys in {info["timetable"]}')
-    speed = units.speed_unit
-    notes = (f"Boards: where to slow down, to {units.slow} {speed} or less (red edge) or to {units.drop} {speed} or "
-             "more below the limit either side. Each gives the lower limit of the two ways on the coloured stretch it "
-             "points to; one with an arrow is only for trains going that way. Grey numbers: the limit along long "
-             "stretches. A lettered frame is drawn larger in the box with its letter. Pages "
-             f"2-{len(pages) + 1} have every limit both ways, with boards, signals and platforms.")
-    # the key's height in mm, roughly (the lines its text takes), for the map to leave room for it
-    titles = [f"{a} – {b}" for s in long_ones for a, b in [names[s.number]]]
-    if short:
-        titles.append(f"{len(short)} short loops and crossovers: " + ", ".join(str(s.number) for s in short))
-    key_height = (9 + 3.5 * math.ceil(len(sub) / 58) + 10 + 7 + 5.5 + (9 if landmarks else 0)
-                  + sum(1.4 + 3.5 * math.ceil(len(t) / 28) for t in titles) + 3.3 * math.ceil(len(notes) / 64) + 9)
-    overview, corner, scale = route_overview(sections, units, key_height, slow_spots(sections, units),
-                                             route_stations(sections, places), landmarks)
-    per_mm = MAP_W / MAP_MM[0]
-    bar = max([b for b in (0.25, 0.5, 1, 2, 5, 10, 20, 50, 100) if b * units.length * scale / per_mm <= 32]
-              or [0.25])
-    bar_mm = bar * units.length * scale / per_mm
-    first_page = (
-        f'<div class="mapfull">{overview}<div class="key {corner}">'
-        f'<div class="keytitle">{esc(info["route"])}</div><div class="keysub">{esc(sub)}</div>'
-        f'{legend(units, "line: the lower limit of the two ways", landmark_legend(landmarks))}'
-        f'<div class="keyscale"><svg width="{bar_mm:.1f}mm" height="2.4mm" viewBox="0 0 {bar_mm:.1f} 2.4" '
-        f'preserveAspectRatio="none"><rect x="0" y="0.6" width="{bar_mm:.1f}" height="1.2" fill="#111"/></svg>'
-        f'<span>{bar:g} {units.unit}</span><span class="north">▲ N</span></div>'
-        f'<table class="card index"><tr><th></th><th>section</th><th class="num">{units.unit}</th>'
-        f'<th class="num">page</th></tr>{"".join(rows)}</table>'
-        f'<div class="note">{notes}</div></div></div>')
-    pages.insert(0, first_page)
+    pages.insert(0, map_page(info, sections, units, places, landmarks, on_page))
     head_left = f'<b>{esc(info["route"])}</b> &nbsp;whole route'
     out = [f'<!doctype html><html><head><meta charset="utf-8"><title>{esc(info["route"])} speed limits</title>'
            f'<style>{CSS}{ROUTE_CSS}</style></head><body>']
@@ -3280,6 +3287,25 @@ def make_route_map(library, route, say=print):
     groups = main_journeys(journeys(library.services(route)))
     network = library.network(route, say)
     say(f"Following {len(groups)} journeys over the track...")
+    sections, places, count, timetables_used = journey_sections(files, network, groups, name, say)
+    timetable_names = sorted({tsw_stops._load(files, t, {"TimetableName": None}).get("TimetableName")
+                              or t.rsplit("/", 1)[-1] for t in timetables_used})
+    info = {"route": name, "journeys": count, "timetable": ", ".join(timetable_names)}
+    units = route_units(sections)
+    say("Finding landmarks...")
+    objects, sea, water = route_scenery(files, route_details(files, route)[1])
+    landmarks = route_landmarks(network, objects, sections, sea, water)
+    path = save_map(f"{name} whole route", render_route(info, sections, units, places, landmarks))
+    say(f"{len(sections)} sections, {sum(s.length for s in sections) / units.length:.1f} {units.unit} of line, "
+        f"from {count} journeys")
+    return path
+
+
+def journey_sections(files, network, groups, name, say=print):
+    """The Sections of journeys (`groups`, as journeys() gives them) over a route's track: each passenger journey
+    from its first stop at a platform to its last (depot moves, freight and light engines left out when there are
+    passenger journeys). Returns (sections, {station: [(x, y)] where the journeys pass its platforms}, how many
+    journeys were followed, the timetables they're in). `name`: the route's, for what can't be done."""
     by_timetable = collections.defaultdict(dict)
     for _, members in groups:
         timetable, service = members[0]
@@ -3316,20 +3342,21 @@ def make_route_map(library, route, say=print):
     sections = route_sections(network, paths, coverage, ends)
     if not sections:
         raise MapError(f"The journeys of {name} are all too short to map")
-    timetable_names = sorted({tsw_stops._load(files, t, {"TimetableName": None}).get("TimetableName")
-                              or t.rsplit("/", 1)[-1] for t in timetables_used})
-    info = {"route": name, "journeys": len(paths), "timetable": ", ".join(timetable_names)}
-    units = Units(imperial_limits([(0, v) for s in sections for way in (True, False)
-                                   for _, v in s.limits[way] if v is not None]))
-    say("Finding landmarks...")
-    level = route_details(files, route)[1]
+    return sections, places, len(paths), timetables_used
+
+
+def route_units(sections):
+    """Miles and mph, or km and km/h, as the limits of the sections are round in."""
+    return Units(imperial_limits([(0, v) for s in sections for way in (True, False)
+                                  for _, v in s.limits[way] if v is not None]))
+
+
+def route_scenery(files, level):
+    """(scenery, sea_cells, water_areas) of a route: what route_landmarks finds its landmarks among. Reading them
+    takes half a minute or so."""
     objects = scenery(files, level)
     sea = sea_cells(objects, landscape(files, level)) if any(o[0] == "sea" for o in objects) else None
-    landmarks = route_landmarks(network, objects, sections, sea, water_areas(files, level, objects))
-    path = save_map(f"{name} whole route", render_route(info, sections, units, places, landmarks))
-    say(f"{len(sections)} sections, {sum(s.length for s in sections) / units.length:.1f} {units.unit} of line, "
-        f"from {len(paths)} journeys")
-    return path
+    return objects, sea, water_areas(files, level, objects)
 
 
 def save_map(file_name, document):
