@@ -544,7 +544,7 @@ def cabs(files, train, package):
 
 
 def short(train):
-    return re.sub(r"^RVM_|_C$", "", train)
+    return re.sub(r"^RVM_|(_RVM)?_C$", "", train)
 
 
 def write_report(results, files, seconds):

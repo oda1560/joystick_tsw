@@ -183,7 +183,7 @@ def save_settings(s):
 def pretty_train(cls):
     if not cls:
         return "-"
-    s = re.sub(r"^(RVM|BP)_", "", str(cls))
+    s = re.sub(r"^(RVM|BP)_|_RVM(?=_C$)", "", str(cls))     # the Class 70 is CL70_FL_RVM_C
     return re.sub(r"_C$", "", s).replace("_", " ")
 
 

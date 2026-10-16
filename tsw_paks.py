@@ -524,15 +524,30 @@ class GameFiles:
     def vehicle_classes(self):
         """{'RVM_..._C': [package name, ...]} for every rail vehicle blueprint in the game files. A few names
         are used by more than one pack, for trains that differ (RVM_TFW_Class150_DMSL_C is Cardiff City
-        Commuter's Class 150 and the TfW Class 142 pack's, with different reversers): those list each one."""
-        out = {}
+        Commuter's Class 150 and the TfW Class 142 pack's, with different reversers): those list each one.
+        Blueprints not named RVM_ are found from the vehicle definitions (RVD_) that name them: the Freightliner
+        Class 70 is CL70_FL_RVM_C (its RVM_AABS_Class70 is an old one left in an OLD folder)."""
+        out, definitions = {}, []
         for name in self.where:
-            m = re.search(r"/(RVM_[^/]+)\.uasset$", name)
+            m = re.search(r"/(RVM_[^/]+|RVD[^/]*)\.uasset$", name)
             if not m:
                 continue
             for pkg, root in self.roots.items():
                 if name.startswith(root):
-                    out.setdefault(m.group(1) + "_C", []).append(f"/{pkg}/{name[len(root):-len('.uasset')]}")
+                    package = f"/{pkg}/{name[len(root):-len('.uasset')]}"
+                    if m.group(1).startswith("RVD"):
+                        definitions.append(package)
+                    else:
+                        out.setdefault(m.group(1) + "_C", []).append(package)
+        for package in definitions:
+            pkg = self.package(package)
+            for i in range(1, len(pkg.exports) + 1) if pkg else ():
+                if pkg.class_name(i) != "RailVehicleDefinition":
+                    continue
+                model = (pkg.properties(i).get("ModelActorAsset") or [""])[0]
+                path, _, cls = str(model).partition(".")
+                if cls and path not in out.get(cls, []) and (self.file_of(path) or "") + ".uasset" in self.where:
+                    out.setdefault(cls, []).append(path)
         return out
 
     def matching_package(self, cls, packages, names):
