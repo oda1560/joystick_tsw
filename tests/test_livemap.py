@@ -62,8 +62,9 @@ def a_map(**more):
     """A map's meta: 8 m a pixel, its top left at (0, 0) in the world, 10 pieces wide and 4 high, its line along
     y = 1000 m (125 px) from x = 0 to 60 km."""
     meta = {"version": lm.MAP_VERSION, "key": "R TT 2H26 z8", "title": "2H26  Leeds → Skipton", "origin": BRITAIN,
-            "left": 0.0, "top": 0.0, "zoom": 8, "size": [10 * lm.CHUNK, 4 * lm.CHUNK], "unit": "mi",
-            "unit_m": 1609.344, "line": [(x * 100.0, 1000.0) for x in range(601)], "scenery": True, "stamp": 5}
+            "service": "2H26", "left": 0.0, "top": 0.0, "zoom": 8, "size": [10 * lm.CHUNK, 4 * lm.CHUNK],
+            "unit": "mi", "unit_m": 1609.344, "line": [(x * 100.0, 1000.0) for x in range(601)],
+            "stops": [[3000.0, 11000.0, 1000.0], [9000.5, 17000.0, 1000.0]], "scenery": True, "stamp": 5}
     meta.update(more)
     return meta
 
@@ -75,10 +76,10 @@ class FindingTheMap(unittest.TestCase):
         self.dir = tempfile.TemporaryDirectory()
         self.patch = mock.patch.object(lm, "CACHE", self.dir.name)
         self.patch.start()
-        self.watch = lm.MapWatch()
+        self.watch = lm.MapWatch(draw=False)
         self.watch.target, self.watch.wanted = self.TARGET, True
         self.started = []
-        self.watch._start = lambda target, key: self.started.append(key)
+        self.watch._start = lambda target, zooms: self.started.append(zooms)
 
     def tearDown(self):
         self.watch.running = False
@@ -101,10 +102,10 @@ class FindingTheMap(unittest.TestCase):
         self.assertEqual(self.started, [])
 
     def test_a_map_kept_without_its_scenery_is_shown_while_its_made(self):
-        key = self.keep(False)
+        self.keep(False)
         self.watch._find_map()
         self.assertIsNotNone(self.watch.map)
-        self.assertEqual(self.started, [key])
+        self.assertEqual(self.started, [[8]])
 
     def test_another_zoom_is_made_and_the_last_one_shown_till_then(self):
         self.keep(True, zoom=12)
@@ -113,7 +114,59 @@ class FindingTheMap(unittest.TestCase):
         self.watch.zoom = 8
         self.watch._find_map()
         self.assertEqual(self.watch.map["zoom"], 12)
-        self.assertEqual(self.started, [lm.map_key(*self.TARGET, 8)])
+        self.assertEqual(self.started, [[8]])
+
+    def test_by_speed_the_zooms_it_goes_between_are_made_together_nearest_first(self):
+        self.watch.auto, self.watch.zoom = True, 5
+        self.keep(True, zoom=5)
+        self.watch._find_map()
+        self.assertEqual(self.started, [[8, 3, 12]])
+        self.started.clear()
+        for zoom in (3, 8, 12):
+            self.keep(True, zoom=zoom)
+        self.watch._find_map()
+        self.assertEqual(self.started, [])                       # all kept
+
+    def test_a_zoom_that_couldnt_be_made_isnt_asked_for_again(self):
+        self.watch.auto, self.watch.zoom = True, 8
+        self.keep(True, zoom=8)
+        self.watch.failed[lm.map_key(*self.TARGET, 12)] = "Making the map stopped"
+        self.watch._find_map()
+        self.assertEqual(self.started, [[5, 3]])
+
+    def test_another_zoom_waits_till_its_pieces_where_you_are_are_drawn(self):
+        self.keep(True, zoom=8)
+        self.watch._find_map()
+        self.watch.position = (8000.0, 1000.0)                    # 1000 px across at 8 m, 666 at 12
+        self.watch._find_map()
+        self.keep(True, zoom=12, pieces=[(0, 0)])
+        self.watch.zoom = 12
+        self.watch._find_map()
+        self.assertEqual((self.watch.map["zoom"], self.watch.pending["zoom"]), (8, 12))
+        meta, todo = self.watch._next_pieces({})
+        self.assertEqual((meta, todo), (self.watch.pending, [(1, 0)]))   # its pieces first: (0, 0) is drawn
+        self.watch.pending_done.add((1, 0))
+        self.watch._show(self.watch.pending)
+        self.assertEqual((self.watch.map["zoom"], self.watch.pending), (12, None))
+
+    def test_back_to_the_zoom_shown_and_the_one_waiting_is_dropped(self):
+        self.keep(True, zoom=8)
+        self.watch._find_map()
+        self.watch.position = (8000.0, 1000.0)
+        self.keep(True, zoom=12)
+        self.watch.zoom = 12
+        self.watch._find_map()
+        self.watch.zoom = 8
+        self.watch._find_map()
+        self.assertEqual((self.watch.map["zoom"], self.watch.pending), (8, None))
+
+    def test_maps_kept_at_every_zoom_asked_for_arent_made_again(self):
+        for zoom in (8, 12):
+            self.keep(True, zoom=zoom)
+        made = []
+        with mock.patch.object(lm.tsw_paks, "GameFiles", side_effect=AssertionError("read the game files")):
+            lm.make(self.TARGET[0], self.TARGET[1], [8, 12], made=made.append)
+        self.assertEqual(made, [lm.meta_file(lm.map_key(*self.TARGET, z)) for z in (8, 12)])
 
     def test_nothing_is_made_until_the_map_is_asked_for(self):
         self.watch.wanted = False
@@ -138,7 +191,7 @@ class Following(unittest.TestCase):
     """Where the window's middle goes, and which pieces of the map are drawn first."""
 
     def setUp(self):
-        self.watch = lm.MapWatch()
+        self.watch = lm.MapWatch(draw=False)
         self.watch.view = (700, 476)
         self.watch._set_map(a_map())
 
@@ -170,23 +223,83 @@ class Following(unittest.TestCase):
         self.assertFalse(self.watch.off_line)
 
 
+class ZoomBySpeed(unittest.TestCase):
+    """At 700 px across, the halfway between 3 and 5 m a pixel is at 50 mph, 5 and 8 at 83, 8 and 12 at 128."""
+    MPH = 0.44704
+
+    def zoom(self, mph, zoom, width=700):
+        return lm.speed_zoom(mph * self.MPH, width, zoom)
+
+    def test_closer_when_slow_further_when_fast(self):
+        self.assertEqual([self.zoom(mph, 3) for mph in (0, 30, 75, 125, 200)], [3, 3, 5, 8, 12])
+        self.assertEqual(self.zoom(75, 3, width=1400), 3)            # a window twice as wide: closer
+
+    def test_it_stays_till_the_speed_is_well_past_the_halfway(self):
+        self.assertEqual(self.zoom(90, 5), 5)                        # past the halfway (83 mph)...
+        self.assertEqual(self.zoom(90, 8), 8)                        # ... either way
+        self.assertEqual(self.zoom(105, 5), 8)
+        self.assertEqual(self.zoom(60, 8), 5)
+
+    def test_from_a_zoom_it_doesnt_go_to(self):
+        self.assertEqual(self.zoom(0, 30), 3)
+        self.assertEqual(self.zoom(200, 20), 12)
+
+    def test_the_speed_eased_and_the_zoom_held_a_while(self):
+        watch = lm.MapWatch(draw=False)
+        try:
+            watch.zoom, watch.speed = 8, 0.0
+            watch._auto_zoom(100.0)
+            self.assertEqual(watch.zoom, 3)                          # at once the first time
+            watch.speed = -125 * self.MPH                            # backwards counts the same
+            watch._auto_zoom(101.0)
+            self.assertAlmostEqual(watch.eased, 125 * self.MPH / 4)  # a quarter of the way there in a second
+            self.assertEqual(watch.zoom, 3)                          # held
+            watch._auto_zoom(100.0 + lm.AUTO_HOLD)
+            self.assertEqual(watch.zoom, 8)
+            self.assertEqual(watch.last_check, 0.0)                  # its map looked for at once
+        finally:
+            watch.running = False
+
+
+class StopPlaces(unittest.TestCase):
+    def test_where_the_path_runs_over_the_track(self):
+        """A path over two 1 km pieces of track, east along y = 0, then back west along y = 50."""
+        network = SimpleNamespace(ribbons={"A": SimpleNamespace(length=1000.0), "B": SimpleNamespace(length=1000.0)},
+                                  follow=lambda rows: ([(0.0, "A", 0.0, 1.0), (1000.0, "B", 1.0, 0.0)], []),
+                                  position=lambda guid, at: (at * 1000.0, 0.0 if guid == "A" else 50.0))
+        rows = [{"DataType": "EDataType::ActionPoint", "Distance": 25000.0},       # 250 m
+                {"DataType": "EDataType::TrackSectionEntry", "Distance": 30000.0},
+                {"DataType": "EDataType::GoVia", "Distance": 130000.0},            # 300 m back along B
+                {"DataType": "EDataType::ActionPoint", "Distance": 25000.0},       # the same place again
+                {"DataType": "EDataType::ActionPoint", "Distance": 900000.0}]      # past the path's end
+        self.assertEqual(lm.stop_places(network, rows), [(250.0, 250.0, 0.0), (1300.0, 700.0, 50.0)])
+
+
 class Canvas:
     """Enough of a Tk canvas to see where things are drawn."""
 
     def __init__(self):
-        self.places, self.states, self.texts, self.items = {}, {}, {}, 100
+        self.places, self.states, self.texts, self.fills, self.items = {}, {}, {}, {}, 100
 
     def coords(self, item, *xy):
         self.places[item] = xy
 
-    def itemconfigure(self, item, state=None, text=None):
+    def itemconfigure(self, item, state=None, text=None, fill=None, **_):
         if state is not None:
             self.states[item] = state
         if text is not None:
             self.texts[item] = text
+        if fill is not None:
+            self.fills[item] = fill
 
     def itemcget(self, item, option):
         return self.texts.get(item, "")
+
+    def bbox(self, *items):
+        """Each text 120 x 18 from its place; hidden ones left out."""
+        shown = [self.places[i][:2] for i in items if self.states.get(i) != "hidden"]
+        boxes = [(x, y, x + 120, y + 18) for x, y in shown]
+        return (min(b[0] for b in boxes), min(b[1] for b in boxes), max(b[2] for b in boxes), max(b[3] for b in boxes))
 
     def create_image(self, x, y, anchor=None, image=None):
         self.items += 1
@@ -199,19 +312,31 @@ class Canvas:
         self.places.pop(item, None)
 
 
+def next_stop(metres=3050.0, at=3000.0, service="2H26", label="Stop at Shipley · Platform 2", **more):
+    """The next stop readout (tsw_stops.StopTracker.state)."""
+    stop = {"text": "", "label": label, "metres": metres, "estimated": False, "then": "", "then_metres": None,
+            "service": service, "at": at}
+    stop.update(more)
+    return stop
+
+
 class TheWindow(unittest.TestCase):
     def setUp(self):
-        self.overlay = SimpleNamespace(canvas=Canvas(), k=1.0, map=a_map(), view=None, size=(700, 476), pieces={},
-                                       arrow=1, under=2, dot=3, note=99, EASE=ui.MapOverlay.EASE)
+        o = self.overlay = ui.MapOverlay.__new__(ui.MapOverlay)       # its drawing, without Tk
+        o.__dict__.update(canvas=Canvas(), k=1.0, map=a_map(), view=None, size=(700, 476), pieces={}, arrow=1,
+                          under=2, dot=3, note=99, stop_halo=4, stop_ring=5, stop_box=6, stop_far=7, stop_what=8,
+                          stop_shown=None)
         self.watch = SimpleNamespace(position=(8000.0, 1000.0), heading=(1.0, 0.0), off_line=False,
                                      draw_failed=None, centre=(1100.0, 125.0), done=set())
+        self.stop = None
 
-    def show(self):
+    def show(self, imperial=True):
         o, w = self.overlay, self.watch
-        ui.MapOverlay._follow(o, w.centre)
+        o._follow(w.centre)
         with mock.patch.object(ui.tk, "PhotoImage", lambda file: file):
-            missing = ui.MapOverlay._pieces(o, w.done)
-        ui.MapOverlay._mark(o, w, missing)
+            missing = o._pieces(w.done)
+        o._mark(w, missing)
+        o._next_stop(w, self.stop, imperial)
         return o.canvas
 
     def test_the_view_jumps_to_you_then_follows_smoothly(self):
@@ -245,14 +370,62 @@ class TheWindow(unittest.TestCase):
         self.assertEqual(c.states[3], "hidden")
         self.assertIn("not on this map", c.texts[99])
 
+    def test_how_far_the_next_stop_is_in_the_corner_the_note_below(self):
+        self.stop = next_stop(metres=1.5 * 1609.344)
+        c = self.show()
+        self.assertEqual((c.texts[7], c.texts[8]), ("1.50 mi", "Stop at Shipley · Platform 2"))
+        self.assertEqual([c.states[i] for i in (6, 7, 8)], ["normal"] * 3)
+        self.assertGreater(c.places[8][1], c.places[7][1])               # the stop under the distance
+        self.assertGreater(c.places[99][1], c.places[6][3])              # "Drawing..." under the box
+        self.stop = None                                                 # free roam: nothing in the corner
+        c = self.show(imperial=False)
+        self.assertEqual([c.states[i] for i in (6, 7, 8)], ["hidden"] * 3)
+        self.assertEqual(c.places[99], (350, 8))
+
+    def test_the_corner_says_it_as_the_next_stop_panel_does(self):
+        lines = ui.MapOverlay.stop_lines
+        self.assertEqual(lines(next_stop(metres=950.0, estimated=True), False, "red", "black"),
+                         ("≈ 950 m", "black", "Stop at Shipley · Platform 2"))
+        self.assertEqual(lines(next_stop(metres=-13.0), False, "red", "black")[:2], ("13 m past", "red"))
+        self.assertEqual(lines(next_stop(metres=400.0, label="Go via Shipley Junction", then="Stop at Saltaire",
+                                         then_metres=1600.0), False, "red", "black")[2],
+                         "Go via Shipley Junction\nthen stop at Saltaire in 1.60 km")
+        self.assertEqual(lines(next_stop(metres=None, text="Distance known after the next stop"), False, "r", "b"),
+                         ("", "b", "Stop at Shipley · Platform 2\nDistance known after the next stop"))
+        self.assertEqual(lines(next_stop(label="", text="No timetabled service"), False, "r", "b"), ("", "b", ""))
+
+    def test_a_ring_on_the_next_stop(self):
+        self.stop = next_stop()
+        c = self.show()
+        x0, y0, x1, y1 = c.places[5]
+        self.assertEqual(((x0 + x1) / 2, (y0 + y1) / 2), (11000 / 8 - 750, 125 + 113))
+        self.assertEqual((c.states[4], c.states[5]), ("normal", "normal"))
+        self.stop = next_stop(at=9000.0, metres=9100.0)                  # the second, half a metre out
+        c = self.show()
+        self.assertEqual((c.places[5][0], c.states[5]), (17000 / 8 - 750 - 10, "normal"))
+
+    def test_no_ring_where_it_cant_be_the_stop(self):
+        for stop in (next_stop(service="2H28"),                         # another service's map
+                     next_stop(at=4000.0),                               # not one of the map's stops
+                     next_stop(metres=1000.0),                           # 3 km from you, 1 km to go
+                     None):
+            self.stop = stop
+            self.assertEqual(self.show().states.get(5), "hidden", stop)
+        self.overlay.map = a_map(stops=[])                               # the whole route's: no stops
+        self.stop = next_stop()
+        self.assertEqual(self.show().states.get(5), "hidden")
+
 
 class ShowingIt(unittest.TestCase):
     def test_button_or_key_shows_and_hides_it(self):
-        app = SimpleNamespace(map_shown=False, map_watch=SimpleNamespace(shown=False, wanted=False, last_check=5.0))
+        app = SimpleNamespace(map_shown=False, map_watch=SimpleNamespace(shown=False, wanted=False, last_check=5.0),
+                              tracker=SimpleNamespace(shown=False), stop_held=set())
         ui.App._toggle_map(app)
         self.assertEqual((app.map_shown, app.map_watch.shown, app.map_watch.wanted), (True, True, True))
+        self.assertTrue(app.tracker.shown)                       # the next stop kept up to date for it
         ui.App._toggle_map(app)
         self.assertEqual((app.map_shown, app.map_watch.shown, app.map_watch.wanted), (False, False, True))
+        self.assertFalse(app.tracker.shown)
 
     def test_the_window_builds_with_its_settings(self):
         """The bridge window's settings, built with stand-ins for Tk (no window opens)."""
@@ -275,6 +448,11 @@ class ShowingIt(unittest.TestCase):
             app.on_map_opacity(0.6)
             app.map_key_combo.get.return_value = "F6"            # the next stop's: that one gives it up
             app.on_map_key()
+            self.assertFalse(app.s["map_auto_zoom"] or app.map_watch.auto)   # a zoom picked: not by speed
+            app.map_auto_var.get.return_value = True
+            app.on_map_auto_zoom()
+            self.assertTrue(app.s["map_auto_zoom"] and app.map_watch.auto)
+            self.assertIn("by speed: 2.3-9.2 km", app.map_zoom_label.config.call_args.kwargs["text"])
         self.assertEqual((app.s["map_key"], app.s["stop_key"]), ("F6", None))
         self.assertEqual(app.map_watch.view, (768, 520))
         app.map_overlay.resize.assert_called_with((768, 520))

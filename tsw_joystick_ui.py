@@ -8,7 +8,8 @@ and how the ride felt to the passengers, and at the end of a service how the run
 (tsw_history.py, all runs in the Service history window); while you're over the speed limit, the limit
 (tsw_speed.py); while braking or speeding up is firm or harsh for the passengers, and in the last seconds of
 a hard stop to ease the brake off before the train stops (tsw_comfort.py); and at a press of another button or
-key (F7), a small see-through map of where you are on the service's line, following you (tsw_livemap.py).
+key (F7), a small see-through map of where you are on the service's line, following you, with how far the next
+stop is and a ring on it (tsw_livemap.py).
 The bridge itself (game API, lever detection, emergency exclusion) lives in tsw_joystick.py.
 
 Usage:
@@ -63,7 +64,7 @@ DEFAULTS = {"axis": core.Y_AXIS, "invert": core.INVERT_Y, "deadzone": core.DEADZ
             "door_close_right_button": core.DOOR_CLOSE_RIGHT_BUTTON,
             "stop_button": core.STOP_BUTTON, "stop_key": "F6",
             "map_button": core.MAP_BUTTON, "map_key": "F7", "map_opacity": 0.7, "map_window": 0.27,
-            "map_zoom": tsw_livemap.ZOOM, "map_corner": "Bottom left",
+            "map_zoom": tsw_livemap.ZOOM, "map_auto_zoom": True, "map_corner": "Bottom left",
             "look_enabled": core.USE_LOOK, "look_axis": core.LOOK_AXIS, "look_invert": core.LOOK_INVERT,
             "look_deadzone": core.LOOK_DEADZONE, "look_angle": core.LOOK_MAX_ANGLE,
             "look_smoothing": core.LOOK_SMOOTHING}
@@ -165,6 +166,7 @@ def load_settings():
     s["map_window"] = min(0.6, max(0.15, float(s["map_window"])))
     if s["map_zoom"] not in tsw_livemap.ZOOMS:
         s["map_zoom"] = tsw_livemap.ZOOM
+    s["map_auto_zoom"] = bool(s["map_auto_zoom"])
     if s["map_corner"] not in MAP_CORNERS:
         s["map_corner"] = DEFAULTS["map_corner"]
     return s
@@ -887,10 +889,14 @@ class ComfortOverlay(Overlay):
 class MapOverlay(Overlay):
     """The route map over the game in a small see-through window that follows you (tsw_livemap.py): the part of
     the line you're on, with a dot where you are and an arrow the way you're going, the window's middle a little
-    ahead of you. Until the map is made, what's happening."""
+    ahead of you, and how far the next stop (or go-via) is in its top left corner, with a ring where it is. Until
+    the map is made, what's happening."""
     DOT, RING, EDGE = "#1f6fe0", "#ffffff", "#111111"
+    STOP, PASSED = "#c2185b", "#c62828"
     EASE = 0.2                    # share of the way to where it should be that the view moves each time round
     MARGIN = 24                   # pixels from the screen's edges
+    STOP_SLACK = 100.0            # metres: a stop further from you than its distance and this (and a tenth more)
+                                  # isn't the one the distance is to: no ring
 
     def __init__(self, root, k, opacity, size, corner):
         super().__init__(root, k, 0.0, [(12, True)])
@@ -900,6 +906,8 @@ class MapOverlay(Overlay):
         self.map = None               # the map shown (MapWatch.map); None: the line of what's happening
         self.pieces = {}              # (column, row) -> (PhotoImage, canvas item, the drawing it's of)
         self.view = None              # the map's pixel at the window's top left
+        self.stop_halo = c.create_oval(0, 0, 0, 0, outline=self.RING, width=max(4, round(6 * k)), state="hidden")
+        self.stop_ring = c.create_oval(0, 0, 0, 0, outline=self.STOP, width=max(2, round(3 * k)), state="hidden")
         self.arrow = c.create_polygon(0, 0, 0, 0, 0, 0, fill=self.DOT, outline=self.EDGE,
                                       width=max(1, round(1.5 * k)), state="hidden")
         self.under = c.create_oval(0, 0, 0, 0, fill=self.EDGE, outline="", state="hidden")
@@ -910,6 +918,11 @@ class MapOverlay(Overlay):
         self.bar = c.create_line(0, 0, 0, 0, fill=self.EDGE, width=max(2, round(3 * k)))
         self.bar_text = c.create_text(0, 0, anchor="w", text="", fill=self.EDGE, font=(FONT, 9))
         self.note = c.create_text(0, 0, anchor="n", text="", fill=self.EDGE, font=(FONT, 10, "bold"))
+        self.stop_box = c.create_rectangle(0, 0, 0, 0, fill="#ffffff", outline="", state="hidden")
+        self.stop_far = c.create_text(0, 0, anchor="nw", text="", fill=self.EDGE, font=(FONT, 13, "bold"),
+                                      state="hidden")
+        self.stop_what = c.create_text(0, 0, anchor="nw", text="", fill=self.EDGE, font=(FONT, 9), state="hidden")
+        self.stop_shown = None        # what the corner says: (distance, its colour, the stop)
         self.border = c.create_rectangle(0, 0, 0, 0, outline="#333333", width=1)
         self.size = None
         self.resize(size)
@@ -924,15 +937,18 @@ class MapOverlay(Overlay):
         self.canvas.config(width=w, height=h)
         self.canvas.coords(self.border, 0, 0, w - 1, h - 1)
         self.canvas.coords(self.note, w / 2, round(8 * self.k))
+        self.stop_shown = None
         self._caption()
         self.win.update_idletasks()
         self._place()
 
-    def show(self, watch):
-        self.update(watch)
+    def show(self, watch, stop=None, imperial=False):
+        self.update(watch, stop, imperial)
         super().show()
 
-    def update(self, watch):
+    def update(self, watch, stop=None, imperial=False):
+        """`stop`: the next stop readout (tsw_stops.StopTracker.state), or None; `imperial`: its distance in miles
+        and yards."""
         if watch.map is not self.map:
             self._load(watch.map)
         if self.map is None:
@@ -942,6 +958,7 @@ class MapOverlay(Overlay):
             self._follow(watch.centre)
         missing = self._pieces(watch.done) if self.view is not None else True
         self._mark(watch, missing)
+        self._next_stop(watch, stop, imperial)
 
     def _place(self):
         """In its corner of the screen."""
@@ -1005,20 +1022,21 @@ class MapOverlay(Overlay):
                          self.view[1] + (target[1] - self.view[1]) * self.EASE)
 
     def _pieces(self, done):
-        """The map's pieces in view, one more loaded each time round (each takes a few hundredths of a second),
-        those far away let go. Returns whether some of the view isn't drawn yet."""
+        """The map's pieces in view, one more loaded each time round (each takes about a hundredth of a second), or
+        all those drawn at once on a map just come (another zoom shows whole), those far away let go. Returns
+        whether some of the view isn't drawn yet."""
         c, size, meta = self.canvas, tsw_livemap.CHUNK, self.map
         vx, vy = round(self.view[0]), round(self.view[1])
         w, h = self.size
         mw, mh = meta["size"]
         cells = [(i, j) for i in range(max(0, vx // size), min((vx + w - 1) // size, (mw - 1) // size) + 1)
                  for j in range(max(0, vy // size), min((vy + h - 1) // size, (mh - 1) // size) + 1)]
-        missing, loaded = False, False
+        missing, loaded, fresh = False, False, not self.pieces
         for cell in cells:
             have = self.pieces.get(cell)
             if have and have[2] == meta["stamp"]:
                 continue
-            if cell not in done or loaded:
+            if cell not in done or (loaded and not fresh):
                 missing = missing or cell not in done
                 continue
             try:
@@ -1063,6 +1081,67 @@ class MapOverlay(Overlay):
                 else "Drawing this part of the map..." if missing else "")
         if c.itemcget(self.note, "text") != note:
             c.itemconfigure(self.note, text=note)
+
+    def _next_stop(self, watch, stop, imperial):
+        """How far the next stop is, in the top left corner (the note goes below it), and a ring where it is."""
+        c, k = self.canvas, self.k
+        shown = self.stop_lines(stop, imperial, self.PASSED, self.EDGE)
+        if shown != self.stop_shown:
+            self.stop_shown = shown
+            far, colour, what = shown
+            pad, w = 6 * k, self.size[0]
+            top = round(8 * k)
+            if what:
+                c.coords(self.stop_far, 2 * pad, 1.5 * pad)
+                c.itemconfigure(self.stop_far, text=far, fill=colour, state="normal" if far else "hidden")
+                c.coords(self.stop_what, 2 * pad, (c.bbox(self.stop_far)[3] + k) if far else 1.5 * pad)
+                c.itemconfigure(self.stop_what, text=what, width=max(1, w - 4 * pad), state="normal")
+                x0, y0, x1, y1 = c.bbox(self.stop_far, self.stop_what)
+                c.coords(self.stop_box, x0 - pad, y0 - pad / 2, x1 + pad, y1 + pad / 2)
+                c.itemconfigure(self.stop_box, state="normal")
+                top = round(y1 + pad / 2 + 6 * k)
+            else:
+                for item in (self.stop_box, self.stop_far, self.stop_what):
+                    c.itemconfigure(item, state="hidden")
+            c.coords(self.note, w / 2, top)
+        place = self._stop_place(watch, stop)
+        if place is None:
+            for item in (self.stop_halo, self.stop_ring):
+                c.itemconfigure(item, state="hidden")
+            return
+        px, py = tsw_livemap.to_px(self.map, *place)
+        x, y, r = px - round(self.view[0]), py - round(self.view[1]), 10 * k
+        for item in (self.stop_halo, self.stop_ring):
+            c.coords(item, x - r, y - r, x + r, y + r)
+            c.itemconfigure(item, state="normal")
+
+    @staticmethod
+    def stop_lines(stop, imperial, passed, colour):
+        """(distance, its colour, the stop and the one after a go-via) as the corner says them; ("", colour, "")
+        when there's no next stop."""
+        if not stop or not stop["label"]:
+            return "", colour, ""
+        if stop["metres"] is None:
+            return "", colour, f"{stop['label']}\n{stop['text']}"
+        far = ("≈ " if stop["estimated"] else "") + tsw_units.distance(stop["metres"], imperial)
+        what = stop["label"]
+        if stop["then"]:
+            what += f"\nthen {stop['then'][0].lower()}{stop['then'][1:]}" + (
+                "" if stop["then_metres"] is None else " in " + tsw_units.distance(stop["then_metres"], imperial))
+        return far, passed if stop["metres"] < -1 else colour, what
+
+    def _stop_place(self, watch, stop):
+        """Where on the map the next stop is, (x, y) in the world, or None: not this map's service, or not one of its
+        stops, or further from you than its distance can be (the map is another part of the service's)."""
+        meta = self.map
+        if not stop or stop.get("at") is None or stop.get("service") != meta.get("service") or self.view is None \
+                or watch.off_line:
+            return None
+        place = next(((x, y) for m, x, y in meta.get("stops") or () if abs(m - stop["at"]) < 1), None)
+        if place is None or watch.position is None or stop["metres"] is None:
+            return place
+        far = abs(stop["metres"])
+        return place if math.dist(place, watch.position) <= far * 1.1 + self.STOP_SLACK else None
 
 
 # ---------------------------------------------------------------- window
@@ -1198,6 +1277,7 @@ class App:
         self.speed_watch.start()
         self.comfort.start()
         self.map_watch.view, self.map_watch.zoom = self._map_view(), self.s["map_zoom"]
+        self.map_watch.auto = self.s["map_auto_zoom"]
         self.map_watch.unit_px = tsw_livemap.UNIT_PX * self.k
         self.map_watch.start()
         self.log("Bridge started" + (" (paused)" if start_paused else ""))
@@ -1420,6 +1500,9 @@ class App:
                                                                          pady=3, padx=(0, 14))
         zoom_row = ttk.Frame(grid, style="Panel.TFrame")
         zoom_row.grid(row=row, column=1, columnspan=3, sticky="w", pady=3)
+        self.map_auto_var = tk.BooleanVar(value=self.s["map_auto_zoom"])
+        ttk.Checkbutton(zoom_row, text="By speed", variable=self.map_auto_var, style="Panel.TCheckbutton",
+                        command=self.on_map_auto_zoom).pack(side="left", padx=(0, 12))
         ttk.Label(zoom_row, text="Closer", style="Muted.TLabel").pack(side="left", padx=(0, 6))
         self.map_zoom_scale = ttk.Scale(zoom_row, from_=0, to=len(tsw_livemap.ZOOMS) - 1, length=round(110 * self.k),
                                         value=tsw_livemap.ZOOMS.index(self.s["map_zoom"]), command=self.on_map_zoom)
@@ -1548,6 +1631,8 @@ class App:
 
     def on_map_zoom(self, value):
         self.s["map_zoom"] = tsw_livemap.ZOOMS[round(float(value))]
+        if self.s["map_auto_zoom"]:                   # a zoom picked: not by speed any more
+            self._set_auto_zoom(False)
         self._show_map_zoom()
 
     def on_map_zoom_done(self, _event=None):
@@ -1557,8 +1642,28 @@ class App:
             self.map_watch.zoom = self.s["map_zoom"]
             self.map_watch.last_check = 0.0           # drawn at that zoom (about 15 s the first time)
 
+    def on_map_auto_zoom(self):
+        self._set_auto_zoom(bool(self.map_auto_var.get()))
+
+    def _set_auto_zoom(self, on):
+        """The route map zooms by speed (tsw_livemap.speed_zoom), or stays at the zoom picked."""
+        self.s["map_auto_zoom"] = on
+        self.map_auto_var.set(on)
+        save_settings(self.s)
+        self.map_watch.auto = on
+        if not on:
+            self.map_watch.zoom = self.s["map_zoom"]
+        self.map_watch.last_check = 0.0
+        self._show_map_zoom()
+
     def _show_map_zoom(self):
-        across = self._map_view()[0] * self.s["map_zoom"]
+        w = self._map_view()[0]
+        if self.s["map_auto_zoom"]:
+            near, far = (w * z for z in (tsw_livemap.AUTO_ZOOMS[0], tsw_livemap.AUTO_ZOOMS[-1]))
+            self.map_zoom_label.config(text=f"by speed: {near / 1000:.1f}-{far / 1000:.1f} km "
+                                            f"({near / 1609.344:.1f}-{far / 1609.344:.1f} mi) across")
+            return
+        across = w * self.s["map_zoom"]
         self.map_zoom_label.config(text=f"{self.s['map_zoom']:g} m a pixel: {across / 1000:.1f} km "
                                         f"({across / 1609.344:.1f} mi) across")
 
@@ -1578,6 +1683,7 @@ class App:
         """Its joystick button or key shows the route map, or hides it."""
         self.map_shown = not self.map_shown
         self.map_watch.shown = self.map_shown
+        self.tracker.shown = bool(self.stop_held) or self.map_shown
         if self.map_shown:
             self.map_watch.wanted = True          # from now on, maps are made as services start
             self.map_watch.last_check = 0.0
@@ -1775,8 +1881,8 @@ class App:
             self.stop_held.discard(source)
         if bool(self.stop_held) == shown:
             return
-        self.tracker.shown = bool(self.stop_held)
-        if self.tracker.shown:
+        self.tracker.shown = bool(self.stop_held) or self.map_shown      # the map says how far it is too
+        if self.stop_held:
             self.overlay.show(self.tracker.state, self.speed_watch)
         else:
             self.overlay.hide()
@@ -2215,9 +2321,10 @@ class App:
             else:
                 self.comfort_overlay.hide()
             raised = False                           # the map goes under the panels
+            self.map_watch.speed = self.bridge.speed     # for the zoom by speed
             if self.map_shown:
                 raised = not self.map_overlay.shown
-                self.map_overlay.show(self.map_watch)
+                self.map_overlay.show(self.map_watch, self.tracker.state, self.speed_watch.imperial)
             else:
                 self.map_overlay.hide()
             raised = self.map_overlay.keep_on_top() or raised

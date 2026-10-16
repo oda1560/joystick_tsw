@@ -143,6 +143,19 @@ class FirstStop(unittest.TestCase):
         self.assertFalse(self.at(5, 5)["first"])
 
 
+class Readout(unittest.TestCase):
+    def test_it_says_the_service_and_where_along_it_the_stop_is(self):
+        """For the route map's ring on the stop (tsw_livemap.stop_places)."""
+        tracker = tsw_stops.StopTracker()
+        tracker.path = types.SimpleNamespace(name="2H26")
+        tracker._say("", tsw_stops.Target("stop", 2, None, 22069.4, "Bingley Platform 2"), 812.0)
+        s = tracker.state
+        self.assertEqual((s["label"], s["metres"], s["service"], s["at"]),
+                         ("Stop at Bingley · Platform 2", 812.0, "2H26", 22069.4))
+        tracker._say("No more stops")
+        self.assertEqual((tracker.state["service"], tracker.state["at"]), (None, None))
+
+
 class RouteName(unittest.TestCase):
     def test_from_the_timetable_id(self):
         self.assertEqual(tsw_stops.route_name("/MedwayValley/Map/MVL:PersistentLevel.SandboxRouteTimetable_1.T"),

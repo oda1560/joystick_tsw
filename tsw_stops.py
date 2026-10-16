@@ -20,7 +20,8 @@ at the first stop.
 
     tracker = StopTracker(); tracker.start()
     tracker.state      # {"text": message, "label": "Stop at ...", "metres": to go, "estimated": ...,
-                       #  "then": the stop after a go-via, "then_metres": to go}
+                       #  "then": the stop after a go-via, "then_metres": to go, "service": the path's name,
+                       #  "at": the stop's metres along that path}
     tracker.stop       # while stopped at a stop, else None: {"phase": "wait" / "close" (the doors) / "depart" /
                        #  "signal" (wait for it) / "end" (of the service), "station": name, "now", "departs" (game
                        #  seconds after midnight; departs None if not timed), "left": seconds to departure,
@@ -343,8 +344,8 @@ class StopTracker(threading.Thread):
         self.running = True
         self.shown = False
         self.points = tsw_score.Points()
-        self._say("Starting...")
         self._reset(None)
+        self._say("Starting...")
         self.last_service_check = 0.0
 
     def _reset(self, service):
@@ -371,7 +372,9 @@ class StopTracker(threading.Thread):
 
     def _say(self, text, target=None, metres=None, estimated=False, then=None, then_metres=None):
         self.state = {"text": text, "label": target.label() if target else "", "metres": metres,
-                      "estimated": estimated, "then": then.label() if then else "", "then_metres": then_metres}
+                      "estimated": estimated, "then": then.label() if then else "", "then_metres": then_metres,
+                      "service": self.path.name if target and self.path else None,
+                      "at": target.metres if target else None}
 
     def _wanted(self, target):
         """Go-vias without a name are only shown when the game makes objectives of them (they may only be there

@@ -13,7 +13,7 @@ It also shows small panels over the game while you drive:
 - **Speeding**: the limit pops up by itself when you go over it.
 - **Passenger comfort**: a warning on firm or harsh braking and acceleration, and a prompt to ease off the brake just before you stop.
 - **End of service**: how the run went against your best before.
-- **Route map**: press button 12 or F7 for a small see-through map of where you are on your service's line, following you.
+- **Route map**: press button 12 or F7 for a small see-through map of where you are on your service's line, following you, with how far the next stop is.
 
 Two tools work without driving: **Route maps** prints a speed-limit map for any service or a whole route, and the **train checker** tests the bridge against every train you own.
 
@@ -220,11 +220,14 @@ Click **Service history** in Settings to see every service you've driven to the 
 
 ### Route map
 
-Press button 12 or F7 for a small see-through window with the map around you: a blue dot where you are and an arrow the way you're going; press again to hide it. The window follows you, a little ahead of you so you see more of what's coming. It's the map of the service you're driving, both ways along its line, drawn like the first page of a whole-route map (see Offline tools) but larger: limit colours, boards where to slow down, every station, the limit along long stretches, and landmarks. In the corner are the service and a scale bar. At the start it shows about 5.6 km (3.5 miles) across.
+Press button 12 or F7 for a small see-through window with the map around you: a blue dot where you are and an arrow the way you're going; press again to hide it. The window follows you, a little ahead of you so you see more of what's coming. It's the map of the service you're driving, both ways along its line, drawn like the first page of a whole-route map (see Offline tools) but larger: limit colours, boards where to slow down, every station, the limit along long stretches, and landmarks. In the corner are the service and a scale bar. It zooms in and out with your speed (below).
+
+- **Next stop**: the top left corner says how far the next stop or go-via is and its name, the same as the next stop panel (button 11 or F6), so you don't need to hold anything. After a go-via it also says the stop that follows. A pink ring marks the stop on the map once it's in view. The ring is left off when the map isn't your service's own, such as the whole route.
 
 - **The first time**: the map is made when you first press, and from then on as you start each service. A service's map takes about 15 s; the first time on a route, the tunnels, bridges and water take half a minute more, so the map comes without them first. Then the window draws the part you're in first (about half a second a piece), the rest of the line after, so "Drawing this part of the map..." shows only briefly. Maps are kept, so after that it's there at once.
 - **No service**: free roaming, or a service the files don't have, gives the whole route's map from the timetable the game is running.
-- **See-through, size, corner and zoom**: under **Route map view** and **Route map zoom** in Settings. A new zoom is made like a new service (about 15 s), the old one shown till then. Clicks pass through the window, and the other panels stay on top of it.
+- **Zoom by speed** (on to start): the map comes in close when you're slow or stopped and goes further out at line speed, so it always shows about the next minute of your run. In the standard window (27% of the screen's width), it's 3 m a pixel up to about 50 mph, 5 up to about 83 mph, 8 up to about 128 mph and 12 above that. It changes a few seconds after your speed does, and once it has changed it stays at least 8 s, so it doesn't go back and forth. The maps at all four zooms are made together when the service starts, about 11 s in all. At each change the window stays at the old zoom until the new one is drawn where you are, so it never goes blank.
+- **See-through, size, corner and zoom**: under **Route map view** and **Route map zoom** in Settings. Untick **By speed**, or move the zoom slider, to keep one zoom. A new zoom is made like a new service (about 15 s), the old one shown till then. Clicks pass through the window, and the other panels stay on top of it.
 - **F7 is also the game's**: in Train Sim World 7 it steps the destination display back, so pressing it changes the destination on trains that have one. Button 12 does nothing else; to use a key the game leaves free, pick one under **Route map key** (F10, F11, 6, 7, -, =, Num *, Num /, Scroll Lock, Pause).
 - **Where you are** comes from the latitude and longitude the game gives, placed the way the game lays out its world. Checked on Airedale & Wharfedale, where it's within a few metres of the track. If the panel says you're not on the map's line, the route lays its world out differently: the bridge log says how far off it was.
 
@@ -292,7 +295,7 @@ Everything is set in the bridge window and saved as soon as you change it. The a
 | Next stop key | The keyboard key that shows the next stop while held (F6), or Not set |
 | Route map key | The keyboard key that shows and hides the route map (F7), or Not set. One key can't do both this and the next stop |
 | Route map view: See-through · Size · Where | How much of the game shows through the map (0–70%), how much of the screen's width it takes (27% to start), and which corner it's in |
-| Route map zoom | How close the map is: 3 to 30 metres a pixel (8 to start); the label says how far across that shows |
+| Route map zoom: By speed · Closer / Further | By speed (on to start): closer when slow, further when fast, between 3 and 12 metres a pixel. The slider picks one zoom instead, 3 to 30 metres a pixel, and moving it turns By speed off. The label says how far across that shows |
 | Keep this window on top | Keeps the bridge window over other windows |
 | Show the limit when speeding | The speeding panel |
 | Show what to do at stops | The stop, schedule and service complete panels |
