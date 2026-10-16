@@ -8,10 +8,12 @@ Class 70 is CL70_FL_RVM_C; the RVM_AABS_Class70 in its pack is an old one).
 import os
 import sys
 import unittest
+from types import SimpleNamespace
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import tsw_paks  # noqa: E402
 import tsw_check  # noqa: E402
+import tsw_joystick as core  # noqa: E402
 import tsw_joystick_ui as ui  # noqa: E402
 
 ROOT = "TS2Prototype/Plugins/DLC/AABS_Class70/Content/"
@@ -59,11 +61,48 @@ class VehicleClasses(unittest.TestCase):
                        {"/AABS_Class70/Data/RVD_Y": Definition("/Other/Simulation/Y_RVM.Y_RVM_C")})
         self.assertEqual(f.vehicle_classes(), {})
 
+    def test_controls_the_blueprints_react_to(self):
+        f = tsw_paks.GameFiles.__new__(tsw_paks.GameFiles)
+        blueprint = SimpleNamespace(names=[
+            "BndEvt__VigilancePedal_F_K2Node_ComponentBoundEvent_35_VirtualHIDChangedSignature__DelegateSignature",
+            "BndEvt__(Push Button) AWS_K2Node_ComponentBoundEvent_2_VirtualHIDChangingSignature__DelegateSignature",
+            "BndEvt__BP_DVD_Service_K2Node_ComponentBoundEvent_0_OnPenaltyBrakeStateChanged__DelegateSignature",
+            "AlerterReset", "UpdateVigilancePedal"])
+        f.class_chain = lambda cls, package: [(blueprint, 1)]
+        self.assertEqual(f.bound_controls("CL70_FL_RVM_C", "/AABS_Class70/Simulation/CL70_FL_RVM"),
+                         {"VigilancePedal_F", "(Push Button) AWS"})
+
     def test_names_shown(self):
         self.assertEqual(tsw_check.short("CL70_FL_RVM_C"), "CL70_FL")
         self.assertEqual(tsw_check.short("RVM_AABS_Class70_C"), "AABS_Class70")
         self.assertEqual(ui.pretty_train("CL70_FL_RVM_C"), "CL70 FL")
         self.assertEqual(ui.pretty_train("RVM_LNWR_Class350-1_DMS2_C"), "LNWR Class350-1 DMS2")
+
+
+class Alerter(unittest.TestCase):
+    """Which vigilance button the bridge works, where the files say what the train's blueprints react to."""
+
+    @staticmethod
+    def handle(bound, env):
+        return SimpleNamespace(bound=bound, env=env)
+
+    def test_class70_key_only_button_the_blueprints_ignore_goes_last(self):
+        handles = {"AlerterReset": self.handle(False, "None"),
+                   "VigilancePedal_F": self.handle(True, "Driver_F (Environment)")}
+        names = list(handles)
+        self.assertTrue(core.ignored_alerter(handles, names, "AlerterReset"))
+        self.assertFalse(core.ignored_alerter(handles, names, "VigilancePedal_F"))
+
+    def test_cab_button_the_blueprints_ignore_still_counts(self):
+        # MBTA HSP46: ResetAlerter is on the desk; the game's own alerter reads it without a blueprint
+        handles = {"ResetAlerter": self.handle(False, "Engineer (InteractionEnvironment)"),
+                   "Acknowledge_R": self.handle(True, "Engineer (InteractionEnvironment)")}
+        self.assertFalse(core.ignored_alerter(handles, list(handles), "ResetAlerter"))
+
+    def test_nothing_bound_or_no_files_changes_nothing(self):
+        handles = {"AlerterReset": self.handle(False, "None"), "Pedal": self.handle(False, "Cab")}
+        self.assertFalse(core.ignored_alerter(handles, list(handles), "AlerterReset"))
+        self.assertFalse(core.ignored_alerter({}, ["AlerterReset", "Pedal"], "AlerterReset"))
 
 
 if __name__ == "__main__":

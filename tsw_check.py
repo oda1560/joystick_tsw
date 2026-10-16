@@ -362,7 +362,7 @@ def check_train(train, package, files, cab=None):
         if bm.interacting:
             result.problems.append(f"{b.name} is still held after the bridge lets go")
     check_reverser(result, controls, model)
-    check_buttons(result, controls, model)
+    check_buttons(result, controls, model, files.bound_controls(train, package))
     for m in messages:
         result.lines.append(f"  bridge said: {m}")
 
@@ -448,7 +448,8 @@ def check_reverser(result, controls, model):
         result.problems.append(f"reverser {rev.name}: " + "; ".join(wrong))
 
 
-def check_buttons(result, controls, model):
+def check_buttons(result, controls, model, bound=frozenset()):
+    """bound: the controls the train's blueprints react to (GameFiles.bound_controls)."""
     found = []
     for name, label in (("aws", "AWS"), ("alerter", "alerter")):
         button = getattr(controls, name)
@@ -465,10 +466,13 @@ def check_buttons(result, controls, model):
         result.problems.append("the train has an alerter / DSD / SIFA but the bridge didn't find it")
     a = controls.alerter
     if a and model[a.name].rests_down():
-        # a DSD pedal the game holds down, where the train has a button to acknowledge with (Class 142, 47)
+        # a DSD pedal the game holds down, where the train has a button to acknowledge with (Class 142, 47);
+        # not one in no part of the cab that the blueprints ignore while they react to the pedal (Class 70
+        # AlerterReset)
         resets = [c.name for c in model.values() if c.enabled and c.base == "PushButtonComponent"
                   and not c.rests_down() and c.ident.lower().replace("_", "") in tj.ALERTER_IDS
-                  and (controls.cab is None or c.side in (None, controls.cab))]
+                  and (controls.cab is None or c.side in (None, controls.cab))
+                  and not (c.name not in bound and c.env == "None" and a.name in bound)]
         if resets:
             result.problems.append(f"alerter: the bridge works {a.name}, which the game holds down, rather "
                                    f"than the button {resets[0]}")

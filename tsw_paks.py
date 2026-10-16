@@ -651,6 +651,18 @@ class GameFiles:
         self._components[(cls, package)] = found
         return found
 
+    def bound_controls(self, cls, package):
+        """Names of the components a vehicle's blueprints run something on when they're moved (a bound
+        VirtualHIDChanged event). The Class 70's vigilance resets on VigilancePedal_F / _B this way; nothing is
+        bound to its AlerterReset. Controls the game's C++ reads itself (an alerter's reset, mostly) have none."""
+        out = set()
+        for pkg, _ in self.class_chain(cls, package):
+            for name in pkg.names:
+                m = re.match(r"BndEvt__(.+)_K2Node_ComponentBoundEvent_\d+_VirtualHIDChang(?:ed|ing)Signature__", name)
+                if m:
+                    out.add(m.group(1))
+        return out
+
     def pack_of(self, package):
         """Name of the .pak a package comes from, e.g. 'BRClass380' (DLC) or 'Base game'."""
         path = self.file_of(package)

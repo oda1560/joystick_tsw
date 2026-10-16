@@ -343,11 +343,25 @@ def train_handles(train, names=None, wait=30.0):
         packages = classes.get(train)
         if not packages:
             return {}
-        comps = files.components(train, files.matching_package(train, packages, names))
+        package = files.matching_package(train, packages, names)
+        comps = files.components(train, package)
         sides = tsw_handles.cab_sides(comps)
-        return {name: tsw_handles.Control(c, sides.get(name)) for name, c in comps.items()}
+        handles = {name: tsw_handles.Control(c, sides.get(name)) for name, c in comps.items()}
+        bound = files.bound_controls(train, package)
+        for name, m in handles.items():
+            m.bound = name in bound
+        return handles
     except Exception:
         return {}
+
+
+def ignored_alerter(handles, names, name):
+    """True for a vigilance button that's in no part of the cab and that the train's blueprints don't react to,
+    where they do react to another of `names` (from train_handles; False without the game files). The Class 70's
+    AlerterReset: its vigilance is reset only from the pedals."""
+    m = handles.get(name)
+    return bool(m is not None and m.bound is False and m.env == "None"
+                and any(getattr(handles.get(n), "bound", False) for n in names))
 
 
 def driving_cabs(handles):
@@ -1950,9 +1964,13 @@ class TrainControls:
                         and not any(x in n.lower() for x in ALERTER_NAME_SKIP) and self._enabled(n)])
         if alerters:
             # where a train has both, use a push button rather than a pedal the game holds down, and a cab
-            # control before anything else found by name
+            # control before anything else found by name. Last of all a button in no part of the cab that the
+            # train's blueprints ignore while they react to another (game files): the Class 70's vigilance
+            # (BP_DVD_Service) is reset from its VigilancePedal_F / _B, and nothing is bound to its AlerterReset
+            # (the Q key, left from the US loco it's built on, for an alerter that's switched off)
             self.alerter = min((PushButton(self.api, n) for n in alerters),
-                               key=lambda b: (not b.is_control, b.pressed < b.released))
+                               key=lambda b: (not b.is_control, ignored_alerter(handles, alerters, b.name),
+                                              b.pressed < b.released))
         self._detect_doors(names)
 
         r = (next((n for n, i in ids if any(k in i.lower() for k in REVERSER_IDS)), None)
