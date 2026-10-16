@@ -61,6 +61,7 @@ class Control:
         self.name, self.cls, self.base, self.props = comp.name, comp.cls, comp.base, p
         self.side = side
         self.bound = None                # whether the train's blueprints react to it (see GameFiles.bound_controls)
+        self.mirror = None               # a lever just like it that it passes its moves to (see train_handles)
         self.vhid = comp.base in VHID_BASES or any(k in p for k in LEVER_KEYS)
         ident = p.get("InputIdentifier")
         self.ident = str(ident.get("Identifier") or "None") if isinstance(ident, dict) else "None"

@@ -350,6 +350,15 @@ def train_handles(train, names=None, wait=30.0):
         bound = files.bound_controls(train, package)
         for name, m in handles.items():
             m.bound = name in bound
+            # a cab handle that passes its moves to another lever (SlaveVHIDComponent), the one the train reads:
+            # the Class 70's brake valve takes F_AutomaticBrake's moves from AutomaticBrake. Set through the
+            # API, the game passed them on only some of the time (seen 2026-10-15: the stick at full brake for
+            # seconds, AutomaticBrake left at Release), so the bridge sets that lever too, where it's the same
+            slave = m.props.get("SlaveVHIDComponent")
+            other = handles.get(slave.get("ComponentName")) if isinstance(slave, dict) else None
+            if (other is not None and other is not m and m.lever and other.lever and other.vhid
+                    and other.points == m.points and other.notches == m.notches):
+                m.mirror = other.name
         return handles
     except Exception:
         return {}
@@ -374,6 +383,8 @@ def driving_cabs(handles):
 class Lever:
     """One controllable lever, its safe input range and (for combined levers) neutral point."""
 
+    mirror_path = None                    # the lever it passes its moves to, set too (see _send)
+
     def __init__(self, api, name, ident="", train=None, role="throttle", model=None):
         """role: "throttle" (incl. a combined power/brake handle), "brake" (a separate train brake) or
         "reverser". model: the handle's settings from the game files (tsw_handles.Control), if read."""
@@ -381,6 +392,8 @@ class Lever:
         self.name = name
         self.ident = ident or ""
         self.path = f"CurrentDrivableActor/{name}.InputValue"
+        mirror = getattr(model, "mirror", None)
+        self.mirror_path = f"CurrentDrivableActor/{mirror}.InputValue" if mirror else None   # see _send
         self.lo, self.hi = self._range()
         self.note = ""
         brake = role == "brake"
@@ -572,10 +585,20 @@ class Lever:
         hold = value != self.positions[1]
         if hold and not self.held:
             self._interact(True)
-        self.api.set(self.path, value)
+        self._send(value)
         self._last_sent = (value, time.time())
         if not hold and self.held:
             self._interact(False)
+
+    def _send(self, value):
+        """Send the handle to input value, and the lever it passes its moves to, where that's just like it
+        (mirror_path: the Class 70's brake and reverser, see train_handles)."""
+        self.api.set(self.path, value)
+        if self.mirror_path:
+            try:
+                self.api.set(self.mirror_path, value)
+            except Exception:
+                pass                       # the game passes most moves on itself
 
     def _interact(self, on):
         self.api.set(f"CurrentDrivableActor/{self.name}.Interacting", 1.0 if on else 0.0)
@@ -841,7 +864,7 @@ class Lever:
             slope = -slope
         x, prev = self.neutral, None
         for _ in range(25):
-            self.api.set(self.path, x)
+            self._send(x)
             time.sleep(0.05)
             out = self._get("Function.GetCurrentOutputValue").get("ReturnValue")
             if not isinstance(out, (int, float)):
@@ -927,7 +950,7 @@ class Lever:
             return abs(target - out) <= 0.01 * (b_hi - b_lo)
 
         def reading(x):
-            self.api.set(self.path, x)
+            self._send(x)
             time.sleep(0.05)
             out = self._get("Function.GetCurrentOutputValue").get("ReturnValue")
             return float(out) if isinstance(out, (int, float)) and b_lo <= out <= b_hi else None
@@ -947,7 +970,7 @@ class Lever:
                   if None not in (o1, o2)]
         if (len(slopes) < 2 or not slopes[0] or slopes[0] * slopes[1] <= 0
                 or max(abs(s) for s in slopes) > 1.5 * min(abs(s) for s in slopes)):
-            self.api.set(self.path, start)
+            self._send(start)
             return None
         slope = sum(slopes) / 2
         limit = self._brake_limit()
@@ -978,7 +1001,7 @@ class Lever:
             x, out, at = nx, nout, nat
         further = (x - start) * (start - self.neutral) > 1e-6     # more braking than before
         best = x if further else start
-        self.api.set(self.path, best)
+        self._send(best)
         self._last_sent = (best, time.time())
         if not further:
             return None
@@ -1001,7 +1024,7 @@ class Lever:
             self._set_valve(value)
             return None
         previous = self._last_sent[0]
-        self.api.set(self.path, value)
+        self._send(value)
         self._last_sent = (value, time.time())
         if self.model is not None and previous is not None and self.model.gated_between(previous, value):
             # a gated notch on the way stops the handle short (M3a: P1 on the way to P4): send it again
@@ -1010,7 +1033,7 @@ class Lever:
                 x = self._get("InputValue").get("InputValue")
                 if not isinstance(x, (int, float)) or abs(x - value) < 1e-3:
                     break
-                self.api.set(self.path, value)
+                self._send(value)
         if (self.notches and not self._exact_notches and len(self._notches_confirmed) < 3
                 and round(value, 4) not in self._notches_confirmed):
             return self._check_notch(value)
@@ -1036,7 +1059,8 @@ class Lever:
 
     def __repr__(self):
         text = f"{self.name} [{self.safe_lo:.3g}..{self.safe_hi:.3g}]"
-        note = ", ".join(n for n in (self.note, "runs backwards" if self.out_backwards else "") if n)
+        mirror = f"also sets {self.mirror_path.split('/')[1].split('.')[0]}" if self.mirror_path else ""
+        note = ", ".join(n for n in (self.note, "runs backwards" if self.out_backwards else "", mirror) if n)
         return f"{text} ({note})" if note else text
 
 
@@ -1248,7 +1272,7 @@ class Reverser:
         Neutral), so it is sent again while that gets it further."""
         last = None
         for _ in range(3):
-            self.api.set(self.path, x)
+            self.lever._send(x)
             out = None
             for wait in (0.05, 0.1, 0.15):
                 time.sleep(wait)
@@ -1279,7 +1303,7 @@ class Reverser:
                 time.sleep(0.1)
                 if self.position() == position:
                     return
-                self.api.set(self.path, x)
+                self.lever._send(x)
             return
         before = (self._input(), self._output())
         x = self.notches[position]
@@ -1366,7 +1390,9 @@ class Reverser:
             text += f", Neutral is its '{self.neutral_label.title()}'"
         elif "neutral" in self.notches and "neutral" not in [reverser_label(z[2]) for z in self.lever.zones]:
             text += ", Neutral is its unnamed middle notch"
-        return f"{self.name} ({text}{', runs backwards' if self.backwards else ''})"
+        mirror = self.lever.mirror_path.split("/")[1].split(".")[0] if self.lever.mirror_path else None
+        return (f"{self.name} ({text}{', runs backwards' if self.backwards else ''}"
+                f"{f', also sets {mirror}' if mirror else ''})")
 
 
 class PushButton:

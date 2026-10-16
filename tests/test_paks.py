@@ -105,5 +105,50 @@ class Alerter(unittest.TestCase):
         self.assertFalse(core.ignored_alerter({}, ["AlerterReset", "Pedal"], "AlerterReset"))
 
 
+class LinkedLever(unittest.TestCase):
+    """A cab handle that passes its moves to another lever (SlaveVHIDComponent): the Class 70's brake valve reads
+    AutomaticBrake, which F_AutomaticBrake / B_AutomaticBrake pass their moves to. Set through the API, the game
+    passed them on only some of the time, so the bridge sets that lever too, where it's just like the handle."""
+
+    BRAKE = [{"InputValue": 0.0, "OutputValue": -1.0}, {"InputValue": 0.2, "OutputValue": 0.0},
+             {"InputValue": 0.6, "OutputValue": 1.0}]
+
+    def handles(self, master_map, slave_map):
+        lever = "IrregularLeverComponent"
+        comps = {"F_AutomaticBrake": tsw_paks.Component("F_AutomaticBrake", lever, lever, {
+                     "ValueMap": master_map, "SlaveVHIDComponent": {"ComponentName": "AutomaticBrake"},
+                     "InputIdentifier": {"Identifier": "AutomaticBrake"}}),
+                 "AutomaticBrake": tsw_paks.Component("AutomaticBrake", lever, lever, {"ValueMap": slave_map})}
+        files = SimpleNamespace(vehicle_classes=lambda: {"CL70_FL_RVM_C": ["/P"]},
+                                matching_package=lambda cls, packages, names: "/P",
+                                components=lambda cls, package: comps, bound_controls=lambda cls, package: set())
+        saved = core._game_files
+        try:
+            core.use_game_files(files)
+            return core.train_handles("CL70_FL_RVM_C")
+        finally:
+            core._game_files = saved
+
+    def test_class70_brake_passes_its_moves_to_automaticbrake(self):
+        handles = self.handles(self.BRAKE, self.BRAKE)
+        self.assertEqual(handles["F_AutomaticBrake"].mirror, "AutomaticBrake")
+        self.assertIsNone(handles["AutomaticBrake"].mirror)
+
+    def test_lever_on_another_scale_is_left_to_the_game(self):
+        # BR 101: TrainBrake passes its moves to a lever with a different table
+        other = [{"InputValue": 0.0, "OutputValue": 0.0}, {"InputValue": 1.0, "OutputValue": 5.0}]
+        self.assertIsNone(self.handles(self.BRAKE, other)["F_AutomaticBrake"].mirror)
+
+    def test_both_levers_sent(self):
+        sent = []
+        lever = core.Lever.__new__(core.Lever)
+        lever.api = SimpleNamespace(set=lambda path, value: sent.append((path, value)))
+        lever.path = "CurrentDrivableActor/F_AutomaticBrake.InputValue"
+        lever.mirror_path = "CurrentDrivableActor/AutomaticBrake.InputValue"
+        lever._send(0.6)
+        self.assertEqual(sent, [("CurrentDrivableActor/F_AutomaticBrake.InputValue", 0.6),
+                                ("CurrentDrivableActor/AutomaticBrake.InputValue", 0.6)])
+
+
 if __name__ == "__main__":
     unittest.main()
