@@ -378,5 +378,66 @@ class Doors(unittest.TestCase):
         self.assertEqual(controls.door_close_left.name, "DoorCloseInterlock_L(PushButton)")
 
 
+class Class350Vigilance(core.TSWApi):
+    """The Class 350's two vigilance controls with the "Alerter" identifier, as the game reported them
+    (2026-10-17): VigilancePedal, which the train reacts to, counts backwards (resting at 1, pressed at 0), and
+    PushButton_DSD_Pedal is switched off in the game files but was taken for switched on as a save loaded."""
+
+    def __init__(self, dsd_on=True):
+        super().__init__()
+        self.key = "key"
+        self.on = {"VigilancePedal": True, "PushButton_DSD_Pedal": dsd_on}
+        self.sent = []                     # (control, what, value)
+
+    def _req(self, method, path, params=None):
+        if path == "list/CurrentDrivableActor":
+            return {"Result": "Success", "Nodes": [{"Name": n} for n in self.on]}
+        verb, _, rest = path.partition("/CurrentDrivableActor/")
+        node, _, endpoint = rest.partition(".")
+        if node not in self.on:
+            return {"Result": "Error"}
+        if verb == "set":
+            self.sent.append((node, endpoint, float(params["Value"])))
+            return {"Result": "Success"}
+        lo, hi = (1, 0) if node == "VigilancePedal" else (0, 1)
+        values = {
+            "Property.InputIdentifier": {"identifier": "Alerter"},
+            "Property.bInputEnabled": {"Value": self.on[node]},
+            "ObjectClass": {"ObjectClass": "PushButtonComponent"},
+            "Function.GetMinimumInputValue": {"ReturnValue": lo},
+            "Function.GetMaximumInputValue": {"ReturnValue": hi},
+            "Function.GetDefaultInputValue": {"ReturnValue": lo},
+        }.get(endpoint)
+        return {"Result": "Success", "Values": values} if values else {"Result": "Error"}
+
+
+class Vigilance(unittest.TestCase):
+    def detect(self, api):
+        controls = core.TrainControls(api)
+        controls.detect()
+        return controls
+
+    def test_a_button_the_game_switches_off_after_set_up_isnt_pressed(self):
+        api = Class350Vigilance(dsd_on=True)
+        controls = self.detect(api)
+        self.assertEqual(controls.alerter.name, "PushButton_DSD_Pedal")   # a button that rests up comes first
+        api.on["PushButton_DSD_Pedal"] = False
+        message = controls.press("alerter", True)
+        self.assertIn("VigilancePedal", message)
+        controls.press("alerter", False)
+        self.assertEqual(api.sent, [("VigilancePedal", "Interacting", 1.0), ("VigilancePedal", "InputValue", 0.0),
+                                    ("VigilancePedal", "InputValue", 1.0), ("VigilancePedal", "Interacting", 0.0)])
+        self.assertEqual(controls.alerter.name, "VigilancePedal")
+
+    def test_the_button_in_use_stays_while_its_on(self):
+        api = Class350Vigilance(dsd_on=False)
+        controls = self.detect(api)
+        self.assertEqual(controls.alerter.name, "VigilancePedal")
+        api.on["PushButton_DSD_Pedal"] = True
+        self.assertEqual(controls.press("alerter", True), "Alerter acknowledged")
+        controls.press("alerter", False)
+        self.assertEqual({node for node, _, _ in api.sent}, {"VigilancePedal"})
+
+
 if __name__ == "__main__":
     unittest.main()

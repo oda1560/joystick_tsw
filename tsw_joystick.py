@@ -1474,6 +1474,39 @@ class ButtonGroup:
         return self.name
 
 
+class FirstSwitchedOn:
+    """Cab buttons that do the same job, best first (a train's vigilance buttons): a press goes to the one in use
+    while the game has it switched on, else to the best one it has on. The game switches some off after the train
+    is set up: on the Class 350 PushButton_DSD_Pedal (off in the game files, and nothing in the train reacts to it)
+    was taken for on as a save loaded, and pressed later it did nothing while VigilancePedal was on (2026-10-17)."""
+
+    def __init__(self, buttons, enabled):
+        self.choices, self.enabled = buttons, enabled      # enabled(name): whether the game has it switched on
+        self.button = buttons[0]
+
+    @property
+    def name(self):
+        return self.button.name
+
+    def set(self, down):
+        """Returns a note for the log when the press goes to another button than before."""
+        note = None
+        if down and not self.button.held and not self.enabled(self.button.name):
+            other = next((b for b in self.choices if b is not self.button and self.enabled(b.name)), None)
+            if other:
+                note = f"with {other.name}: the game has switched {self.button.name} off"
+                self.button = other
+        self.button.set(down)
+        return note
+
+    def let_go(self):
+        for b in self.choices:
+            b.let_go()
+
+    def __repr__(self):
+        return self.name
+
+
 class ReverserSync:
     """Moves the reverser when the slider enters a different zone; never while the train is moving."""
 
@@ -1991,7 +2024,8 @@ class TrainControls:
         if a:
             self.aws = PushButton(self.api, a)
 
-        alerters = ([n for n, i in ids if i.lower().replace("_", "") in ALERTER_IDS and self._enabled(n)]
+        by_id = [n for n, i in ids if i.lower().replace("_", "") in ALERTER_IDS]
+        alerters = ([n for n in by_id if self._enabled(n)]
                     or [n for n in names if any(w in n.lower() for w in ALERTER_NAMES)
                         and not any(x in n.lower() for x in ALERTER_NAME_SKIP) and self._enabled(n)])
         if alerters:
@@ -1999,10 +2033,13 @@ class TrainControls:
             # control before anything else found by name. Last of all a button in no part of the cab that the
             # train's blueprints ignore while they react to another (game files): the Class 70's vigilance
             # (BP_DVD_Service) is reset from its VigilancePedal_F / _B, and nothing is bound to its AlerterReset
-            # (the Q key, left from the US loco it's built on, for an alerter that's switched off)
-            self.alerter = min((PushButton(self.api, n) for n in alerters),
-                               key=lambda b: (not b.is_control, ignored_alerter(handles, alerters, b.name),
-                                              b.pressed < b.released))
+            # (the Q key, left from the US loco it's built on, for an alerter that's switched off). The ones
+            # switched off now are kept after those, for when the game switches one on (see FirstSwitchedOn)
+            spare = [n for n in by_id if n not in alerters]
+            buttons = sorted((PushButton(self.api, n) for n in alerters + spare),
+                             key=lambda b: (b.name in spare, not b.is_control,
+                                            ignored_alerter(handles, alerters, b.name), b.pressed < b.released))
+            self.alerter = FirstSwitchedOn(buttons, self._enabled)
         self._detect_doors(names)
 
         r = (next((n for n, i in ids if any(k in i.lower() for k in REVERSER_IDS)), None)
@@ -2077,8 +2114,8 @@ class TrainControls:
             speed = self.speed()
             if speed is not None and abs(speed) > DOOR_MAX_SPEED:
                 return f"Doors NOT opened: train is moving ({abs(speed) * 3.6:.0f} km/h)"
-        button.set(down)
-        return PRESS_MESSAGES[name] if down else None
+        note = button.set(down)               # another button than before says so (FirstSwitchedOn)
+        return (PRESS_MESSAGES[name] + (f" ({note})" if note else "")) if down else None
 
     def targets(self, y):
         """Lever values for stick position y: -1 full brake .. 0 neutral .. +1 full power."""
