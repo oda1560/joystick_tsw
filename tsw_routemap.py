@@ -13,7 +13,8 @@ or the same track the other way) going with it, and so on until what's left is s
 with a board at each place to slow down and every station named, crowded places drawn again larger where the page
 is empty, so it can be printed on its own; and landmarks from the route's scenery: tunnels, viaducts, roads over the
 line, level crossings, rivers, canals, lakes (where the land is below a water plane's level, from the landscape's
-height maps) and the sea (where the landscape is below its level).
+height maps) and the sea (where the landscape is below its level). Under it, faintly, the real roads and towns from
+OpenStreetMap (tsw_streets.py).
 
     python tsw_routemap.py                    choose a route and a service
     python tsw_routemap.py airedale           list a route's services
@@ -41,6 +42,7 @@ import sys
 
 import tsw_paks
 import tsw_stops
+import tsw_streets
 from tsw_units import MILE, MPH
 
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -2899,12 +2901,13 @@ def close_together(things, boxes):
     return [b for n, b in sorted(found, key=lambda nb: -nb[0] / max((nb[1][2] - nb[1][0]) * (nb[1][3] - nb[1][1]), 1))]
 
 
-def route_overview(sections, units, key_height, spots=(), stations=(), landmarks=None):
+def route_overview(sections, units, key_height, spots=(), stations=(), landmarks=None, streets=None):
     """The first page's map: the sections filling the page, coloured by the lower limit of the two ways, with the
     long sections' numbers, every one of the `stations` (route_stations) named, a board at each of the `spots`
     (slow_spots) and the limit along long stretches; as large as it can be with a corner left empty for the key
     (`key_height` mm tall). Crowded places are framed and drawn again larger, lettered, where the page is empty.
-    Returns (svg, the key's corner: 'tr', 'tl', 'br' or 'bl', map units per metre)."""
+    `streets` (tsw_streets.Streets): roads and towns under it all. Returns (svg, the key's corner: 'tr', 'tl', 'br'
+    or 'bl', map units per metre)."""
     if sum(len(s.points) for s in sections) < 2:
         return "", "tr", 1.0
     scale, (ox, oy), (x0, y0), corner, key_box = overview_layout(sections, key_height)
@@ -2975,8 +2978,9 @@ def route_overview(sections, units, key_height, spots=(), stations=(), landmarks
     main.line_speeds(sections, units, skip=shown)
     main.landmark_names()
     main.draw_numbers([n for n in numbers if not any(within(f, n[0]) for f in framed)])
+    under = streets.svg(main, sections, stations) if streets else ""     # last: its names go where there's room
     return (f'<svg viewBox="0 0 {MAP_W:.0f} {MAP_H:.1f}" class="overview full"><defs>{"".join(defs)}</defs>'
-            f'{"".join(main.o)}{"".join(insets)}</svg>', corner, scale)
+            f'{under}{"".join(main.o)}{"".join(insets)}</svg>', corner, scale)
 
 
 def inset(sections, units, spots, stations, main, box, empty, letter, landmarks=None):
@@ -3069,9 +3073,10 @@ def inset(sections, units, spots, stations, main, box, empty, letter, landmarks=
 
 
 
-def map_page(info, sections, units, places, landmarks, on_page):
+def map_page(info, sections, units, places, landmarks, on_page, streets=None):
     """The whole-route map's first page under its heading: the map filling it, and its key in the emptiest corner.
-    `on_page`: {section number: [pages its strips are on]}, for the key's list of the sections."""
+    `on_page`: {section number: [pages its strips are on]}, for the key's list of the sections; `streets`
+    (tsw_streets.Streets): roads and towns under the map."""
     route_line = f'passenger speed limits in {units.speed_unit}, both ways'
     names = {s.number: section_title(s, sections) for s in sections}
     def pages_of(numbers):
@@ -3108,7 +3113,7 @@ def map_page(info, sections, units, places, landmarks, on_page):
     # the key's height in mm, roughly (the lines its text takes), for the map to leave room for it
     key_height = 9 + 3.5 * math.ceil(len(sub) / 58) + 10 + 7 + 5.5 + (9 if landmarks else 0) + extra + 9
     overview, corner, scale = route_overview(sections, units, key_height, slow_spots(sections, units),
-                                             route_stations(sections, places), landmarks)
+                                             route_stations(sections, places), landmarks, streets)
     per_mm = MAP_W / MAP_MM[0]
     bar = max([b for b in (0.25, 0.5, 1, 2, 5, 10, 20, 50, 100) if b * units.length * scale / per_mm <= 32]
               or [0.25])
@@ -3121,9 +3126,9 @@ def map_page(info, sections, units, places, landmarks, on_page):
             f'<span>{bar:g} {units.unit}</span><span class="north">▲ N</span></div>{index}</div></div>')
 
 
-def render_route(info, sections, units, places=None, landmarks=None):
+def render_route(info, sections, units, places=None, landmarks=None, streets=None):
     """The printable document of a whole route. `places`: {station: [(x, y)]} the journeys run past; `landmarks`:
-    route_landmarks."""
+    route_landmarks; `streets` (tsw_streets.Streets): roads and towns under the first page's map."""
     route_line = f'passenger speed limits in {units.speed_unit}, both ways'
     made = datetime.date.today().isoformat()
     names = {s.number: section_title(s, sections) for s in sections}
@@ -3147,16 +3152,18 @@ def render_route(info, sections, units, places=None, landmarks=None):
     if page:
         pages.append('<div class="strips">' + "".join(page) + '</div>')
 
-    pages.insert(0, map_page(info, sections, units, places, landmarks, on_page))
+    pages.insert(0, map_page(info, sections, units, places, landmarks, on_page, streets))
+    credit = " · roads and towns © OpenStreetMap contributors" if streets and streets.drawn else ""
     head_left = f'<b>{esc(info["route"])}</b> &nbsp;whole route'
     out = [f'<!doctype html><html><head><meta charset="utf-8"><title>{esc(info["route"])} speed limits</title>'
-           f'<style>{CSS}{ROUTE_CSS}</style></head><body>']
+           f'<style>{CSS}{ROUTE_CSS}{tsw_streets.CSS if credit else ""}</style></head><body>']
     strips_line = f'passenger speed limits in {units.speed_unit}: ▶ above the track, ◀ below'
     for n, body in enumerate(pages, 1):
         out.append(f'<section class="page"><div class="head"><span>{head_left}</span>'
                    f'<span>{route_line if n == 1 else strips_line} · page {n} of {len(pages)}</span></div>{body}'
                    f'<div class="foot"><span>Made from the Train Sim World 7 files on {made} (tsw_routemap.py)'
-                   f'</span><span>{esc(info["route"])} · {n}/{len(pages)}</span></div></section>')
+                   f'{credit if n == 1 else ""}</span><span>{esc(info["route"])} · {n}/{len(pages)}</span></div>'
+                   f'</section>')
     out.append('</body></html>')
     return "".join(out)
 
@@ -3293,9 +3300,14 @@ def make_route_map(library, route, say=print):
     info = {"route": name, "journeys": count, "timetable": ", ".join(timetable_names)}
     units = route_units(sections)
     say("Finding landmarks...")
-    objects, sea, water = route_scenery(files, route_details(files, route)[1])
+    level = route_details(files, route)[1]
+    objects, sea, water = route_scenery(files, level)
     landmarks = route_landmarks(network, objects, sections, sea, water)
-    path = save_map(f"{name} whole route", render_route(info, sections, units, places, landmarks))
+    origin = tsw_streets.geo_origin(files, level)
+    if origin is None:
+        say("No roads and towns on the map: the route's files don't say where in the world it is")
+    streets = tsw_streets.Streets(origin, name, say) if origin else None
+    path = save_map(f"{name} whole route", render_route(info, sections, units, places, landmarks, streets))
     say(f"{len(sections)} sections, {sum(s.length for s in sections) / units.length:.1f} {units.unit} of line, "
         f"from {count} journeys")
     return path
