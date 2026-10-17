@@ -370,6 +370,13 @@ class Doors(unittest.TestCase):
         self.assertIsNone(doors["open_right"])
         self.assertEqual(missing, ["DoorRelease_R"])
 
+    def test_class_80x_close_interlock_buttons(self):
+        """'Interlock' starts like 'int' (an interior door's button), but it's the desk's door close."""
+        controls = core.TrainControls(DoorDesk())
+        controls._detect_doors(["DoorRelease_Left(PushButton)", "DoorCloseInterlock_L(PushButton)",
+                                "PassengerDoorBL_Close_Interior", "BL_Int_DoorClose_PushButton"])
+        self.assertEqual(controls.door_close_left.name, "DoorCloseInterlock_L(PushButton)")
+
 
 if __name__ == "__main__":
     unittest.main()

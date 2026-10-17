@@ -123,6 +123,8 @@ ALERTER_NAME_SKIP = ["isolat", "cover", "cutout", "cut-out", "fault", "mcb", "_c
 # these are other doors' buttons (guard's panel, the buttons on each door, the cab door...) or not buttons.
 DOOR_SKIP = ["guard", "ext", "int", "inner", "local", "gangway", "nose", "vestibule", "isolat", "cover",
              "light", "lamp", "indicat", "fault", "test", "emerg", "egress", "toilet", "luggage", "lock"]
+# ... except these, which only start like one: the Class 80x desk's door close is DoorCloseInterlock_L(PushButton)
+DOOR_KEEP = ["interlock"]
 
 PRESS_MESSAGES = {"aws": "AWS acknowledged", "alerter": "Alerter acknowledged",
                   "door_open_left": "Opening the left doors", "door_open_right": "Opening the right doors",
@@ -1921,7 +1923,8 @@ class TrainControls:
             words = [w.lower() for w in re.findall(r"[A-Z]+(?![a-z])|[A-Z]?[a-z]+|\d+", n)]
             opens, closes = bool({"open", "release"} & set(words)), "close" in words
             if (not any(w.startswith("door") for w in words) or "cabdoor" in "".join(words)
-                    or any(w.startswith(x) for w in words for x in DOOR_SKIP) or opens == closes):
+                    or any(w.startswith(x) for w in words if w not in DOOR_KEEP for x in DOOR_SKIP)
+                    or opens == closes):
                 continue
             side = "left" if {"l", "left"} & set(words) else "right" if {"r", "right"} & set(words) else None
             if opens and side is None:
