@@ -122,8 +122,8 @@ RATIO_SECONDS = 3.0            # game time against the wall clock over this long
 BRAKE_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "brake_ease.json")
 COPIES_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "comfort_saves.json")
 SAVE_FILES = ("TSWSaveGame_*.sav", tsw_score.SAVE_GLOB)   # the game's own save (Save in the menu), its checkpoint
-SAVE_POLL_SECONDS = 0.25       # how often the save files are looked at: saving and quitting, the game was gone 2 s
-                               # after writing its save (seen in the log)
+SAVE_POLL_SECONDS = 1.0        # how often the save files are looked at: saving and quitting, the game was gone 2 s
+                               # after writing its save (seen in the log), and the clock read last is kept after
 JUMP_SECONDS = 30.0            # the game's time on more than this ahead of the wall clock: it jumped
 RESUME_SECONDS = 120.0         # a save is the one loaded if the game's time jumped to at most this after it
 COPY_SECONDS = 15.0            # a save is kept with the comfort read up to this long (game) after it was made ...
