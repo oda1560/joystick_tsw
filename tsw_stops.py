@@ -29,6 +29,9 @@ at the first stop.
                        #  stop and the rest (ServicePath.stops), "first": it's the service's first stop, "route":
                        #  the route's name, "train": its class};
                        #  for a while after moving off, phase "departed" and "moved": when the train moved off
+    tracker.next_stop  # the next place the service stops at (go-vias left out): {"station", "platform",
+                       #  "metres": to go (None until the train is placed), "estimated", "arrives": when it's due
+                       #  there (None if not timed), "now", "service"}; None without one
 """
 
 import functools
@@ -366,7 +369,8 @@ class StopTracker(threading.Thread):
         self.dwell = None             # the LoadUnload instruction of the stop you're stopped at
         self.stop = None              # what to do there (see the module's notes)
         self.departed = None          # (self.stop as you moved off, monotonic time to stop showing it)
-        self.door_nodes = None        # API paths of the passenger doors
+        self.next_stop = None         # the next stop, for the panel between stops (see the module's notes)
+        self.door_nodes = None       # API paths of the passenger doors
         self.doors_open = False
         self.doors_read = 0.0
 
@@ -387,7 +391,7 @@ class StopTracker(threading.Thread):
                 self.step()
             except Exception as e:
                 self._say(f"Not available: {e}")     # the game drops a connection now and then: carry on
-                self.stop = None
+                self.stop = self.next_stop = None
                 time.sleep(1)
             time.sleep(SHOWN_POLL_SECONDS if self.shown or self.departed else POLL_SECONDS)
 
@@ -521,6 +525,7 @@ class StopTracker(threading.Thread):
             if done is not None and not self.fixed:
                 self.position = done.metres      # no signal to go by: you're where that objective was met
         self.step_key = key
+        self.next_stop = self._next_stop(order, clock)
 
         target = path.next_target(order, self.position, self._wanted)
         if target is None:
@@ -535,6 +540,25 @@ class StopTracker(threading.Thread):
         else:
             self._say("", target, target.metres - self.position, estimated=not self.fixed, then=then,
                       then_metres=then.metres - self.position if then else None)
+
+    def _next_stop(self, order, clock):
+        """The next place the service stops at, go-vias left out, as tracker.next_stop. Its name and arrival time
+        are those of its LoadUnload step, as the schedule panel has them (ServicePath.stops)."""
+        path = self.path
+        target = path.next_target(order, self.position, lambda t: t.kind == "stop")
+        if target is None or clock is None:
+            return None
+        (station, platform), arrives = (target.name or "Stop marker", target.detail), None
+        for i in range(target.instruction + 1, len(path.instructions)):
+            kind, stopping = path.instructions[i][:2]
+            if kind == "GoTo":
+                break
+            if kind == "LoadUnload" and stopping:
+                (station, platform), arrives = path.stop_place(i), path.times[i][0]
+                break
+        return {"station": station, "platform": platform, "arrives": arrives, "now": clock % DAY,
+                "metres": None if self.position is None else target.metres - self.position,
+                "estimated": not self.fixed, "service": path.name}
 
     def _at_stop(self, key, order, speed, clock, aid, waiting=False):
         """Sets self.stop while you're stopped at a stop: from when the game is on its LoadUnload step until the

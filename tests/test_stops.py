@@ -156,6 +156,64 @@ class Readout(unittest.TestCase):
         self.assertEqual((tracker.state["service"], tracker.state["at"]), (None, None))
 
 
+class NextStation(unittest.TestCase):
+    """The next stop for the panel between stops (StopTracker.next_stop): go-vias left out, its name and arrival
+    as the timetable's stop step has them."""
+
+    def setUp(self):
+        instructions = [("LoadUnload", True, "", ()),                              # 0 Bradford Forster Square
+                        ("GoTo", True, "Frizinghall Platform 1", ()),
+                        ("LoadUnload", True, "", ()),                              # 2
+                        ("GoTo", True, "Shipley Platform 2", ("Junction",)),
+                        ("LoadUnload", True, "", ()),                              # 4
+                        ("GoTo", True, "", ()),                                    # the end, no name
+                        ("LoadUnload", True, "", ())]                              # 6, not timed
+        times = [(None, 30600.0), (None, None), (30930.0, 30990.0), (None, None), (31260.0, None), (None, None),
+                 (None, None)]
+        steps = [(0, None), (1, None), (2, None), (3, 0), (3, None), (4, None), (5, None), (6, None)]
+        targets = [tsw_stops.Target("stop", 1, None, 1000.0, "Frizinghall Platform 1"),
+                   tsw_stops.Target("via", 3, 0, 2500.0, "Junction"),
+                   tsw_stops.Target("stop", 3, None, 3300.0, "Shipley Platform 2"),
+                   tsw_stops.Target("stop", 5, None, 6000.0, "")]
+        self.path = tsw_stops.ServicePath("2P27", steps, targets, {}, instructions,
+                                          {"origin": "BradfordForsterSquare", "end": "LeedsCity", "times": times})
+        self.tracker = tsw_stops.StopTracker()
+        self.tracker.path, self.tracker.position, self.tracker.fixed = self.path, 2000.0, True
+
+    def next(self, step, clock=31092.0):
+        order = self.path.order[step] if step is not None else None
+        return self.tracker._next_stop(order, clock)
+
+    def test_the_go_via_on_the_way_is_left_out(self):
+        self.assertEqual(self.next((3, 0)), {"station": "Shipley", "platform": "Platform 2", "arrives": 31260.0,
+                                             "now": 31092.0, "metres": 1300.0, "estimated": False,
+                                             "service": "2P27"})
+
+    def test_from_the_stop_before(self):
+        self.assertEqual(self.next((2, None))["station"], "Shipley")
+
+    def test_counted_from_the_last_stop(self):
+        self.tracker.fixed = False
+        self.assertTrue(self.next((3, None))["estimated"])
+
+    def test_not_placed_yet(self):
+        self.tracker.position = None
+        self.assertIsNone(self.next((3, None))["metres"])
+
+    def test_the_end_of_the_service(self):
+        nxt = self.next((5, None), clock=86400.0 + 31500.0)
+        self.assertEqual((nxt["station"], nxt["platform"], nxt["arrives"], nxt["now"]),
+                         ("Leeds City", "", None, 31500.0))
+
+    def test_none_after_the_last_stop_or_without_the_clock(self):
+        self.assertIsNone(self.tracker._next_stop(len(self.path.steps), 31092.0))
+        self.assertIsNone(self.next((3, None), clock=None))
+
+    def test_without_objectives_by_where_the_train_is(self):
+        self.tracker.position = 3330.0                       # past Shipley
+        self.assertEqual(self.next(None)["station"], "Leeds City")
+
+
 class RouteName(unittest.TestCase):
     def test_from_the_timetable_id(self):
         self.assertEqual(tsw_stops.route_name("/MedwayValley/Map/MVL:PersistentLevel.SandboxRouteTimetable_1.T"),
