@@ -12,9 +12,8 @@ on each: the longest stretch of a journey not yet drawn becomes a section, the t
 or the same track the other way) going with it, and so on until what's left is short. Its first page maps them
 with a board at each place to slow down and every station named, crowded places drawn again larger where the page
 is empty, so it can be printed on its own; and landmarks from the route's scenery: tunnels, viaducts, roads over the
-line, level crossings, rivers, canals, lakes (where the land is below a water plane's level, from the landscape's
-height maps) and the sea (where the landscape is below its level). Under it, faintly, the real roads and towns from
-OpenStreetMap (tsw_streets.py).
+line and level crossings. Under it, faintly, the real roads, towns, rivers, canals and lakes from OpenStreetMap
+(tsw_streets.py).
 
     python tsw_routemap.py                    choose a route and a service
     python tsw_routemap.py airedale           list a route's services
@@ -37,7 +36,6 @@ import json
 import math
 import os
 import re
-import struct
 import sys
 
 import tsw_paks
@@ -1558,10 +1556,6 @@ table.index td.sec { font-weight: 700; width: 9mm; }
 .mapboardtext { font-size: 11px; font-weight: 800; fill: #111; }
 .linespeed { font-size: 10px; font-weight: 600; font-style: italic; fill: #5F5E5A; }
 .nameleader { stroke: #777; stroke-width: 0.7; }
-.water { fill: none; stroke: #9cc7e6; stroke-width: 2.4; stroke-linejoin: round; }
-.lake { fill: #cfe3f3; fill-rule: evenodd; stroke: #9cc7e6; stroke-width: 1.4; stroke-linejoin: round; }
-.sea { fill: #cfe3f3; }
-.coast { fill: #e3eef8; }
 .tunnelcase { fill: none; stroke: #111; stroke-width: 7.5; stroke-linejoin: round; }
 .tunneldash { fill: none; stroke: #fff; stroke-width: 1.6; stroke-dasharray: 3 2.5; stroke-linejoin: round; }
 .viaduct { fill: none; stroke: #111; stroke-width: 1.2; stroke-linejoin: round; }
@@ -1606,24 +1600,10 @@ LANDMARK_KINDS = (
     ("tunnel", r"Tunnel", r"Wall|Pillar|Block|Light|Seam|Poly|ViewBlocker|Retaining|Hanger|Wire"),
     ("viaduct", r"Viaduct|BridgeRail|Train_?Bridge|RailBridge|BridgeArched_\dT", r"Support|Pillar|Cover|Siding"),
     ("over", r"OcclusionUnderBridge|Road_?Bridge|BridgeRoad|Overbridge(?!Support)", r"Support|Pillar|Wall|Rail"),
-    ("water", r"RiverSpline|CanalSpline|WaterRiver|LargeRiver|^BP_River_C$", r"Bed|Reaction"),
-    ("sea", r"SeaPlane|Ocean|^BP_WaterPlane", r"Wall|River|Lake"),
 )
-LANDMARK_WORDS = (b"Tunnel", b"Viaduct", b"Bridge", b"Crossing", b"River", b"Canal", b"SeaPlane", b"Ocean",
-                  b"WaterPlane")
+LANDMARK_WORDS = (b"Tunnel", b"Viaduct", b"Bridge", b"Crossing")
 LANDMARK_DENSE = 9.0        # map units (2.5 mm): a road bridge closer than this to another or a crossing is left out
-SEA_JOINED = 6               # landscape pieces: fewer under the sea's level together than this are a hollow
 PORTALS_APART = (80.0, 2500.0)  # metres: two tunnel ends this far apart, nothing between, are one tunnel
-# Water the route's makers built from meshes: those with names like these are looked at, and water is one with a
-# water material. A flat one is a plane at the water's level that the land hides but for the river or lake under it
-# (Birmingham - Crewe's are 150-800 m across, and laid along landscape splines for some rivers); one that isn't is a
-# canal's own channel, built along a spline (Birmingham's canals: BP_SplineCanal, a towpath with the water beside).
-WATER_MESH = re.compile(r"Water|River|Lake|Pond|Canal|Reservoir", re.I)
-WATER_WORDS = (b"Water", b"River", b"Lake", b"Pond", b"Canal", b"Reservoir")
-WATER_WIDEST = 3000.0       # metres: a water plane wider than this lies under all the land (the sea's)
-WATER_PIECE = 10.0          # metres: a mesh laid along a spline is taken in pieces this long
-WATER_SMALLEST = 3          # height map points: less water than this together is a puddle, left out
-WATER_DOT = 1.2             # map units: water smaller than this across is left off a map
 
 
 def landmark_kind(cls):
@@ -1643,8 +1623,6 @@ LANDMARK_SWATCHES = (
                           'x2="12" y1="0" y2="10" stroke="#333" stroke-width="1.6"/>'),
     ("crossings", "level crossing", '<line x1="0" x2="24" y1="5" y2="5" stroke="#5F5E5A" stroke-width="3"/><path '
                                     'd="M8.4,1.4 L15.6,8.6 M8.4,8.6 L15.6,1.4" stroke="#111" stroke-width="1.8"/>'),
-    ("water", "river, canal", '<line x1="0" x2="24" y1="5" y2="5" stroke="#9cc7e6" stroke-width="2.4"/>'),
-    ("sea", "sea", '<rect x="0" y="1" width="24" height="8" fill="#cfe3f3"/>'),
 )
 
 
@@ -1653,9 +1631,7 @@ def landmark_legend(landmarks):
     lm = landmarks or {}
     out = []
     for kind, label, svg in LANDMARK_SWATCHES:
-        if kind == "water" and lm.get("lakes"):
-            label = "river, canal, lake"
-        if lm.get(kind) or kind == "water" and lm.get("lakes"):
+        if lm.get(kind):
             out.append(f'<span><svg class="swatch tall" viewBox="0 0 24 10">{svg}</svg>{esc(label)}</span>')
     return "".join(out)
 
@@ -1669,33 +1645,24 @@ def tile_origin(path):
 @functools.lru_cache(maxsize=4)
 def scenery(files, level):
     """The route's landmarks among its scenery: [(kind, blueprint, (x, y), [points of its spline] or None, half its
-    length along the line or 0)], in metres like the track, its water planes as ('pool', mesh, (x, y), [corners],
-    the water's level) and its canals built from meshes as ('water', 'canal', (x, y), [points], 0). Reading every
-    scenery tile takes a while."""
+    length along the line or 0)], in metres like the track. Reading every scenery tile takes a while."""
     path = files.file_of(level)
     if not path:
         return ()
     folder = path.rsplit("/", 1)[0] + "/"
-    out, canals = [], []
+    out = []
     for f in sorted(files.where):
-        m = f.startswith(folder) and re.search(r"/(ST|TS|LT)_x-?\d+_y-?\d+\.umap$", f)
-        if not m:
+        if not (f.startswith(folder) and re.search(r"/(ST|TS)_x-?\d+_y-?\d+\.umap$", f)):
             continue
         tile = f[:-len(".umap")]
         try:
             head = files.where[f].read(f)
-            landmarks = m.group(1) != "LT" and any(word in head for word in LANDMARK_WORDS)
-            if not landmarks and not any(word in head for word in WATER_WORDS):
+            if not any(word in head for word in LANDMARK_WORDS):
                 continue
             pkg = tsw_paks.Package("/" + tile, head, files.where[tile + ".uexp"].read(tile + ".uexp"))
         except ValueError:                  # a damaged tile: its landmarks are left off
             continue
-        if landmarks:
-            out += tile_landmarks(pkg, tile)
-        pools, lines = tile_water(files, pkg, tile)
-        out += pools
-        canals += lines
-    out += [("water", "canal", line[0], tuple(line), 0.0) for line in join_lines(canals)]
+        out += tile_landmarks(pkg, tile)
     return tuple(out)
 
 
@@ -1715,10 +1682,7 @@ def tile_landmarks(pkg, tile):
         rp = next((pkg.properties(j) for j in kids[i] if pkg.exports[j - 1]["name"] == root), None)
         if not rp or not rp.get("RelativeLocation"):
             continue
-        lx, ly, lz = rp["RelativeLocation"][:3]
-        if kind == "sea":                       # its height: the sea's level
-            out.append((kind, cls, (ox + lx / 100, oy + ly / 100), None, lz / 100))
-            continue
+        lx, ly = rp["RelativeLocation"][:2]
         yaw = math.radians((rp.get("RelativeRotation") or [0, 0, 0])[1])
         sx, sy = (rp.get("RelativeScale3D") or [1, 1, 1])[:2]
         at = (ox + lx / 100, oy + ly / 100)
@@ -1738,447 +1702,8 @@ def tile_landmarks(pkg, tile):
                 extent = pkg.properties(j).get("BoxExtent")
                 if extent:
                     half = max(abs(extent[0] * sx), abs(extent[1] * sy)) / 100
-        if kind == "water" and not spline:
-            continue
         out.append((kind, cls, at, spline, half))
     return out
-
-
-@functools.lru_cache(maxsize=1024)
-def water_mesh(files, package, name):
-    """(flat, (x0, y0, x1, y1) of it in cm) of a mesh with a water material, or None."""
-    pkg = files.package(package) if package else None
-    k = pkg.export(name) if pkg else None
-    if not k:
-        return None
-    props = pkg.properties(k)
-    if not any(re.search(r"Water", str(m.get("MaterialInterface") or ""), re.I)
-               for m in props.get("StaticMaterials") or ()):
-        return None
-    bounds = props.get("ExtendedBounds") or {}
-    (cx, cy, _), (ex, ey, ez) = (bounds.get("Origin") or [0, 0, 0])[:3], (bounds.get("BoxExtent") or [0, 0, 0])[:3]
-    if not ex or not ey:
-        return None
-    return ez < 5, (cx - ex, cy - ey, cx + ex, cy + ey)
-
-
-def placement(props):
-    """(x, y, z, yaw, scale x, y, z) of a component on what it's attached to."""
-    x, y, z = (props.get("RelativeLocation") or [0, 0, 0])[:3]
-    yaw = math.radians((props.get("RelativeRotation") or [0, 0, 0])[1])
-    sx, sy, sz = (props.get("RelativeScale3D") or [1, 1, 1])[:3]
-    return x, y, z, yaw, sx, sy, sz
-
-
-def place(chain, p):
-    """Point p (x, y, z) on the first component of `chain` (placements, each on the next) -> on what the last one
-    is placed on."""
-    x, y, z = p
-    for tx, ty, tz, yaw, sx, sy, sz in chain:
-        x, y, z = x * sx, y * sy, z * sz
-        c, s = math.cos(yaw), math.sin(yaw)
-        x, y, z = tx + x * c - y * s, ty + x * s + y * c, tz + z
-    return x, y, z
-
-
-def spline_edges(params, lateral):
-    """[(left, right) points (x, y, z)] every WATER_PIECE metres along a spline mesh (its SplineParams), on its
-    component: where its mesh reaches either side, `lateral` (y0, y1) being how far its mesh reaches to the sides."""
-    p0, t0 = params.get("StartPos") or [0, 0, 0], params.get("StartTangent") or [100, 0, 0]
-    p1, t1 = params.get("EndPos") or [100, 0, 0], params.get("EndTangent") or [100, 0, 0]
-    s0, s1 = (params.get("StartScale") or [1, 1])[0], (params.get("EndScale") or [1, 1])[0]
-    (o0, up0), (o1, up1) = (params.get("StartOffset") or [0, 0])[:2], (params.get("EndOffset") or [0, 0])[:2]
-    n = max(1, math.ceil(math.dist(p0, p1) / 100 / WATER_PIECE))
-    out = []
-    for k in range(n + 1):
-        u = k / n
-        u2, u3 = u * u, u * u * u
-        a, b, c, d = 2 * u3 - 3 * u2 + 1, u3 - 2 * u2 + u, 3 * u2 - 2 * u3, u3 - u2      # Hermite, as the game
-        da, db, dc, dd = 6 * u2 - 6 * u, 3 * u2 - 4 * u + 1, 6 * u - 6 * u2, 3 * u2 - 2 * u
-        p = [a * p0[i] + b * t0[i] + c * p1[i] + d * t1[i] for i in range(3)]
-        hx, hy = (da * p0[i] + db * t0[i] + dc * p1[i] + dd * t1[i] for i in range(2))
-        h = math.hypot(hx, hy) or 1.0
-        nx, ny = -hy / h, hx / h                # the mesh's y: to the right of the way along
-        s, off, z = s0 + (s1 - s0) * u, o0 + (o1 - o0) * u, p[2] + up0 + (up1 - up0) * u    # offset: sideways, up
-        y0, y1 = lateral[0] * s + off, lateral[1] * s + off
-        out.append(((p[0] + nx * y0, p[1] + ny * y0, z), (p[0] + nx * y1, p[1] + ny * y1, z)))
-    return out
-
-
-def tile_water(files, pkg, tile):
-    """The water among a map tile's scenery, in metres: ([('pool', mesh, (x, y), corners, level)] each water plane,
-    or each WATER_PIECE of one laid along a spline, [[(x, y)]] pieces of canals)."""
-    meshes = [struct.pack("<i", -k) for k, imp in enumerate(pkg.imports, 1)
-              if imp["class"] == "StaticMesh" and WATER_MESH.search(imp["name"])]
-    blueprints = any(imp["class"] == "BlueprintGeneratedClass" and WATER_MESH.search(imp["name"])
-                     for imp in pkg.imports)
-    pools, canals = [], []
-    if not (meshes or blueprints):
-        return pools, canals
-    ox, oy = tile_origin(tile)
-    for j in range(1, len(pkg.exports) + 1):
-        cls = pkg.class_name(j)
-        if cls not in ("StaticMeshComponent", "SplineMeshComponent"):
-            continue
-        owner = pkg.exports[j - 1]["outer"]
-        while owner > 0 and pkg.class_name(owner).endswith("Component"):
-            owner = pkg.exports[owner - 1]["outer"]
-        owner_cls = pkg.class_name(owner) if owner > 0 else ""
-        mine = any(m in pkg.raw(j) for m in meshes)
-        if not mine and not (blueprints and WATER_MESH.search(owner_cls)) or landmark_kind(owner_cls) == "sea":
-            continue
-        props = pkg.properties(j)
-        mesh = props.get("StaticMesh")
-        if not mesh and owner > 0:              # the blueprint's own
-            ref = pkg.ref(pkg.exports[owner - 1]["class"])
-            part = files.components(str(ref), ref.package).get(pkg.exports[j - 1]["name"]) if ref is not None \
-                and ref.package else None
-            mesh = part.props.get("StaticMesh") if part else None
-        if not mesh or not WATER_MESH.search(mesh) or re.search(r"Sea|Ocean", mesh, re.I):
-            continue
-        shape = water_mesh(files, getattr(mesh, "package", None), str(mesh))
-        if not shape:
-            continue
-        flat, (x0, y0, x1, y1) = shape
-        chain = []
-        while props is not None and len(chain) < 12:
-            chain.append(placement(props))
-            parent = getattr(props.get("AttachParent"), "index", None)
-            props = pkg.properties(parent) if parent else None
-
-        def world(p):
-            x, y, z = place(chain, p)
-            return ox + x / 100, oy + y / 100, z / 100
-        if cls == "SplineMeshComponent":
-            edges = [(world(a), world(b)) for a, b in
-                     spline_edges(pkg.properties(j).get("SplineParams") or {}, (y0, y1))]
-            if not flat:
-                canals.append([((a[0] + b[0]) / 2, (a[1] + b[1]) / 2) for a, b in edges])
-                continue
-            pieces = [[a[:2], b[:2], d[:2], c[:2]] + [(a[2] + b[2] + c[2] + d[2]) / 4]
-                      for (a, b), (c, d) in zip(edges, edges[1:])]
-        elif flat:
-            corners = [world((x, y, 0)) for x, y in ((x0, y0), (x1, y0), (x1, y1), (x0, y1))]
-            pieces = [[c[:2] for c in corners] + [world(((x0 + x1) / 2, (y0 + y1) / 2, 0))[2]]]
-        else:
-            continue
-        for *corners, level in pieces:
-            if max(math.dist(a, b) for a, b in zip(corners, corners[1:])) > WATER_WIDEST:
-                continue
-            middle = (sum(p[0] for p in corners) / 4, sum(p[1] for p in corners) / 4)
-            pools.append(("pool", str(mesh), middle, tuple(corners), level))
-    return pools, canals
-
-
-def join_lines(pieces, gap=1.0):
-    """Lines [[(x, y)]] that meet end to end (within about `gap` metres) joined into one."""
-    def key(p):
-        return round(p[0] / gap), round(p[1] / gap)
-    ends = collections.defaultdict(list)
-    for k, line in enumerate(pieces):
-        ends[key(line[0])].append(k)
-        ends[key(line[-1])].append(k)
-    used, out = set(), []
-    for k, line in enumerate(pieces):
-        if k in used:
-            continue
-        used.add(k)
-        joined = list(line)
-        for forward in (True, False):
-            while True:
-                tip = key(joined[-1] if forward else joined[0])
-                more = next((m for m in ends[tip] if m not in used), None)
-                if more is None:
-                    break
-                used.add(more)
-                piece = pieces[more]
-                if (key(piece[0]) == tip) != forward:
-                    piece = piece[::-1]
-                joined = joined + piece[1:] if forward else piece[:-1] + joined
-        out.append(joined)
-    return out
-
-
-@functools.lru_cache(maxsize=4)
-def landscape(files, level):
-    """[(x0, y0, x1, y1, lowest, highest)] in metres of every piece of a route's landscape (about 250 m square),
-    from the heights each keeps of itself (CachedLocalBox): enough to find the sea without the height maps."""
-    path = files.file_of(level)
-    if not path:
-        return ()
-    folder = path.rsplit("/", 1)[0] + "/"
-    out = []
-    for f in sorted(files.where):
-        if not (f.startswith(folder) and re.search(r"/LT_x-?\d+_y-?\d+\.umap$", f)):
-            continue
-        tile = f[:-len(".umap")]
-        try:
-            pkg = tsw_paks.Package("/" + tile, files.where[f].read(f),
-                                   files.where[tile + ".uexp"].read(tile + ".uexp"))
-        except ValueError:                  # a damaged tile
-            continue
-        ox, oy = tile_origin(tile)
-        proxy = None
-        for i in range(1, len(pkg.exports) + 1):
-            if pkg.class_name(i) in ("LandscapeStreamingProxy", "Landscape", "LandscapeProxy"):
-                root = getattr(pkg.properties(i).get("RootComponent"), "name", None)
-                proxy = next((pkg.properties(j) for j, e in enumerate(pkg.exports, 1)
-                              if e["name"] == root and e["outer"] == i), None)
-        if not proxy:
-            continue
-        px, py, pz = proxy.get("RelativeLocation") or [0, 0, 0]
-        sx, sy, sz = proxy.get("RelativeScale3D") or [100, 100, 100]
-        for i in range(1, len(pkg.exports) + 1):
-            if pkg.class_name(i) != "LandscapeComponent":
-                continue
-            c = pkg.properties(i)
-            box = c.get("CachedLocalBox")
-            if not box:
-                continue
-            (bx0, by0, bz0), (bx1, by1, bz1) = box[0][:3], box[1][:3]
-            rx, ry = (c.get("RelativeLocation") or [0, 0, 0])[:2]
-            out.append((ox + (px + (rx + bx0) * sx) / 100, oy + (py + (ry + by0) * sy) / 100,
-                        ox + (px + (rx + bx1) * sx) / 100, oy + (py + (ry + by1) * sy) / 100,
-                        (pz + bz0 * sz) / 100, (pz + bz1 * sz) / 100))
-    return tuple(out)
-
-
-def sea_cells(objects, ground):
-    """{'sea': [(x0, y0, x1, y1)] the landscape's pieces wholly under the sea, 'coast': those it comes up on}. The
-    sea's level: where three or more of its blueprints (`objects`; sea or plain water planes, not rivers' or lakes')
-    lie within 3 m of 0 (the routes' heights are above sea level), their middle one. Nothing on a route without
-    them, so low land away from the sea (a polder) isn't taken for it."""
-    levels = sorted(half for kind, _, _, _, half in objects if kind == "sea" and abs(half) < 3)
-    if len(levels) < 3:
-        return {"sea": [], "coast": []}
-    level = levels[len(levels) // 2]
-    wet = {c[:4]: c[5] < level for c in ground if c[4] < level}
-    # a hollow inland isn't the sea: only pieces joined to SEA_JOINED or more others
-    size = {c: max(abs(c[2] - c[0]), 1.0) for c in wet}
-    key = {c: (round(c[0] / size[c]), round(c[1] / size[c])) for c in wet}
-    at = {k: c for c, k in key.items()}
-    keep, seen = set(), set()
-    for c in wet:
-        if c in seen:
-            continue
-        group, todo = [], [c]
-        seen.add(c)
-        while todo:
-            d = todo.pop()
-            group.append(d)
-            kx, ky = key[d]
-            for n in ((kx + 1, ky), (kx - 1, ky), (kx, ky + 1), (kx, ky - 1)):
-                e = at.get(n)
-                if e is not None and e not in seen:
-                    seen.add(e)
-                    todo.append(e)
-        if len(group) > SEA_JOINED:
-            keep.update(group)
-    return {"sea": [c for c in wet if c in keep and wet[c]], "coast": [c for c in wet if c in keep and not wet[c]]}
-
-
-class Ground:
-    """A piece of a landscape tile's land: its height at the points (x0 + i * step, y0 + j * step), i and j 0 to
-    `quads`, from its height map (16-bit heights in a texture's red and green; each subsection keeps its edge
-    again), and the lowest and highest of them, in metres."""
-    __slots__ = ("x0", "y0", "step", "quads", "low", "high", "data", "rows", "columns", "z0", "zscale")
-
-    def __init__(self, x0, y0, step, quads, low, high, data, rows, columns, z0, zscale):
-        self.x0, self.y0, self.step, self.quads, self.low, self.high = x0, y0, step, quads, low, high
-        self.data, self.rows, self.columns, self.z0, self.zscale = data, rows, columns, z0, zscale
-
-    def height(self, i, j):
-        o = self.rows[j] + self.columns[i]
-        return self.z0 + ((self.data[o + 2] << 8 | self.data[o + 1]) - 32768) * self.zscale
-
-    def below(self, level, j, i0, i1):
-        """[i] of the points from (i0, j) to (i1, j) lower than `level`."""
-        top = (level - self.z0) / self.zscale + 32768
-        data, row, columns = self.data, self.rows[j], self.columns
-        return [i for i in range(i0, i1 + 1) if data[row + columns[i] + 2] << 8 | data[row + columns[i] + 1] < top]
-
-
-def ground(files, tile):
-    """[Ground] of each piece of a landscape tile, from its height maps, in the tile or in its .ubulk file."""
-    try:
-        pkg = tsw_paks.Package("/" + tile, files.where[tile + ".umap"].read(tile + ".umap"),
-                               files.where[tile + ".uexp"].read(tile + ".uexp"))
-        bulk = files.where[tile + ".ubulk"].read(tile + ".ubulk") if tile + ".ubulk" in files.where else b""
-    except ValueError:                      # a damaged tile
-        return []
-    ox, oy = tile_origin(tile)
-    proxy = None
-    for i in range(1, len(pkg.exports) + 1):
-        if pkg.class_name(i) in ("LandscapeStreamingProxy", "Landscape", "LandscapeProxy"):
-            root = getattr(pkg.properties(i).get("RootComponent"), "name", None)
-            proxy = next((pkg.properties(j) for j, e in enumerate(pkg.exports, 1)
-                          if e["name"] == root and e["outer"] == i), None)
-    if not proxy:
-        return []
-    px, py, pz = proxy.get("RelativeLocation") or [0, 0, 0]
-    sx, sy, sz = proxy.get("RelativeScale3D") or [100, 100, 100]
-    maps, out = {}, []
-    for i in range(1, len(pkg.exports) + 1):
-        if pkg.class_name(i) != "LandscapeComponent":
-            continue
-        c = pkg.properties(i)
-        k = getattr(c.get("HeightmapTexture"), "index", None)
-        if not k or not c.get("CachedLocalBox") or not c.get("SubsectionSizeQuads"):
-            continue
-        if k not in maps:
-            maps[k] = pkg.texture(k, bulk)
-        if not maps[k] or maps[k][2] != "PF_B8G8R8A8":
-            continue
-        w, h, _, data = maps[k]
-        bias = c.get("HeightmapScaleBias") or [0, 0, 0, 0]
-        bx, by = round(bias[2] * w), round(bias[3] * h)
-        sub, last = c["SubsectionSizeQuads"], (c.get("NumSubsections") or 1) - 1
-        quads = c.get("ComponentSizeQuads") or sub * (last + 1)
-        if (by + quads + last + 1) * w * 4 > len(data):
-            continue
-        rows = [(by + j + min(j // sub, last)) * w * 4 for j in range(quads + 1)]
-        columns = [(bx + i + min(i // sub, last)) * 4 for i in range(quads + 1)]
-        rx, ry = (c.get("RelativeLocation") or [0, 0, 0])[:2]
-        low, high = c["CachedLocalBox"][0][2], c["CachedLocalBox"][1][2]
-        out.append(Ground(ox + (px + rx * sx) / 100, oy + (py + ry * sy) / 100, sx / 100, quads,
-                          (pz + low * sz) / 100, (pz + high * sz) / 100, data, rows, columns, pz / 100,
-                          sz / 128 / 100))
-    return out
-
-
-def across(corners, y):
-    """(x from, x to) where a convex polygon crosses the line at y, or None."""
-    xs = []
-    for (ax, ay), (bx, by) in zip(corners, corners[1:] + corners[:1]):
-        if ay == by == y:
-            xs += [ax, bx]
-        elif min(ay, by) <= y <= max(ay, by) and ay != by:
-            xs.append(ax + (y - ay) * (bx - ax) / (by - ay))
-    return (min(xs), max(xs)) if xs else None
-
-
-def water_areas(files, level, objects):
-    """[((x0, y0, x1, y1), [outline [(x, y)]]) of each body of water], in metres: where the land lies below the
-    level of a water plane among `objects` (scenery), as the game shows it, from the landscape's height maps."""
-    pools = [(corners, z) for kind, _, _, corners, z in objects if kind == "pool"]
-    path = files.file_of(level)
-    if not pools or not path:
-        return []
-    folder = path.rsplit("/", 1)[0] + "/"
-    tiles = {}
-    for f in files.where:
-        m = f.startswith(folder) and re.search(r"/LT_x(-?\d+)_y(-?\d+)\.umap$", f)
-        if m:
-            tiles[(int(m.group(1)), int(m.group(2)))] = f[:-len(".umap")]
-    # a tile's land may start before its corner (half a tile, on Birmingham - Crewe): where, from the first one
-    read, shift = {}, (0.0, 0.0)
-    for key in sorted(tiles):
-        read[key] = ground(files, tiles[key])
-        if read[key]:
-            shift = (min(p.x0 for p in read[key]) - key[0] * 1000, min(p.y0 for p in read[key]) - key[1] * 1000)
-            break
-    by_tile = collections.defaultdict(list)
-    for k, (corners, z) in enumerate(pools):
-        xs, ys = [p[0] - shift[0] for p in corners], [p[1] - shift[1] for p in corners]
-        for tx in range(math.floor((min(xs) - 5) / 1000), math.floor((max(xs) + 5) / 1000) + 1):
-            for ty in range(math.floor((min(ys) - 5) / 1000), math.floor((max(ys) + 5) / 1000) + 1):
-                by_tile[(tx, ty)].append(k)
-    wet, grid = set(), None
-    for key in sorted(by_tile):
-        for part in read[key] if key in read else ground(files, tiles[key]) if key in tiles else ():
-            x0, y0, step, quads = part.x0, part.y0, part.step, part.quads
-            grid = grid or (x0, y0, step)
-            gx, gy, gstep = grid
-            dx, dy = round((x0 - gx) / gstep), round((y0 - gy) / gstep)
-            for k in by_tile[key]:
-                corners, z = pools[k]
-                if part.low >= z:
-                    continue
-                ys = [p[1] for p in corners]
-                for j in range(max(0, math.ceil((min(ys) - y0) / step)),
-                               min(quads, math.floor((max(ys) - y0) / step)) + 1):
-                    span = across(corners, y0 + j * step)
-                    if span:
-                        i0, i1 = max(0, math.ceil((span[0] - x0) / step)), min(quads, math.floor((span[1] - x0) / step))
-                        wet.update((dx + i, dy + j) for i in part.below(z, j, i0, i1))
-    return water_outlines(wet, grid) if wet else []
-
-
-def water_outlines(wet, grid):
-    """[((x0, y0, x1, y1), [outline [(x, y)]]) of each body of water]: round the points of a grid that are wet
-    (`grid`: where its point (0, 0) is and how far apart they are), each the square round it; outlines of islands
-    too. Bodies of fewer than WATER_SMALLEST points are left out."""
-    gx, gy, step = grid
-    seen, out = set(), []
-    for start in wet:
-        if start in seen:
-            continue
-        group, todo = [], [start]
-        seen.add(start)
-        while todo:
-            i, j = todo.pop()
-            group.append((i, j))
-            for n in ((i + 1, j), (i - 1, j), (i, j + 1), (i, j - 1)):
-                if n in wet and n not in seen:
-                    seen.add(n)
-                    todo.append(n)
-        if len(group) < WATER_SMALLEST:
-            continue
-        # the sides of its squares with no water beyond, corner (i, j) the one before point (i, j) both ways,
-        # each going round with the water on its left; joined into rings
-        after = collections.defaultdict(list)
-        for i, j in group:
-            if (i, j - 1) not in wet:
-                after[(i, j)].append((i + 1, j))
-            if (i + 1, j) not in wet:
-                after[(i + 1, j)].append((i + 1, j + 1))
-            if (i, j + 1) not in wet:
-                after[(i + 1, j + 1)].append((i, j + 1))
-            if (i - 1, j) not in wet:
-                after[(i, j + 1)].append((i, j))
-        rings = []
-        while after:
-            ring = [next(iter(after))]
-            while True:
-                a = ring[-1]
-                b = after[a].pop()
-                if not after[a]:
-                    del after[a]
-                if b == ring[0]:
-                    break
-                ring.append(b)
-            k = ring.index(min(ring))           # from a corner: the first point is always kept
-            ring = ring[k:] + ring[:k]
-            ring = simplify([(gx + (i - 0.5) * step, gy + (j - 0.5) * step) for i, j in ring + ring[:1]],
-                            step * 0.7)[:-1]
-            if len(ring) >= 3:
-                rings.append(ring)
-        xs, ys = [p[0] for ring in rings for p in ring], [p[1] for ring in rings for p in ring]
-        if rings:
-            out.append(((min(xs), min(ys), max(xs), max(ys)), rings))
-    return out
-
-
-def simplify(points, tolerance):
-    """A line's points less those within `tolerance` of the line through the others (Douglas-Peucker)."""
-    if len(points) < 3:
-        return list(points)
-    keep, todo = {0, len(points) - 1}, [(0, len(points) - 1)]
-    while todo:
-        a, b = todo.pop()
-        (ax, ay), (bx, by) = points[a], points[b]
-        dx, dy = bx - ax, by - ay
-        length = math.hypot(dx, dy)
-        far, at = -1.0, None
-        for k in range(a + 1, b):
-            px, py = points[k]
-            d = abs(dx * (py - ay) - dy * (px - ax)) / length if length else math.hypot(px - ax, py - ay)
-            if d > far:
-                far, at = d, k
-        if at is not None and far > tolerance:
-            keep.add(at)
-            todo += [(a, at), (at, b)]
-    return [points[k] for k in sorted(keep)]
 
 
 class RouteIndex:
@@ -2206,15 +1731,6 @@ class RouteIndex:
         return best and best[1:]
 
 
-def thin(points, gap):
-    """A line's points less those within `gap` of the one kept before."""
-    out = points[:1]
-    for p in points[1:]:
-        if math.dist(p, out[-1]) >= gap:
-            out.append(p)
-    return out
-
-
 def densify(points, step=10.0):
     out = []
     for a, b in zip(points, points[1:]):
@@ -2240,15 +1756,13 @@ def runs(found, gap):
     return out
 
 
-def route_landmarks(network, objects, sections, sea=None, lakes=None):
+def route_landmarks(network, objects, sections):
     """What the first page shows besides the line: {'tunnels': [(section, x1, x2, name or None)], 'viaducts': ...,
-    'over': [(section, x)] road bridges, 'crossings': [(section, x)] level crossings, 'water': [[(x, y)]] rivers and
-    canals, 'lakes': water_areas, 'places': [((x, y), name)] junctions and depots}, from the track's markers (named
-    tunnels, viaducts, junctions, depots) and the `objects` of its scenery."""
+    'over': [(section, x)] road bridges, 'crossings': [(section, x)] level crossings, 'places': [((x, y), name)]
+    junctions and depots}, from the track's markers (named tunnels, viaducts, junctions, depots) and the `objects` of
+    its scenery."""
     index = RouteIndex(sections)
-    out = {"tunnels": [], "viaducts": [], "over": [], "crossings": [], "water": [], "places": [],
-           "lakes": list(lakes or ()),
-           "sea": list((sea or {}).get("sea", ())), "coast": list((sea or {}).get("coast", ()))}
+    out = {"tunnels": [], "viaducts": [], "over": [], "crossings": [], "places": []}
     named = collections.defaultdict(list)
     places = collections.defaultdict(list)
     for kind, name, guid, a, b in network.markers:
@@ -2271,11 +1785,7 @@ def route_landmarks(network, objects, sections, sea=None, lakes=None):
                      for name, pts in places.items()]
     found = collections.defaultdict(list)
     for kind, cls, at, spline, half in objects:
-        if kind in ("sea", "pool"):
-            continue
-        if kind == "water":
-            out["water"].append(densify(spline, 25))
-        elif kind in ("tunnel", "viaduct"):
+        if kind in ("tunnel", "viaduct"):
             on = [f for f in (index.nearest(p, 12) for p in (densify(spline, 8) if spline else [at])) if f]
             if half and not spline and on:          # a box along the line
                 s, x = on[0]
@@ -2463,32 +1973,10 @@ class MapView:
             self.solid.add(box)
 
     def lines(self, sections, units, clip=None):
-        """The line and its landmarks: the sea, lakes, rivers and canals under it, tunnels as a dark casing with white
-        dashes, viaducts and rail bridges as a line each side, road bridges as a bar across (left out where closer
-        than LANDMARK_DENSE to another or to a level crossing) and every level crossing as a cross."""
+        """The line and its landmarks: tunnels as a dark casing with white dashes, viaducts and rail bridges as a line
+        each side, road bridges as a bar across (left out where closer than LANDMARK_DENSE to another or to a level
+        crossing) and every level crossing as a cross."""
         lm, o = self.landmarks, self.o
-        for kind in ("sea", "coast"):
-            for x0, y0, x1, y1 in lm.get(kind, ()):
-                (a0, b0), (a1, b1) = self.at(x0, y0), self.at(x1, y1)
-                if self.inside(((a0 + a1) / 2, (b0 + b1) / 2), abs(a1 - a0) + 2):
-                    o.append(f'<rect x="{min(a0, a1) - 0.3:.1f}" y="{min(b0, b1) - 0.3:.1f}" '
-                             f'width="{abs(a1 - a0) + 0.6:.1f}" height="{abs(b1 - b0) + 0.6:.1f}" class="{kind}"/>')
-        for (x0, y0, x1, y1), rings in lm.get("lakes", ()):
-            (a0, b0), (a1, b1) = self.at(x0, y0), self.at(x1, y1)
-            size = max(a1 - a0, b1 - b0)
-            if size < WATER_DOT or not self.inside(((a0 + a1) / 2, (b0 + b1) / 2), size / 2 + 2):
-                continue
-            d = []
-            for ring in rings:
-                points = thin([self.at(*p) for p in ring], 0.4)
-                if len(points) >= 3:
-                    d.append("M" + " L".join(f"{a:.1f},{b:.1f}" for a, b in points) + "Z")
-            if d:
-                o.append(f'<path d="{"".join(d)}" class="lake"/>')
-        for line in lm.get("water", ()):
-            points = [self.at(*p) for p in line]
-            if any(self.inside(q, 30) for q in points):
-                o.append(f'<polyline points="{" ".join(f"{a:.1f},{b:.1f}" for a, b in points)}" class="water"/>')
         tunnels = [self.stretch(s, x1, x2) for s, x1, x2, _ in lm.get("tunnels", ())]
         tunnels = [pts for pts in tunnels if pts]
         for points in tunnels:
@@ -3301,8 +2789,7 @@ def make_route_map(library, route, say=print):
     units = route_units(sections)
     say("Finding landmarks...")
     level = route_details(files, route)[1]
-    objects, sea, water = route_scenery(files, level)
-    landmarks = route_landmarks(network, objects, sections, sea, water)
+    landmarks = route_landmarks(network, scenery(files, level), sections)
     origin = tsw_streets.geo_origin(files, level)
     if origin is None:
         say("No roads and towns on the map: the route's files don't say where in the world it is")
@@ -3361,14 +2848,6 @@ def route_units(sections):
     """Miles and mph, or km and km/h, as the limits of the sections are round in."""
     return Units(imperial_limits([(0, v) for s in sections for way in (True, False)
                                   for _, v in s.limits[way] if v is not None]))
-
-
-def route_scenery(files, level):
-    """(scenery, sea_cells, water_areas) of a route: what route_landmarks finds its landmarks among. Reading them
-    takes half a minute or so."""
-    objects = scenery(files, level)
-    sea = sea_cells(objects, landscape(files, level)) if any(o[0] == "sea" for o in objects) else None
-    return objects, sea, water_areas(files, level, objects)
 
 
 def save_map(file_name, document):

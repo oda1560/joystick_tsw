@@ -261,17 +261,6 @@ class Landmarks(unittest.TestCase):
         self.assertAlmostEqual(lm["crossings"][0][1], 3005, delta=15)
         self.assertEqual(lm["over"], [])
 
-    def test_the_sea_only_where_the_route_has_one(self):
-        ground = [(x, 0, x + 250, 250, -20.0, -5.0) for x in range(-1750, 0, 250)] +             [(0, 0, 250, 250, -20.0, -5.0), (250, 0, 500, 250, -3.0, 12.0), (500, 0, 750, 250, 4.0, 30.0),
-             (5000, 0, 5250, 250, -2.0, -1.0)]                 # the last a hollow inland
-        self.assertEqual(rm.sea_cells([], ground), {"sea": [], "coast": []})
-        planes = [("sea", "BP_SeaPlane_01_C", (0, 0), None, z) for z in (0.4, 0.5, 0.6, 17.0)]
-        sea = rm.sea_cells(planes, ground)                  # the level: 0.5, the one up a river left out
-        self.assertEqual(len(sea["sea"]), 8)
-        self.assertNotIn((5000, 0, 5250, 250), sea["sea"])
-        self.assertEqual(sea["coast"], [(250, 0, 500, 250)])
-        self.assertEqual(rm.sea_cells(planes[:2], ground)["sea"], [])     # too few to tell
-
     def test_road_bridges_close_together_are_left_out(self):
         net, sections = self.line()
         objects = [("over", "BP_RoadBridge_C", (x, 0.0), None, 0.0) for x in (2000.0, 2060.0, 8000.0)]
@@ -289,35 +278,11 @@ class Landmarks(unittest.TestCase):
         self.assertEqual(svg.count('class="crossing"'), 3)
         self.assertEqual(svg.count('class="roadover"'), 0)                 # no room between the two crossings
 
-    def test_water_outlines_round_wet_points(self):
-        ring = {(i, j) for i in range(5) for j in range(5)} - {(2, 2)}     # a lake with an island
-        bodies = rm.water_outlines(ring | {(10, 0), (11, 0)}, (100.0, 200.0, 2.0))
-        self.assertEqual(len(bodies), 1)                                    # the two-point puddle left out
-        (x0, y0, x1, y1), rings = bodies[0]
-        self.assertEqual((x0, y0, x1, y1), (99.0, 199.0, 109.0, 209.0))
-        self.assertEqual(sorted(len(r) for r in rings), [4, 4])             # its shore and the island's
-
-    def test_a_mesh_along_a_spline(self):
-        straight = {"StartPos": [0, 0, 0], "StartTangent": [3000, 0, 0], "EndPos": [2990, 0, 50],
-                    "EndTangent": [3000, 0, 0], "StartScale": [2, 2], "EndScale": [2, 2],
-                    "StartOffset": [0, 100], "EndOffset": [0, 100]}                 # the water 1 m up
-        edges = rm.spline_edges(straight, (-500, 500))
-        self.assertEqual(len(edges), 4)                                     # 30 m in 10 m pieces
-        (left, right), (end_left, _) = edges[0], edges[-1]
-        self.assertEqual([round(v) for v in left], [0, -1000, 100])
-        self.assertEqual([round(v) for v in right], [0, 1000, 100])
-        self.assertEqual([round(v) for v in end_left], [2990, -1000, 150])
-
-    def test_canal_pieces_join_end_to_end(self):
-        lines = rm.join_lines([[(10, 0), (20, 0)], [(0, 0), (10, 0)], [(30, 0), (20, 0)], [(50, 5), (60, 5)]])
-        self.assertEqual(sorted(len(line) for line in lines), [2, 4])
-        self.assertIn([(0, 0), (10, 0), (20, 0), (30, 0)], [line if line[0] == (0, 0) else line[::-1]
-                                                            for line in lines])
-
-    def test_the_key_names_lakes_when_there_are_some(self):
-        self.assertIn("river, canal<", rm.landmark_legend({"water": [[(0, 0), (1, 1)]]}))
-        self.assertIn("river, canal, lake<", rm.landmark_legend({"lakes": [((0, 0, 9, 9), [])]}))
-        self.assertNotIn("river", rm.landmark_legend({}))
+    def test_water_is_left_to_openstreetmap(self):
+        for cls in ("BP_RiverSpline_C", "BP_CanalSpline_01_C", "BP_SeaPlane_01_C", "BP_WaterPlane_C"):
+            self.assertIsNone(rm.landmark_kind(cls))
+        net, sections = self.line()
+        self.assertNotIn("river", rm.landmark_legend(rm.route_landmarks(net, (), sections)))
 
 
 if __name__ == "__main__":

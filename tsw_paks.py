@@ -294,41 +294,6 @@ class Package:
         a = e["offset"] - self.header_size
         return self._uexp[a:a + e["size"]]
 
-    def texture(self, index, bulk=b""):
-        """(width, height, pixel format, pixels) of a cooked texture's largest mip, kept in the package or in its
-        .ubulk file (`bulk`), or None."""
-        try:
-            r = Reader(self.raw(index))
-            self._tagged(r)
-            if r.u32():                         # the object's GUID
-                r.read(16)
-            r.read(2 + 2)                       # the texture's and the 2D texture's strip flags
-            if r.u32() != 1:                    # not cooked
-                return None
-            self.fname(r)                       # its pixel format, then where the next platform's data is
-            r.i64()
-            r.i32(), r.i32(), r.u32()           # its size and slices
-            fmt = r.fstr()
-            r.i32()                             # the first mip kept
-            if r.i32() < 1:
-                return None
-            r.u32()                             # the mip is cooked
-            flags = r.u32()
-            wide = flags & 0x2000               # sizes in 64 bits
-            r.i64() if wide else r.i32()
-            size = r.i64() if wide else r.i32()
-            offset = r.i64()
-            if flags & 0x100:                   # in the .ubulk file
-                data = bulk[offset:offset + size]
-            elif flags & 0x1:                   # at the end of the package: not read here
-                return None
-            else:
-                data = r.read(size)
-            width, height = r.i32(), r.i32()
-        except (ValueError, struct.error, IndexError):
-            return None
-        return (width, height, fmt, data) if len(data) == size else None
-
     # -------- tagged properties
     def _tagged(self, r):
         out = {}
