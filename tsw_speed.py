@@ -28,9 +28,12 @@ NO_LIMIT = 1000.0      # m/s; the game gives 3.4e38 for no limit
 class SpeedWatch(threading.Thread):
     """Polls the train's speed and speed limit on a thread of its own."""
 
-    def __init__(self):
+    def __init__(self, reading=None):
+        """`reading`: the comfort watch's last reading of the game (tsw_comfort.ComfortWatch.reading), taken
+        before asking the game itself."""
         super().__init__(daemon=True)
         self.api = core.TSWApi()
+        self.reading = reading or (lambda name: None)
         self.running = True
         self.state = None
         self.limit = None
@@ -58,11 +61,15 @@ class SpeedWatch(threading.Thread):
             geo = (api.get("DriverAid.PlayerInfo").get("Values") or {}).get("geoLocation") or {}
             if "latitude" in geo and "longitude" in geo:
                 self.imperial = tsw_units.imperial_at(geo["latitude"], geo["longitude"])
-        speed = api.get_value("CurrentDrivableActor.Function.HUD_GetSpeed")
+        speed = core.first(self.reading("speed"))
+        if speed is None:
+            speed = api.get_value("CurrentDrivableActor.Function.HUD_GetSpeed")
         if speed is None:                 # not in a cab
             self.state = self.limit = None
             return
-        aid = api.get("DriverAid.Data").get("Values") or {}
+        aid = self.reading("aid")
+        if aid is None:
+            aid = api.get("DriverAid.Data").get("Values") or {}
         limit = (aid.get("speedLimit") or {}).get("value")
         if not limit or limit > NO_LIMIT:
             self.state = self.limit = None

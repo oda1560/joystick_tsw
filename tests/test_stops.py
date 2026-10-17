@@ -156,6 +156,35 @@ class Readout(unittest.TestCase):
         self.assertEqual((tracker.state["service"], tracker.state["at"]), (None, None))
 
 
+class SharedReading(unittest.TestCase):
+    """Following the train takes the signal, clock, speed and step from the comfort watch's reading."""
+
+    def follow(self, shared):
+        instructions = [("LoadUnload", True, "", ()), ("GoTo", True, "Shipley Platform 2", ()),
+                        ("LoadUnload", True, "", ())]
+        path = tsw_stops.ServicePath("2P27", [(0, None), (1, None), (2, None)],
+                                     [tsw_stops.Target("stop", 1, None, 3300.0, "Shipley Platform 2")], {},
+                                     instructions, {"times": [(None, None)] * 3})
+        tracker = tsw_stops.StopTracker(reading=lambda name: shared.get(name))
+        asked = []
+        tracker.api = types.SimpleNamespace(key="key", get=lambda p: asked.append(p) or {},
+                                            get_value=lambda p: asked.append(p))
+        tracker.paths, tracker.path, tracker.steps, tracker.offset = [path], path, path.steps, 0
+        tracker._follow()
+        return tracker, asked
+
+    def test_nothing_asked_of_the_game(self):
+        tracker, asked = self.follow({"aid": {"signalSeen": False}, "clock": {"LocalTime": 36000 * 10**7},
+                                      "speed": {"Speed": 20.0}, "objective": {"Current": 1}})
+        self.assertEqual(asked, [])
+        self.assertEqual((tracker.step_key, tracker.clock), ((1, None), 36000.0))
+
+    def test_asked_without_a_reading(self):
+        _, asked = self.follow({})
+        self.assertEqual(asked, ["DriverAid.Data", "TimeOfDay.Data", "CurrentDrivableActor.Function.HUD_GetSpeed",
+                                 "Objectives.Current"])
+
+
 class RouteName(unittest.TestCase):
     def test_from_the_timetable_id(self):
         self.assertEqual(tsw_stops.route_name("/MedwayValley/Map/MVL:PersistentLevel.SandboxRouteTimetable_1.T"),

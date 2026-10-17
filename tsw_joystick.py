@@ -188,10 +188,14 @@ class TSWApi:
         data = self.get(path)
         if data.get("Result") != "Success":
             return None
-        values = data.get("Values") or {}
-        for v in values.values():
-            return v
-        return None
+        return first(data.get("Values"))
+
+
+def first(values):
+    """The first value of a game answer's Values ({"Speed": 12.3} -> 12.3), None if there's none."""
+    for v in (values or {}).values():
+        return v
+    return None
 
 
 def no_answer(error):

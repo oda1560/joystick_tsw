@@ -337,10 +337,13 @@ class StopTracker(threading.Thread):
     """Keeps track of the next stop of the service you're driving, on a thread of its own. `shown` (set from
     the window) makes it update faster while the readout is on screen."""
 
-    def __init__(self, log=None):
+    def __init__(self, log=None, reading=None):
+        """`reading`: the comfort watch's last reading of the game (tsw_comfort.ComfortWatch.reading), taken
+        before asking the game itself."""
         super().__init__(daemon=True)
         self.api = core.TSWApi()
         self.log = log or (lambda msg: None)
+        self.reading = reading or (lambda name: None)
         self.running = True
         self.shown = False
         self.points = tsw_score.Points()
@@ -480,12 +483,17 @@ class StopTracker(threading.Thread):
         api = self.api
         if self.match_again is not None and time.monotonic() > self.match_again:
             self._find_objectives()
-        aid = api.get("DriverAid.Data").get("Values") or {}
+        aid = self.reading("aid")
+        if aid is None:
+            aid = api.get("DriverAid.Data").get("Values") or {}
         signal = (aid.get("nextSignalProperty") or {}).get("propertyReference")
         to_signal = (aid.get("distanceToSignal") or 0.0) / 100
-        clock = (api.get("TimeOfDay.Data").get("Values") or {}).get("LocalTime")
+        clock = (self.reading("clock") or api.get("TimeOfDay.Data").get("Values") or {}).get("LocalTime")
         clock = clock / 1e7 if clock else None
-        speed = abs(api.get_value("CurrentDrivableActor.Function.HUD_GetSpeed") or 0.0)
+        speed = core.first(self.reading("speed"))
+        if speed is None:
+            speed = api.get_value("CurrentDrivableActor.Function.HUD_GetSpeed")
+        speed = abs(speed or 0.0)
 
         if len(self.paths) > 1 and signal not in self.path.signals:
             other = next((p for p in self.paths if signal in p.signals), None)
@@ -505,7 +513,9 @@ class StopTracker(threading.Thread):
         order = key = None
         waiting = False                              # on the game's own wait before the service starts
         if self.steps is not None:
-            current = api.get_value("Objectives.Current")
+            current = core.first(self.reading("objective"))
+            if current is None:
+                current = api.get_value("Objectives.Current")
             if isinstance(current, (int, float)) and current >= self.offset:
                 k = int(current) - self.offset
                 if k >= len(self.steps):

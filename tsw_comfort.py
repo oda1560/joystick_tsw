@@ -13,7 +13,10 @@ What the game gives (seen on a Class 150, Cardiff valleys 1M56):
   150; on the 331 percent of the effort, negative while braking), for when the brake is eased. Both read
   IsActive false until the cab is in use.
 - CurrentDrivableActor/Simulation/<node>.BrakeHoldActive: the train's own holding brake is on (HOLD_NODES).
-All of these but the passengers come in one request a game tick, by an API subscription.
+All of these but the passengers come in one request a game tick, by an API subscription. It also brings DriverAid.Data
+(the speed limit, the next signal) and Objectives.Current, for the speeding popup and the next stop, which take
+those and the speed and the clock from it (ComfortWatch.reading) instead of asking the game again: about 35
+requests a second while driving came down to about 18.
 
 What's judged is how hard the train speeds up and slows down, not the slope: on a hill passengers lean a little all
 the time, which the driver can't help (the Bernina line's 7% would add 0.69 m/s² holding speed downhill). The limits
@@ -89,6 +92,7 @@ import tsw_score
 POLL_SECONDS = 1 / 15          # a poll this often at most (each waits for the game's next tick, 30-65 ms);
                                # each is a connection of its own, so not every tick
 SUBSCRIPTION = 31              # the API subscription number used here
+FRESH_SECONDS = 0.5            # a reading the other parts take (reading()) is at most this old, else they ask
 RESUBSCRIBE_SECONDS = 5.0      # with no train to read, how often to subscribe again
 COUNT_SECONDS = 5.0            # how often the passengers are counted while stopped (they don't change on the move)
 MAX_CARS = 16
@@ -136,7 +140,8 @@ A = "CurrentDrivableActor."
 PATHS = {"speed": A + "Function.HUD_GetSpeed", "acc": A + "Function.HUD_GetAcceleration",
          "brake": A + "Function.HUD_GetTrainBrakeHandle", "power": A + "Function.HUD_GetPowerHandle",
          "train": A + "ObjectClass", "clock": "TimeOfDay.Data",
-         **{"hold " + node: f"CurrentDrivableActor/Simulation/{node}.BrakeHoldActive" for node in HOLD_NODES}}
+         **{"hold " + node: f"CurrentDrivableActor/Simulation/{node}.BrakeHoldActive" for node in HOLD_NODES},
+         "aid": "DriverAid.Data", "objective": "Objectives.Current"}     # for the other parts (reading())
 
 
 def _leg(service=None):
@@ -732,6 +737,7 @@ class ComfortWatch(threading.Thread):
         self.counted = 0.0
         self.subscribed_at = 0.0
         self.copies = SaveCopies()
+        self.latest = None            # (monotonic, {name in PATHS: values}) of the last reading, for reading()
         self.clock = None             # game seconds at the last reading
         self.clock_at = None          # ... read then (monotonic)
         self.jump = None              # the game's time jumped (a save loaded, or the bridge just started), until the
@@ -860,6 +866,14 @@ class ComfortWatch(threading.Thread):
             time.sleep(max(0.0, POLL_SECONDS - (time.monotonic() - started)))
         self.feed.unsubscribe()
 
+    def reading(self, name):
+        """The game's values for `name` (in PATHS: "speed", "clock", "aid", "objective"...) from the last
+        reading, if it's at most FRESH_SECONDS old; else None, and the caller asks the game itself."""
+        latest = self.latest
+        if latest is None or time.monotonic() - latest[0] > FRESH_SECONDS:
+            return None
+        return latest[1].get(name)
+
     def _gone(self):
         self.judge.coach = self.judge.alert = None
         self.cars = self.formation = self.passengers = None
@@ -873,8 +887,9 @@ class ComfortWatch(threading.Thread):
         if not self.feed.subscribed:
             self.subscribed_at = time.monotonic()
         got = self.feed.read(api.key)
-        speed, acc = _first(got["speed"]), _first(got["acc"])
         now = time.monotonic()
+        self.latest = (now, got)
+        speed, acc = _first(got["speed"]), _first(got["acc"])
         ticks = (got["clock"] or {}).get("LocalTime")
         clock = ticks / 1e7 if ticks else None
         self._clock(clock, now)

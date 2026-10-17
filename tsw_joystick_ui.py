@@ -221,6 +221,7 @@ class Bridge(threading.Thread):
         self.rev_sync = core.ReverserSync(log)
         self.rev_actual = None        # train's current reverser notch, for display
         self.speed = None             # m/s, for display
+        self.reading = lambda name: None    # the comfort watch's last reading (tsw_comfort.ComfortWatch.reading)
         self.last_poll = 0.0
         self.button_queue = queue.Queue()   # (cab button "aws" / "door_open_left" etc., pressed) from the UI
         self.button_again = None      # (button, pressed, until): a press the game didn't answer, made again
@@ -334,7 +335,8 @@ class Bridge(threading.Thread):
             return
         if now - self.last_poll > 0.5:
             self.last_poll = now
-            self.speed = controls.speed()
+            speed = core.first(self.reading("speed"))
+            self.speed = float(speed) if isinstance(speed, (int, float)) else controls.speed()
             try:
                 self.rev_actual = controls.reverser.position() if controls.reverser else None
             except Exception as e:
@@ -1248,9 +1250,11 @@ class App:
         self.bridge = Bridge(self.log)
         self.bridge.enabled = not start_paused
         self.look = core.LookController(self.log)
-        self.tracker = tsw_stops.StopTracker(self.log)
-        self.speed_watch = tsw_speed.SpeedWatch()
         self.comfort = tsw_comfort.ComfortWatch(self.log)
+        # the comfort watch reads the game 15 times a second in one request: the others take what they can from it
+        self.bridge.reading = self.comfort.reading
+        self.tracker = tsw_stops.StopTracker(self.log, self.comfort.reading)
+        self.speed_watch = tsw_speed.SpeedWatch(self.comfort.reading)
         self.map_watch = tsw_livemap.MapWatch(self.log)
         self.map_shown = False        # the route map is shown (its button or key toggles it)
         self.map_key_down = False     # its key was down last time round

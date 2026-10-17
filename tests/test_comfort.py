@@ -22,6 +22,7 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, os.path.dirname(HERE))
 os.environ.setdefault("PYGAME_HIDE_SUPPORT_PROMPT", "1")
 import tsw_comfort  # noqa: E402
+import tsw_speed  # noqa: E402
 
 DRIVE = os.path.join(HERE, "data", "class150_1M56.csv")
 
@@ -802,6 +803,53 @@ class BrakeFile(unittest.TestCase):
             self.assertAlmostEqual(watch.judge.ease, 1.9)
         finally:
             tsw_comfort.BRAKE_FILE = old
+
+
+class Recorder:
+    """The game's API, answering nothing, keeping the paths asked for."""
+    key = "key"
+
+    def __init__(self):
+        self.asked = []
+
+    def get(self, path):
+        self.asked.append(path)
+        return {}
+
+    def get_value(self, path):
+        self.asked.append(path)
+        return None
+
+
+class SharedReading(unittest.TestCase):
+    """The other parts take the game's values from the comfort watch's reading rather than ask again."""
+
+    def test_only_while_fresh(self):
+        watch = tsw_comfort.ComfortWatch()
+        self.assertIsNone(watch.reading("speed"))
+        watch.latest = (tsw_comfort.time.monotonic(), {"speed": {"Speed": 12.0}})
+        self.assertEqual(watch.reading("speed"), {"Speed": 12.0})
+        watch.latest = (tsw_comfort.time.monotonic() - tsw_comfort.FRESH_SECONDS - 0.1, {"speed": {"Speed": 12.0}})
+        self.assertIsNone(watch.reading("speed"))
+
+    def test_the_new_values_come_in_the_one_request(self):
+        self.assertEqual((tsw_comfort.PATHS["aid"], tsw_comfort.PATHS["objective"]),
+                         ("DriverAid.Data", "Objectives.Current"))
+
+    def speeding(self, shared):
+        watch = tsw_speed.SpeedWatch(lambda name: shared.get(name))
+        watch.api, watch.last_place = Recorder(), tsw_speed.time.monotonic()
+        watch.step()
+        return watch, watch.api.asked
+
+    def test_speeding_popup(self):
+        watch, asked = self.speeding({"speed": {"Speed": 30.0}, "aid": {"speedLimit": {"value": 25.0}}})
+        self.assertEqual((watch.state["limit"], watch.state["speed"]), (25.0, 30.0))
+        self.assertEqual(asked, ["Player.Function.IsDrivableActorSpeeding"])   # only while over, its own
+
+    def test_speeding_popup_asks_when_there_s_no_reading(self):
+        _, asked = self.speeding({})
+        self.assertEqual(asked, ["CurrentDrivableActor.Function.HUD_GetSpeed"])   # not in a cab: no more
 
 
 if __name__ == "__main__":
