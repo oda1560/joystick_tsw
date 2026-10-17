@@ -128,13 +128,12 @@ The bridge only sends a value when you move the stick, so the keyboard and mouse
 
 ## On-screen panels
 
-Six panels appear over the game by themselves, or while you hold a button, and the route map when you ask for it. They never take focus from the game, and clicks pass through them.
+Five panels appear over the game by themselves, or while you hold a button, and the route map when you ask for it. They never take focus from the game, and clicks pass through them.
 
 | Panel | Where | When it shows | Turn off with |
 | --- | --- | --- | --- |
 | Next stop | Top centre | While you hold button 11 or F6 | Clear the Next stop button and set Next stop key to Not set |
 | What to do at a stop, with the schedule | Top right | While stopped at a stop, and 30 s after leaving | Show what to do at stops |
-| Next station | Top right, in place of the stop panel | Between stops | Show the next station between stops |
 | Speeding | Under the next stop panel | While over the limit | Show the limit when speeding |
 | Passenger comfort | Under the speeding panel | Firm or harsh braking or acceleration and what it cost, and the last seconds of a stop | Show passenger comfort |
 | Service complete | Top right, in place of the schedule | At the last stop of a service | Show what to do at stops |
@@ -167,17 +166,6 @@ When you stop at a timetabled stop, a panel in the top right tells you what to d
 Below that are the station and its departure time, your points with the change from this stop, how early or late you arrived, and how far from the marker you stopped. Points come from the game's own save, which it writes as you arrive and leave, so they can take a moment to appear.
 
 Under the panel, the **schedule** lists this stop and the next four, with platforms and arrival and departure times, then how many stops are left to the terminus.
-
-### Next station
-
-Between stops, once the stop panel's 30 s after leaving are over, a smaller panel takes its place in the top right. At the next station the stop panel takes over again.
-
-- **Big number**: how far the next station is. It turns amber once you've run past the marker, and "≈" means an estimate, as on the next stop panel. Go-vias are left out: it's always the next place the train stops.
-- **Next line**: the station and its platform, for example "Next stop Shipley · plat 2".
-- **Then**: the time you're due there and the time now (game time).
-- **Last line**: how long until you're due, or in red how late you are once that time has passed. Stops the timetable gives no arrival time for show only the time now.
-
-If you turn off **Show what to do at stops**, it shows as soon as you move off, and stops are left with no panel at all.
 
 ### Speeding
 
@@ -312,7 +300,6 @@ Everything is set in the bridge window and saved as soon as you change it. The a
 | Show the limit when speeding | The speeding panel |
 | Show what to do at stops | The stop, schedule and service complete panels |
 | Show passenger comfort | The comfort panel and the ride report |
-| Show the next station between stops | The next station panel |
 | Re-detect train | Looks at the cab's controls again |
 | Service history | Opens the list of services driven to the end |
 

@@ -55,7 +55,6 @@ LOG_FILE = os.path.join(HERE, "bridge.log")    # the log, to read after; the one
 LOG_MAX = 1_000_000                            # bytes: past this the log starts a new file
 DEFAULTS = {"axis": core.Y_AXIS, "invert": core.INVERT_Y, "deadzone": core.DEADZONE,
             "toggle_button": None, "on_top": False, "speed_popup": True, "stop_panel": True, "comfort": True,
-            "next_panel": True,
             "joystick": "", "rev_enabled": core.USE_REVERSER, "rev_axis": core.REVERSER_AXIS,
             "rev_invert": core.REVERSER_INVERT, "aws_button": core.AWS_BUTTON,
             "alerter_button": core.ALERTER_BUTTON,
@@ -640,39 +639,6 @@ class DwellOverlay(Overlay):
             arrival += f", {points['off']:.1f} m from the marker"
         return ((action, colour), (goal, FG), (where, FG), (now, MUTED), (score, FG), (arrival, MUTED),
                 *cls.ride_lines(ride))
-
-
-class NextStationOverlay(Overlay):
-    """Between stops, in the stop panel's place in the top right corner: how far the next station is, the time
-    now and when the service is due there (tsw_stops.StopTracker.next_stop). At the station the stop panel
-    takes its place again."""
-
-    def __init__(self, root, k):
-        super().__init__(root, k, 0.03, [(24, True), (13, True), (12, False), (11, True)], right=True)
-
-    def show(self, nxt, imperial):
-        self.set(*self.lines_for(nxt, imperial))
-        super().show()
-
-    @staticmethod
-    def lines_for(nxt, imperial=False):
-        """'1.44 mi', 'Next stop Shipley · plat 2', 'arr 08:41:00  ·  now 08:38:12', 'due in 2:48' (red once it's
-        past the arrival time: '1:20 late')."""
-        metres = nxt["metres"]
-        if metres is None:
-            far = "–", MUTED                      # not placed on the line yet
-        else:
-            far = (("≈ " if nxt["estimated"] else "") + tsw_units.distance(metres, imperial),
-                   WARN if metres < -1 else FG)
-        where = "Next stop " + nxt["station"]
-        if nxt["platform"]:
-            where += " · plat " + (nxt["platform"].split()[-1].lstrip("0") or "0")
-        times, due = "now " + clock_time(nxt["now"]), ("", MUTED)
-        if nxt["arrives"] is not None:
-            times = f"arr {clock_time(nxt['arrives'])}  ·  {times}"
-            left = (nxt["arrives"] - nxt["now"] + tsw_stops.DAY / 2) % tsw_stops.DAY - tsw_stops.DAY / 2
-            due = (f"due in {minutes(left)}", MUTED) if left > -0.5 else (f"{minutes(left)} late", BAD)
-        return far, (where, FG), (times, FG), due
 
 
 def short_time(seconds):
@@ -1295,7 +1261,6 @@ class App:
         self.schedule_overlay.under = (self.dwell_overlay,)
         self.summary_overlay = SummaryOverlay(root, self.k)
         self.summary_overlay.under = (self.dwell_overlay,)
-        self.next_overlay = NextStationOverlay(root, self.k)
         self.overlay = StopOverlay(root, self.k)
         self.speed_overlay = SpeedOverlay(root, self.k)
         self.speed_overlay.under = (self.overlay,)
@@ -1565,9 +1530,6 @@ class App:
         self.comfort_var = tk.BooleanVar(value=bool(self.s["comfort"]))
         ttk.Checkbutton(bottom2, text="Show passenger comfort", variable=self.comfort_var,
                         style="Panel.TCheckbutton", command=self.on_comfort).pack(side="left")
-        self.next_panel_var = tk.BooleanVar(value=bool(self.s["next_panel"]))
-        ttk.Checkbutton(bottom2, text="Show the next station between stops", variable=self.next_panel_var,
-                        style="Panel.TCheckbutton", command=self.on_next_panel).pack(side="left", padx=(16, 0))
         ttk.Button(bottom2, text="Service history", command=self.on_history).pack(side="right")
 
         # log
@@ -1838,10 +1800,6 @@ class App:
 
     def on_comfort(self):
         self.s["comfort"] = bool(self.comfort_var.get())
-        save_settings(self.s)
-
-    def on_next_panel(self):
-        self.s["next_panel"] = bool(self.next_panel_var.get())
         save_settings(self.s)
 
     def on_history(self):
@@ -2320,16 +2278,6 @@ class App:
             self.at_station = None
         return self.ride if stop else None
 
-    def _show_next_station(self, stop):
-        """The next station between stops, in the stop panel's place: not at a stop, nor while the stop panel
-        still says you've just left one (tsw_stops.StopTracker.stop)."""
-        between = stop is None or (stop["phase"] == "departed" and not self.s["stop_panel"])
-        nxt = self.tracker.next_stop if between and self.s["next_panel"] else None
-        if nxt:
-            self.next_overlay.show(nxt, self.speed_watch.imperial)
-        else:
-            self.next_overlay.hide()
-
     def tick(self):
         self.frame += 1
         try:
@@ -2360,7 +2308,6 @@ class App:
                 self.dwell_overlay.hide()
                 self.schedule_overlay.hide()
                 self.summary_overlay.hide()
-            self._show_next_station(stop)
             if self.overlay.shown:
                 self.overlay.update(self.tracker.state, self.speed_watch)
             speeding = self.speed_watch.state if self.s["speed_popup"] else None
@@ -2381,8 +2328,8 @@ class App:
             else:
                 self.map_overlay.hide()
             raised = self.map_overlay.keep_on_top() or raised
-            for overlay in (self.dwell_overlay, self.schedule_overlay, self.summary_overlay, self.next_overlay,
-                            self.overlay, self.speed_overlay, self.comfort_overlay):
+            for overlay in (self.dwell_overlay, self.schedule_overlay, self.summary_overlay, self.overlay,
+                            self.speed_overlay, self.comfort_overlay):
                 if raised:
                     overlay.raise_()
                 else:
