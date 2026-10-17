@@ -13,7 +13,6 @@ It also shows small panels over the game while you drive:
 - **Speeding**: the limit pops up by itself when you go over it.
 - **Passenger comfort**: a warning on firm or harsh braking and acceleration, and a prompt to ease off the brake just before you stop.
 - **End of service**: how the run went against your best before.
-- **Route map**: press button 12 or F7 for a small see-through map of where you are on your service's line, following you, with how far the next stop is.
 
 Two tools work without driving: **Route maps** prints a speed-limit map for any service or a whole route, and the **train checker** tests the bridge against every train you own.
 
@@ -94,8 +93,6 @@ The stick drives power and brake, the base slider sets the reverser, the twist l
 | Base buttons | 9 / 10 | Close the left / right doors |
 | Base button | 11 | Hold to show the next stop (see On-screen panels) |
 | Keyboard | F6 | Hold to show the next stop, like button 11 |
-| Base button | 12 | Press to show the route map, press again to hide it |
-| Keyboard | F7 | Shows and hides the route map, like button 12. The game also uses F7: it steps the destination display back |
 | Pause button | Not set | Pauses and resumes the bridge |
 
 ### Power and brake
@@ -128,7 +125,7 @@ The bridge only sends a value when you move the stick, so the keyboard and mouse
 
 ## On-screen panels
 
-Five panels appear over the game by themselves, or while you hold a button, and the route map when you ask for it. They never take focus from the game, and clicks pass through them.
+Five panels appear over the game by themselves, or while you hold a button. They never take focus from the game, and clicks pass through them.
 
 | Panel | Where | When it shows | Turn off with |
 | --- | --- | --- | --- |
@@ -137,7 +134,6 @@ Five panels appear over the game by themselves, or while you hold a button, and 
 | Speeding | Under the next stop panel | While over the limit | Show the limit when speeding |
 | Passenger comfort | Under the speeding panel | Firm or harsh braking or acceleration and what it cost, and the last seconds of a stop | Show passenger comfort |
 | Service complete | Top right, in place of the schedule | At the last stop of a service | Show what to do at stops |
-| Route map | Bottom left (or another corner), under the other panels | From a press of button 12 or F7 to the next | Press again |
 
 Distances and speeds follow where the train is: miles, yards and mph in Great Britain, Ireland and the US, kilometres, metres and km/h elsewhere.
 
@@ -218,21 +214,6 @@ Under it, **Rides** lists each ride's comfort mark and what cost it points. On a
 
 Click **Service history** in Settings to see every service you've driven to the end, newest first, with each service's best run in green. Restart the bridge at the terminus and it updates the same run rather than adding a new one.
 
-### Route map
-
-Press button 12 or F7 for a small see-through window with the map around you: a blue dot where you are and an arrow the way you're going; press again to hide it. The window follows you, a little ahead of you so you see more of what's coming. It's the map of the service you're driving, both ways along its line, drawn like the first page of a whole-route map (see Offline tools) but larger: limit colours, boards where to slow down, every station, the limit along long stretches, and landmarks. In the corner are the service and a scale bar. It zooms in and out with your speed (below).
-
-- **Next stop**: the top left corner says how far the next stop or go-via is and its name, the same as the next stop panel (button 11 or F6), so you don't need to hold anything. After a go-via it also says the stop that follows. A pink ring marks the stop on the map once it's in view. The ring is left off when the map isn't your service's own, such as the whole route.
-
-- **The first time**: the map is made when you first press, and from then on as you start each service. A service's map takes about 15 s; the first time on a route, the tunnels, bridges and water take half a minute more, so the map comes without them first. Then the window draws the part you're in first (about half a second a piece), the rest of the line after, so "Drawing this part of the map..." shows only briefly. Maps are kept, so after that it's there at once.
-- **No service**: free roaming, or a service the files don't have, gives the whole route's map from the timetable the game is running.
-- **Zoom by speed** (on to start): the map comes in close when you're slow or stopped and goes further out at line speed, so it always shows about the next minute of your run. In the standard window (27% of the screen's width), it's 3 m a pixel up to about 50 mph, 5 up to about 83 mph, 8 up to about 128 mph and 12 above that. It changes a few seconds after your speed does, and once it has changed it stays at least 8 s, so it doesn't go back and forth. The maps at all four zooms are made together when the service starts, about 11 s in all. At each change the window stays at the old zoom until the new one is drawn where you are, so it never goes blank.
-- **See-through, size, corner and zoom**: under **Route map view** and **Route map zoom** in Settings. Untick **By speed**, or move the zoom slider, to keep one zoom. A new zoom is made like a new service (about 15 s), the old one shown till then. Clicks pass through the window, and the other panels stay on top of it.
-- **F7 is also the game's**: in Train Sim World 7 it steps the destination display back, so pressing it changes the destination on trains that have one. Button 12 does nothing else; to use a key the game leaves free, pick one under **Route map key** (F10, F11, 6, 7, -, =, Num *, Num /, Scroll Lock, Pause).
-- **Where you are** comes from the latitude and longitude the game gives, placed the way the game lays out its world. Checked on Airedale & Wharfedale, where it's within a few metres of the track. If the panel says you're not on the map's line, the route lays its world out differently: the bridge log says how far off it was.
-
-The maps need Microsoft Edge (or Google Chrome) to draw them; nothing opens on the screen while they're made.
-
 ## Offline tools
 
 Two tools read the game's files directly and work with the game closed: route maps to learn a route from, and a checker that tests the bridge on every train you own.
@@ -242,6 +223,7 @@ Two tools read the game's files directly and work with the game closed: route ma
 A route map is a printable A4 landscape page set for one service: an overview map and route card, then strip diagrams of the line with its speed profile, limit boards, platforms, signals and distances. Use it to learn a route the way a real driver would, instead of relying on the game's speed limit hints.
 
 A **whole-route map** covers every line the route's passenger journeys use, for any service, in a few pages (Airedale & Wharfedale: 6). Each strip shows both ways: above the track the limits going left to right (▶), below it going right to left (◀), each with its own boards and signals. The first page has a map of the sections and which page each is on; a numbered circle on the track marks where another section joins or leaves. The map has a board at each place to slow down, so the first page on its own is enough to print: where the limit is 45 mph (70 km/h) or less (red edge), or 20 mph (30 km/h) or more below the limit either side. A board gives the lower limit of the two ways on the coloured stretch it points to; one with an arrow is only for trains going that way. Grey numbers give the limit along long stretches. Every station the journeys pass is named, even one whose platforms are on a track the map doesn't draw (the slow lines of a four-track main line, say). Where names and boards are too crowded to read, the place is framed with a letter and drawn again larger in an empty part of the page, in a box with the same letter, its scale and how much larger it is. Where the page has room left, so is every other place where stations or boards are close together (a station with a few boards round it, say). Sections under a mile (or a kilometre) long, loops and crossovers, aren't numbered on the map; the key lists them on one line. The map also shows landmarks from the route's own files: tunnels (named where the route names them), viaducts and rail bridges, roads over the line, level crossings, rivers, canals and lakes, the sea, and depots and junctions. Every level crossing is drawn; a road bridge too close to another or to a level crossing to tell apart is left off the main map (an inset may still show it). Rivers and lakes are drawn where the route has water: routes model it only near the line, so a river often shows as a short stretch where it passes, and small ponds are left off. An unnamed tunnel is found from its two ends, so two short tunnels close together can show as one, and some routes model farm and foot crossings like level crossings. The sea's outline comes from the landscape in pieces about 250 m across, so its edge is rough, and it's drawn only on routes whose files have a sea at sea level. It leaves out what isn't a passenger line (depot moves, freight-only track, crossovers and other short bits), and where there's more than one track each way it shows the one most journeys use, so a service taking another platform road can meet a limit the map doesn't show. Your own stops aren't marked; the stop tracker (button 11 or F6) gives the next one in the game.
+
 
 1. Double-click **Route maps.bat**.
 2. Pick a **Route**, then a **Journey**. Journeys are grouped by where they start and stop; tick **Short moves** to list depot and other short moves too.
@@ -291,11 +273,8 @@ Everything is set in the bridge window and saved as soon as you change it. The a
 | Reverser: Use slider · axis · Invert | Turns slider control of the reverser on or off, and which axis it is |
 | Look: Use twist · axis · Invert · angle | Turns twist look on or off, and how far full twist turns the view (±30–150°) |
 | Look smoothing | Quick to Smooth: how gently the view follows the twist |
-| AWS, Alerter, Open / Close doors, Next stop, Route map, Pause button | Click **Assign**, then press the joystick button. **Clear** unsets it |
+| AWS, Alerter, Open / Close doors, Next stop, Pause button | Click **Assign**, then press the joystick button. **Clear** unsets it |
 | Next stop key | The keyboard key that shows the next stop while held (F6), or Not set |
-| Route map key | The keyboard key that shows and hides the route map (F7), or Not set. One key can't do both this and the next stop |
-| Route map view: See-through · Size · Where | How much of the game shows through the map (0–70%), how much of the screen's width it takes (27% to start), and which corner it's in |
-| Route map zoom: By speed · Closer / Further | By speed (on to start): closer when slow, further when fast, between 3 and 12 metres a pixel. The slider picks one zoom instead, 3 to 30 metres a pixel, and moving it turns By speed off. The label says how far across that shows |
 | Keep this window on top | Keeps the bridge window over other windows |
 | Show the limit when speeding | The speeding panel |
 | Show what to do at stops | The stop, schedule and service complete panels |
@@ -321,8 +300,6 @@ All of these sit in the project folder and are left out of git. Deleting one sta
 | `bridge.log`, `bridge.log.1` | The log. A new file starts past 1 MB, keeping one older |
 | `error.log` | Written only if the window fails to start |
 | `train_check_report.txt` | The train checker's last report |
-| `live_maps` (folder) | The route maps made for showing over the game, in pieces, and each route's scenery |
-| `livemap_error.log` | Written only if making a route map fails unexpectedly |
 
 ## Troubleshooting
 
@@ -344,8 +321,6 @@ Read `bridge.log` in the project folder first. Each run starts with a "bridge st
 | Joystick: "Not found" | Plug it in, then pick it under **Joystick**. `python tsw_joystick.py --axes` shows its raw axis values |
 | Look bar: "game not focused" or "cursor active" | Click into the game, and close any menu or mouse cursor |
 | Panels don't appear over the game | Switch the game to borderless windowed |
-| Route map: "You're not on this map's line" | The route lays out its world in a way the bridge doesn't know. The `Route map:` line in the log says how far off it was |
-| Route map: "Edge or Chrome is needed…" | Install Microsoft Edge, which draws the maps |
 | Next stop shows "≈" | This route's timetable data has no signal references, so the distance is an estimate from the last stop |
 | No points on the stop panel | Points come from the game's save, written as you arrive. Wait a moment |
 | The window doesn't open | Look in `error.log`, or start **Start TSW Joystick (console).bat** to see the error |

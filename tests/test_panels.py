@@ -247,7 +247,7 @@ class NextStopHeld(unittest.TestCase):
     def setUp(self):
         self.app = SimpleNamespace(stop_held=set(), s={"stop_key": "F6"}, fg_pid=None, fg_ok=False,
                                    tracker=SimpleNamespace(shown=False, state=None), speed_watch=None,
-                                   overlay=mock.Mock(), map_shown=False)
+                                   overlay=mock.Mock())
 
     def hold(self, source, down):
         ui.App._show_stop(self.app, source, down)
@@ -266,13 +266,6 @@ class NextStopHeld(unittest.TestCase):
         self.assertTrue(self.app.tracker.shown)
         self.hold("key", False)
         self.assertFalse(self.app.tracker.shown)
-        self.assertEqual((self.app.overlay.show.call_count, self.app.overlay.hide.call_count), (1, 1))
-
-    def test_kept_up_to_date_while_the_route_map_says_it(self):
-        self.app.map_shown = True
-        self.hold("button", True)
-        self.hold("button", False)
-        self.assertTrue(self.app.tracker.shown)                 # the panel's gone, the map still says it
         self.assertEqual((self.app.overlay.show.call_count, self.app.overlay.hide.call_count), (1, 1))
 
     def test_key_counts_in_the_game_and_this_window_only(self):
