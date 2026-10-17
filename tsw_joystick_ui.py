@@ -91,6 +91,7 @@ CAB_BUTTONS = {"aws_button": "aws", "alerter_button": "alerter",
                "door_open_left_button": "door_open_left", "door_open_right_button": "door_open_right",
                "door_close_left_button": "door_close_left", "door_close_right_button": "door_close_right"}
 LIGHTS = {"aws_button": "AWS", "alerter_button": "Alerter"}    # shown in the live view while held
+REDRAW_SECONDS = 1.0          # the window's gauges are drawn again at least this often while it can be seen
 BUTTON_NAMES = {"aws": "AWS", "alerter": "alerter", "door_open_left": "open left doors",
                 "door_open_right": "open right doors", "door_close_left": "close left doors",
                 "door_close_right": "close right doors"}           # cab buttons, as the log names them
@@ -376,6 +377,32 @@ class Bridge(threading.Thread):
             self.log("Sent again")
         self.send_failed = False
         self.last_sent = y
+
+
+def window_hidden(hwnd):
+    """Whether a window can't be seen: minimised, or wholly under one window of another program (the game, full
+    screen). A window that may be see-through doesn't count as covering it: layered or click-through ones (a
+    graphics driver's overlay can lie over the whole screen) and ones Windows keeps out of sight (cloaked)."""
+    user32 = ctypes.windll.user32
+    user32.GetWindow.argtypes = [wintypes.HWND, wintypes.UINT]
+    user32.GetWindow.restype = wintypes.HWND
+    user32.GetWindowLongW.argtypes = [wintypes.HWND, ctypes.c_int]
+    if user32.IsIconic(hwnd) or not user32.IsWindowVisible(hwnd):
+        return True
+    mine, other, pid, cloaked = wintypes.RECT(), wintypes.RECT(), wintypes.DWORD(), wintypes.DWORD()
+    user32.GetWindowRect(hwnd, ctypes.byref(mine))
+    h = user32.GetWindow(hwnd, 3)                 # GW_HWNDPREV: the window just above, and so on up
+    while h:
+        if user32.IsWindowVisible(h) and not user32.GetWindowLongW(h, -20) & 0x00080020:   # layered, click-through
+            user32.GetWindowRect(h, ctypes.byref(other))
+            if (other.left <= mine.left and other.top <= mine.top
+                    and other.right >= mine.right and other.bottom >= mine.bottom):
+                user32.GetWindowThreadProcessId(h, ctypes.byref(pid))
+                ctypes.windll.dwmapi.DwmGetWindowAttribute(h, 14, ctypes.byref(cloaked), 4)   # DWMWA_CLOAKED
+                if pid.value != os.getpid() and not cloaked.value:
+                    return True
+        h = user32.GetWindow(h, 3)
+    return False
 
 
 # ---------------------------------------------------------------- popups over the game
@@ -1250,6 +1277,7 @@ class App:
         self.rev_s = 0.0              # slider position, +1 = forward end
         self.rev_zone = None
         self.frame = 0
+        self.drawn, self.drawn_at = None, 0.0     # what the gauges last showed (_draw_state), and when
         self.k = root.winfo_fpixels("1i") / 96.0     # display scaling for canvas drawing
 
         pygame.init()
@@ -2047,6 +2075,32 @@ class App:
             self.log_file = None
 
     # ---- gauges
+    def _redraw(self):
+        """The gauges drawn again only when something on them has changed (and at least once a second, for
+        anything _draw_state leaves out), and not while the window can't be seen: drawing them each tick cost
+        the bridge most of its 15% of a core while the game covered it."""
+        if window_hidden(int(self.root.wm_frame(), 16)):
+            self.drawn = None                     # drawn as soon as it can be seen again
+            return
+        state, now = self._draw_state(), time.monotonic()
+        if state == self.drawn and now - self.drawn_at < REDRAW_SECONDS:
+            return
+        self.drawn, self.drawn_at = state, now
+        self._draw()
+
+    def _draw_state(self):
+        """What the gauges show, to tell whether they need drawing again: the stick, the handles it's moving,
+        the reverser, the buttons held, the twist look and the settings drawn."""
+        c, b, look = self.bridge.controls, self.bridge, self.look
+        levers = tuple((lv.name, lv.neutral, lv.brake_end, lv.safe_lo, lv.safe_hi)
+                       for lv in (c.throttle, c.brake) if lv) if c else ()
+        return (id(c), levers, b.enabled, b.game_status[0], self.stick is not None, round(self.raw_y, 3),
+                round(self.y, 3), b.rev_actual, self.rev_zone, bool(c and c.reverser and c.reverser.ok),
+                abs(b.speed or 0) > core.REVERSER_MAX_SPEED, tuple(sorted(self.held.items())), look.state,
+                None if look.yaw is None else round(look.yaw, 1), None if look.twist is None else round(look.twist, 3),
+                look.steering, tuple(self.s[key] for key in ("deadzone", "look_angle", "look_enabled", "rev_enabled",
+                                                              *LIGHTS)))
+
     def _draw(self):
         k, cv = self.k, self.canvas
         cv.delete("all")
@@ -2289,7 +2343,7 @@ class App:
                 self._toggle_map()
             self.map_key_down = map_key
             self._update_status()
-            self._draw()
+            self._redraw()
             stop = self.tracker.stop
             ride = self._ride(stop)
             run = self.history.finish(stop, self.comfort.service(stop["service"], stop["station"])) \
