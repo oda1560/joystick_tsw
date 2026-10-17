@@ -30,7 +30,10 @@ import tsw_paks
 HERE = os.path.dirname(os.path.abspath(__file__))
 CACHE = os.path.join(HERE, "street_maps")
 VERSION = 1
-OVERPASS = ("https://overpass-api.de/api/interpreter", "https://overpass.kumi.systems/api/interpreter")
+# Overpass servers, tried in turn: OpenStreetMap France's has the whole world and answered a route in 6 s on
+# 2026-10-17 while the main one was full (its queue) and the Kumi Systems mirror gave errors
+OVERPASS = ("https://overpass.openstreetmap.fr/api/interpreter", "https://overpass-api.de/api/interpreter",
+            "https://overpass.kumi.systems/api/interpreter")
 AGENT = "tsw-joystick route maps (personal use)"
 FETCH_SECONDS = 300             # how long to wait for the Overpass service
 SECONDARY_UPTO = 50.0           # metres a map unit: B roads only on pages at least this close
@@ -203,7 +206,7 @@ def compact(elements):
 
 
 def fetch(text):
-    """Asks the Overpass service (or its mirror), returns its elements."""
+    """The elements an Overpass server finds: each server in turn, till one answers."""
     body = urllib.parse.urlencode({"data": text}).encode()
     why = None
     for url in OVERPASS:
