@@ -448,7 +448,7 @@ class Overlay:
         self.hwnd = int(win.wm_frame(), 16)
         user32.SetWindowLongW(self.hwnd, -20, user32.GetWindowLongW(self.hwnd, -20) | self.EX_STYLE)
         self.set_pos(self.hwnd, None, 0, 0, 0, 0, self.HIDE)
-        win.attributes("-alpha", 0.92)
+        win.attributes("-alpha", 1.0)     # solid: nothing of the game to blend in under it
         if before and user32.GetForegroundWindow() != before:
             user32.SetForegroundWindow(before)    # give back the focus it took
 
