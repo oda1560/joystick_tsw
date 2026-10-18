@@ -124,6 +124,10 @@ DOOR_SKIP = ["guard", "ext", "int", "inner", "local", "gangway", "nose", "vestib
              "light", "lamp", "indicat", "fault", "test", "emerg", "egress", "toilet", "luggage", "lock"]
 # ... except these, which only start like one: the Class 80x desk's door close is DoorCloseInterlock_L(PushButton)
 DOOR_KEEP = ["interlock"]
+# Key switches the door buttons do nothing without, by name. Class 142 (both packs): its blueprint sends Door Open
+# and Door Close down the train only while DoorKeySwitch is On (UpdateDoorLeftMU / RightMU in the game files,
+# 2026-10-17); the game's own unlock task turns it On first and back Off after. Its only train.
+DOOR_KEYS = ["DoorKeySwitch"]
 
 PRESS_MESSAGES = {"aws": "AWS acknowledged", "alerter": "Alerter acknowledged",
                   "door_open_left": "Opening the left doors", "door_open_right": "Opening the right doors",
@@ -1474,6 +1478,43 @@ class ButtonGroup:
         return self.name
 
 
+class KeyedButton:
+    """A door button worked with the key switch it needs (DOOR_KEYS): a key that's Off is turned On for the press
+    and back Off when the button is let go, as the game's own door task does. A key already On is left as it is
+    (the AI guard may be working the doors). The key stays where it's sent, no hand needed (Class 142, live)."""
+
+    def __init__(self, api, key, button):
+        self.api, self.key, self.button = api, key, button
+        self.name = button.name
+        self.turned = False              # the key was turned On for this press
+
+    def _turn(self, on):
+        self.api.set(f"CurrentDrivableActor/{self.key}.InputValue", 1.0 if on else 0.0)
+
+    def set(self, down):
+        if down and not self.turned:
+            v = self.api.get_value(f"CurrentDrivableActor/{self.key}.Function.GetCurrentOutputValue")
+            if not (isinstance(v, (int, float)) and v > 0.5):
+                self._turn(True)
+                self.turned = True
+        self.button.set(down)
+        if not down and self.turned:
+            self._turn(False)            # the doors stay released / closed: the train holds that, not the key
+            self.turned = False
+
+    def let_go(self):
+        self.button.let_go()
+        if self.turned:
+            try:
+                self._turn(False)
+            except Exception:
+                pass
+            self.turned = False
+
+    def __repr__(self):
+        return self.name
+
+
 class FirstSwitchedOn:
     """Cab buttons that do the same job, best first (a train's vigilance buttons): a press goes to the one in use
     while the game has it switched on, else to the best one it has on. The game switches some off after the train
@@ -1868,6 +1909,7 @@ class TrainControls:
         self.train_id = None
         self.throttle = self.brake = self.reverser = self.aws = self.alerter = None
         self.door_open_left = self.door_open_right = self.door_close_left = self.door_close_right = None
+        self.door_key = None              # a key switch the door buttons need (DOOR_KEYS)
         self.from_files = False           # the train's controls were found in the game files
         self.missing = []                 # controls found that the game didn't answer for (see detect)
         self.cab = None                   # on a train with a cab at each end: the one used, "Front" / "Back"
@@ -1995,6 +2037,7 @@ class TrainControls:
         if not any(r is not None and r < 3 for r in ranks.values()):
             # every door button switched off: the doors aren't the driver's (SBD Metrolink cab car), none used
             ranks = {n: None if r == 3 else r for n, r in ranks.items()}
+        self.door_key = next((n for n in names if n in DOOR_KEYS), None)
         for action in ("open", "close"):
             for side in ("left", "right"):
                 group = [(ranks[n], n) for a, s, n in found if a == action and s in (side, None)
@@ -2002,8 +2045,9 @@ class TrainControls:
                 best = [n for r, n in group if r == min(r for r, _ in group)]
                 if best:
                     buttons = [PushButton(self.api, n) for n in best]
+                    button = buttons[0] if len(buttons) == 1 else ButtonGroup(buttons)
                     setattr(self, f"door_{action}_{side}",
-                            buttons[0] if len(buttons) == 1 else ButtonGroup(buttons))
+                            KeyedButton(self.api, self.door_key, button) if self.door_key else button)
 
     def detect(self):
         listed = node_names(self.api.list("CurrentDrivableActor"))
@@ -2168,7 +2212,8 @@ class TrainControls:
         parts.append(f"alerter {self.alerter}" if self.alerter else "no alerter / DSD / SIFA found")
         doors = [f"{action} {side} {b}" for action in ("open", "close") for side in ("left", "right")
                  for b in [getattr(self, f"door_{action}_{side}")] if b]
-        parts.append("doors: " + ", ".join(doors) if doors else "no door buttons found")
+        key = f" (with {self.door_key})" if self.door_key else ""
+        parts.append("doors: " + ", ".join(doors) + key if doors else "no door buttons found")
         if not self.from_files and USE_GAME_FILES:
             parts.append("handle places estimated (the game files couldn't be read, or don't have this train)")
         return ", ".join(parts)

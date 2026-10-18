@@ -350,6 +350,25 @@ class DoorDesk:
         return {"Values": {"componentName": "DriverEnvironment"}}
 
 
+class KeyedDoorDesk(DoorDesk):
+    """A Class 142's door buttons and the DoorKeySwitch they need; `sent` lists what was set, but not Interacting."""
+
+    def __init__(self, key_on):
+        super().__init__()
+        self.key_value, self.sent = 1.0 if key_on else 0.0, []
+
+    def get_value(self, path):
+        if path.startswith("CurrentDrivableActor/DoorKeySwitch."):
+            return self.key_value
+        return super().get_value(path)
+
+    def set(self, path, value):
+        if path.endswith(".InputValue"):
+            self.sent.append((self._name(path), value))
+            if path.startswith("CurrentDrivableActor/DoorKeySwitch."):
+                self.key_value = value
+
+
 class Doors(unittest.TestCase):
     def doors(self, api):
         controls = core.TrainControls(api)
@@ -369,6 +388,33 @@ class Doors(unittest.TestCase):
         doors, missing = self.doors(DoorDesk(silent={"DoorRelease_R"}))
         self.assertIsNone(doors["open_right"])
         self.assertEqual(missing, ["DoorRelease_R"])
+
+    def keyed(self, key_on):
+        api = KeyedDoorDesk(key_on)
+        controls = core.TrainControls(api)
+        controls._detect_doors(DoorDesk.NAMES + ["DoorKeySwitch"])
+        return api, controls
+
+    def test_class_142_door_key_turned_on_for_the_press_and_back_off(self):
+        """The Class 142 sends Door Open down the train only while its DoorKeySwitch is On (game files)."""
+        api, controls = self.keyed(key_on=False)
+        controls.door_open_left.set(True)
+        self.assertEqual(api.sent, [("DoorKeySwitch", 1.0), ("DoorRelease_L", 1.0)])
+        controls.door_open_left.set(False)
+        self.assertEqual(api.sent[2:], [("DoorRelease_L", 0.0), ("DoorKeySwitch", 0.0)])
+        self.assertIn("(with DoorKeySwitch)", controls.describe())
+
+    def test_a_door_key_already_on_is_left_alone(self):
+        api, controls = self.keyed(key_on=True)
+        controls.door_close_right.set(True)
+        controls.door_close_right.set(False)
+        self.assertEqual(api.sent, [("DoorsClose_R", 1.0), ("DoorsClose_R", 0.0)])
+
+    def test_letting_go_turns_the_door_key_back_off(self):
+        api, controls = self.keyed(key_on=False)
+        controls.door_open_right.set(True)
+        controls.let_go()
+        self.assertEqual(api.sent[-1], ("DoorKeySwitch", 0.0))
 
     def test_class_80x_close_interlock_buttons(self):
         """'Interlock' starts like 'int' (an interior door's button), but it's the desk's door close."""
