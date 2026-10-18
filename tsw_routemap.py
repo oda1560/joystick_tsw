@@ -39,13 +39,12 @@ import re
 import sys
 
 import tsw_paks
-import tsw_stops
 import tsw_streets
-from tsw_units import MILE, MPH
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 OUT_DIR = os.path.join(HERE, "route_maps")                 # where maps go unless another folder is chosen
 SETTINGS_FILE = os.path.join(HERE, "routemap_settings.json")
+MILE, MPH = 1609.344, 0.44704      # in metres, m/s
 DEFAULT_LIMIT = 90 * MPH    # a limit the files leave out is the game's default: the AI runs 90 mph on those
 MATCH_SLACK = 5.0           # metres (+3 %) a path between two data track rows may differ from the rows' distance
 ROUTE_DEFINITION = re.compile(r"^/[^/]+/RouteDefinition/", re.I)
@@ -359,7 +358,7 @@ class Profile:
         stops where no platform is marked."""
         out = []
         for m1, m2, name in sorted(platforms):
-            station = tsw_stops.split_platform(name)[0]
+            station = split_platform(name)[0]
             if out and out[-1][2] == station and m1 - out[-1][1] < 50:
                 out[-1][1] = max(out[-1][1], m2)
             else:
@@ -369,7 +368,7 @@ class Profile:
             if near:
                 near[0][3] = True
             else:
-                out.append([m - 10, m, tsw_stops.split_platform(name)[0], True])
+                out.append([m - 10, m, split_platform(name)[0], True])
         for s in out:                       # where the service starts (no instruction of its own) and ends
             s[3] = s[3] or any(s[0] - 60 <= m <= s[1] + 60 for m in (self.start, self.end))
         return sorted(tuple(s) for s in out if self.start - 1 <= s[1] and s[0] <= self.end + 1)
@@ -397,6 +396,33 @@ def path_platforms(network, pieces):
 
 
 # ---------------------------------------------------------------- timetables
+PLATFORM = re.compile(r"^(.*?)[\s,-]+((?:platform|plat|pl|gleis|track|bahnsteig|voie|binario)\.?\s*\S+)$", re.I)
+# what's read of a timetable's services: the rest is most of a big timetable (80 MB on Frankfurt-Fulda)
+SERVICE_FIELDS = {"Name": None, "ServiceNumber": None, "bIsPlayerDrivable": None, "MapPointA": None,
+                  "MapPointB": None, "Instructions": {"InstructionType": None, "bIsStopping": None,
+                                                      "Destination": {"Name": None}}}
+
+
+def split_platform(destination):
+    """'Cuxton Platform 1' -> ('Cuxton', 'Platform 1')."""
+    m = PLATFORM.match(destination.strip())
+    return (m.group(1), m.group(2)) if m and m.group(1) else (destination.strip(), "")
+
+
+def named_in(header, service):
+    """Whether a file's header may name a service: it keeps a name like '245_18' as '245' and a number."""
+    return re.sub(r"_(0|[1-9][0-9]*)$", "", service).encode("latin-1", "replace") in header
+
+
+def asset_settings(files, path, keep=None):
+    """Settings of the asset a timetable or data track file holds: the export named like the file (not always
+    the first one: Goblin, Bakerloo, Mittenwald... put a service data class first). `keep`: only these
+    (tsw_paks.Package.properties)."""
+    pak = files.where[path + ".uasset"]
+    package = tsw_paks.Package("/" + path, pak.read(path + ".uasset"), pak.read(path + ".uexp"))
+    return package.properties(package.export(path.rsplit("/", 1)[-1]) or 1, keep)
+
+
 def timetables(files):
     """[(route definition package, timetable file path)] for every timetable that has data tracks."""
     tracks = collections.defaultdict(set)
@@ -468,9 +494,9 @@ def services_rows(files, timetable, services):
         if not wanted:
             break
         header = files.where[track + ".uasset"].read(track + ".uasset")
-        if not any(tsw_stops.named_in(header, s) for s in wanted):
+        if not any(named_in(header, s) for s in wanted):
             continue
-        data = dict(tsw_stops._load(files, track, ROW_FIELDS).get("ServiceDataTracks") or [])
+        data = dict(asset_settings(files, track, ROW_FIELDS).get("ServiceDataTracks") or [])
         for s in list(wanted):
             if s in data:
                 out[s] = data[s].get("TrackData") or []
@@ -487,7 +513,7 @@ def service_rows(files, timetable, service):
 def service_table(files, timetable):
     """{service name: Service} for the services in a timetable file."""
     out = {}
-    for s in tsw_stops._load(files, timetable, {"Services": tsw_stops.SERVICE_FIELDS}).get("Services") or []:
+    for s in asset_settings(files, timetable, {"Services": SERVICE_FIELDS}).get("Services") or []:
         instructions = tuple(
             (str(ins.get("InstructionType", "")).split("::")[-1], bool(ins.get("bIsStopping")),
              (ins.get("Destination") or {}).get("Name") or "", ())
@@ -503,7 +529,7 @@ Service = collections.namedtuple("Service", "name number drivable origin destina
 
 def journey(service):
     """The named places a service stops at after leaving, in order."""
-    return tuple(tsw_stops.split_platform(dest)[0] for kind, stopping, dest, _ in service.instructions
+    return tuple(split_platform(dest)[0] for kind, stopping, dest, _ in service.instructions
                  if kind == "GoTo" and stopping and dest and dest != "None")
 
 
@@ -997,7 +1023,7 @@ def breaks(path, i):
 def station_name(platform):
     """A platform's station as the map names it: 'Coryton Station Platform 1' -> 'Coryton', 'Westbourne Park
     Westbound' -> 'Westbourne Park'."""
-    name = tsw_stops.split_platform(platform)[0]
+    name = split_platform(platform)[0]
     name = re.sub(r"\s+(P\d+[a-z]?|Pl|Plat|Platform|Gleis|Track)\.?$", "", name, flags=re.I)
     name = re.sub(r"\s+(Eastbound|Westbound|Northbound|Southbound)$", "", name)
     return re.sub(r"\s+Station$", "", name)
@@ -2764,7 +2790,7 @@ def make_map(library, route, timetable, service, also=(), say=print):
         raise MapError(f"Couldn't follow {service.name} over the track of {name}")
     prof = Profile(network, pieces, gaps, stops_along(rows, instructions))
     stops = journey(service)
-    timetable_name = tsw_stops._load(files, timetable, {"TimetableName": None}).get("TimetableName")
+    timetable_name = asset_settings(files, timetable, {"TimetableName": None}).get("TimetableName")
     info = {"service": service.name, "origin": service.origin or (stops[0] if stops else ""),
             "destination": service.destination or (stops[-1] if stops else ""), "route": name,
             "timetable": timetable_name or timetable.rsplit("/", 1)[-1], "also": [s for s in also if s != service.name]}
@@ -2783,7 +2809,7 @@ def make_route_map(library, route, say=print):
     network = library.network(route, say)
     say(f"Following {len(groups)} journeys over the track...")
     sections, places, count, timetables_used = journey_sections(files, network, groups, name, say)
-    timetable_names = sorted({tsw_stops._load(files, t, {"TimetableName": None}).get("TimetableName")
+    timetable_names = sorted({asset_settings(files, t, {"TimetableName": None}).get("TimetableName")
                               or t.rsplit("/", 1)[-1] for t in timetables_used})
     info = {"route": name, "journeys": count, "timetable": ", ".join(timetable_names)}
     units = route_units(sections)

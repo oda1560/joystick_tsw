@@ -13,7 +13,7 @@ import unittest
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 os.environ.setdefault("PYGAME_HIDE_SUPPORT_PROMPT", "1")
 import tsw_routemap as rm  # noqa: E402
-from tsw_units import MPH  # noqa: E402
+from tsw_routemap import MPH  # noqa: E402
 
 
 def network(*ribbons):

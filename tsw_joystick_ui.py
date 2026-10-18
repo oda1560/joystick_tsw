@@ -1,13 +1,7 @@
 """
 Train Sim World 7 joystick bridge - desktop window.
 
-Shows joystick / game / train status, live stick and lever gauges, and settings. While its joystick button or
-its key (F6) is held, it shows over the game how far the next stop is (tsw_stops.py) and the speed limit now;
-while you're stopped at a stop, whether to wait, shut the doors or go, with the times, your points (tsw_score.py)
-and how the ride felt to the passengers, and at the end of a service how the run went against your best before
-(tsw_history.py, all runs in the Service history window); while you're over the speed limit, the limit
-(tsw_speed.py); and while braking or speeding up is firm or harsh for the passengers, and in the last seconds
-of a hard stop to ease the brake off before the train stops (tsw_comfort.py).
+Shows joystick / game / train status, live stick and lever gauges, and settings.
 The bridge itself (game API, lever detection, emergency exclusion) lives in tsw_joystick.py.
 
 Usage:
@@ -18,9 +12,7 @@ Usage:
 
 import ctypes
 import ctypes.wintypes as wintypes
-import datetime
 import json
-import math
 import os
 import queue
 import re
@@ -34,11 +26,6 @@ from tkinter import ttk
 
 import tsw_autostart as autostart
 import tsw_joystick as core   # sets SDL env vars before pygame is imported
-import tsw_comfort
-import tsw_history
-import tsw_speed
-import tsw_stops
-import tsw_units
 import pygame
 
 try:
@@ -51,7 +38,7 @@ SETTINGS_FILE = os.path.join(HERE, "settings.json")
 LOG_FILE = os.path.join(HERE, "bridge.log")    # the log, to read after; the one before kept as bridge.log.1
 LOG_MAX = 1_000_000                            # bytes: past this the log starts a new file
 DEFAULTS = {"axis": core.Y_AXIS, "invert": core.INVERT_Y, "deadzone": core.DEADZONE,
-            "toggle_button": None, "on_top": False, "speed_popup": True, "stop_panel": True, "comfort": True,
+            "toggle_button": None, "on_top": False,
             "joystick": "", "rev_enabled": core.USE_REVERSER, "rev_axis": core.REVERSER_AXIS,
             "rev_invert": core.REVERSER_INVERT, "aws_button": core.AWS_BUTTON,
             "alerter_button": core.ALERTER_BUTTON,
@@ -59,7 +46,6 @@ DEFAULTS = {"axis": core.Y_AXIS, "invert": core.INVERT_Y, "deadzone": core.DEADZ
             "door_open_right_button": core.DOOR_OPEN_RIGHT_BUTTON,
             "door_close_left_button": core.DOOR_CLOSE_LEFT_BUTTON,
             "door_close_right_button": core.DOOR_CLOSE_RIGHT_BUTTON,
-            "stop_button": core.STOP_BUTTON, "stop_key": "F6",
             "look_enabled": core.USE_LOOK, "look_axis": core.LOOK_AXIS, "look_invert": core.LOOK_INVERT,
             "look_deadzone": core.LOOK_DEADZONE, "look_angle": core.LOOK_MAX_ANGLE,
             "look_smoothing": core.LOOK_SMOOTHING}
@@ -78,7 +64,6 @@ BUTTON_ACTIONS = {"aws_button": ("AWS button", "acknowledges AWS"),
                   "door_open_right_button": ("Open right doors", "opens the right doors"),
                   "door_close_left_button": ("Close left doors", "closes the left doors"),
                   "door_close_right_button": ("Close right doors", "closes the right doors"),
-                  "stop_button": ("Next stop", "shows the next stop while held"),
                   "toggle_button": ("Pause button", "pauses / resumes")}
 # cab buttons held down for as long as their joystick button is held: setting -> TrainControls attribute
 CAB_BUTTONS = {"aws_button": "aws", "alerter_button": "alerter",
@@ -90,12 +75,6 @@ BUTTON_NAMES = {"aws": "AWS", "alerter": "alerter", "door_open_left": "open left
                 "door_open_right": "open right doors", "door_close_left": "close left doors",
                 "door_close_right": "close right doors"}           # cab buttons, as the log names them
 BUTTON_AGAIN_SECONDS = 5.0     # a cab button press the game doesn't answer is made again for this long
-# keys that can show the next stop while held -> Windows key code. TSW7 binds none of them, in its controls or the
-# engine's (DefaultInput.ini, BaseInput.ini, BaseEngine.ini); F4 / F5 / F9 and the number pad's digits, + and - have
-# debug bindings, ` opens the console, F12 is Steam's screenshot, and Num . is Delete (TPWS / PZB) with Num Lock off
-STOP_KEYS = {"F6": 0x75, "F10": 0x79, "F11": 0x7A, "6": 0x36, "7": 0x37, "-": 0xBD, "=": 0xBB,
-             "Num *": 0x6A, "Num /": 0x6F, "Scroll Lock": 0x91, "Pause": 0x13}
-NO_KEY = "Not set"
 
 
 def apply_style(r):
@@ -149,8 +128,6 @@ def load_settings():
             s[key] = None
         elif s[key] is not None:
             used.add(s[key])
-    if s["stop_key"] not in STOP_KEYS:
-        s["stop_key"] = None
     return s
 
 
@@ -202,7 +179,6 @@ class Bridge(threading.Thread):
         self.rev_sync = core.ReverserSync(log)
         self.rev_actual = None        # train's current reverser notch, for display
         self.speed = None             # m/s, for display
-        self.reading = lambda name: None    # the comfort watch's last reading (tsw_comfort.ComfortWatch.reading)
         self.last_poll = 0.0
         self.button_queue = queue.Queue()   # (cab button "aws" / "door_open_left" etc., pressed) from the UI
         self.button_again = None      # (button, pressed, until): a press the game didn't answer, made again
@@ -316,8 +292,7 @@ class Bridge(threading.Thread):
             return
         if now - self.last_poll > 0.5:
             self.last_poll = now
-            speed = core.first(self.reading("speed"))
-            self.speed = float(speed) if isinstance(speed, (int, float)) else controls.speed()
+            self.speed = controls.speed()
             try:
                 self.rev_actual = controls.reverser.position() if controls.reverser else None
             except Exception as e:
@@ -388,571 +363,7 @@ def window_hidden(hwnd):
     return False
 
 
-# ---------------------------------------------------------------- popups over the game
-class Overlay:
-    """A small panel over the game near the top of the screen, centred or in the right-hand corner. It's shown and
-    hidden without ever taking focus from the game, and clicks go through it."""
-    EX_STYLE = 0x08000000 | 0x00000080 | 0x00080000 | 0x00000020   # no activate, tool window, layered, click-through
-    SHOW = 0x0001 | 0x0002 | 0x0010 | 0x0040    # SetWindowPos: keep size and place, don't activate, show
-    HIDE = 0x0001 | 0x0002 | 0x0004 | 0x0010 | 0x0080
-    RAISE = 0x0001 | 0x0002 | 0x0010
-    TOPMOST = wintypes.HWND(-1)
-
-    def __init__(self, root, k, top, lines, right=False):
-        """`top`: the gap above it, as a share of the screen height; `lines`: font size and bold, line by line;
-        `right`: in the top right corner, not centred."""
-        user32 = self.user32 = ctypes.windll.user32
-        self.set_pos = user32.SetWindowPos
-        self.set_pos.argtypes = [wintypes.HWND, wintypes.HWND] + [ctypes.c_int] * 4 + [wintypes.UINT]
-        user32.GetWindow.argtypes = [wintypes.HWND, wintypes.UINT]
-        user32.GetWindow.restype = wintypes.HWND
-        user32.GetWindowRect.argtypes = [wintypes.HWND, ctypes.POINTER(wintypes.RECT)]
-        user32.IsWindowVisible.argtypes = [wintypes.HWND]
-        user32.GetWindowThreadProcessId.argtypes = [wintypes.HWND, ctypes.POINTER(wintypes.DWORD)]
-        before = user32.GetForegroundWindow()
-        self.root, self.gap, self.k, self.right = root, top, k, right
-        self.under = ()               # overlays this one keeps below while they're shown
-        win = self.win = tk.Toplevel(root)
-        win.overrideredirect(True)
-        win.attributes("-topmost", True)
-        win.attributes("-alpha", 0.0)
-        win.geometry("+-10000+-10000")
-        win.configure(bg=PANEL)
-        box = self.box = tk.Frame(win, bg=PANEL, padx=round(22 * k), pady=round(8 * k))
-        box.pack()
-        self.labels = [tk.Label(box, text="", bg=PANEL, fg=FG, font=(FONT, size, "bold") if bold else (FONT, size))
-                       for size, bold in lines]
-        self.lines = [None] * len(lines)
-        self.shown = False
-        self.place = None
-        win.update_idletasks()        # Tk makes the window now, and makes it the active one
-        self.hwnd = int(win.wm_frame(), 16)
-        user32.SetWindowLongW(self.hwnd, -20, user32.GetWindowLongW(self.hwnd, -20) | self.EX_STYLE)
-        self.set_pos(self.hwnd, None, 0, 0, 0, 0, self.HIDE)
-        win.attributes("-alpha", 1.0)     # solid: nothing of the game to blend in under it
-        if before and user32.GetForegroundWindow() != before:
-            user32.SetForegroundWindow(before)    # give back the focus it took
-
-    def show(self):
-        self._place()                 # the overlay above may have come or gone
-        if not self.shown:
-            self.win.update_idletasks()
-            self.set_pos(self.hwnd, self.TOPMOST, 0, 0, 0, 0, self.SHOW)
-            self.shown = True
-
-    def _place(self):
-        """Centred (or at the right), `gap` from the top of the screen, and below the overlays above while they're
-        shown."""
-        top = round(self.root.winfo_screenheight() * self.gap)
-        for above in self.under:
-            if above.shown and above.place is not None:
-                top = max(top, above.place[1] + above.win.winfo_reqheight() + round(6 * self.k))
-        spare = self.root.winfo_screenwidth() - self.win.winfo_reqwidth()
-        place = (max(0, spare - round(24 * self.k) if self.right else spare // 2), top)
-        if place != self.place:          # keep it in place as the text changes width
-            self.place = place
-            self.win.geometry(f"+{place[0]}+{place[1]}")
-
-    def hide(self):
-        if self.shown:
-            self.set_pos(self.hwnd, None, 0, 0, 0, 0, self.HIDE)
-            self.shown = False
-
-    def keep_on_top(self):
-        """Back on top if another program's window has come over it. The game's window is always on top too, so
-        going back to the game from another window puts the game over anything already shown."""
-        if self.shown and self._covered():
-            self.set_pos(self.hwnd, self.TOPMOST, 0, 0, 0, 0, self.RAISE)
-
-    def _covered(self):
-        user32, mine = self.user32, wintypes.RECT()
-        user32.GetWindowRect(self.hwnd, ctypes.byref(mine))
-        other, pid = wintypes.RECT(), wintypes.DWORD()
-        h = user32.GetWindow(self.hwnd, 3)        # GW_HWNDPREV: the window just above, and so on up
-        while h:
-            if user32.IsWindowVisible(h):           # most of the always-on-top windows aren't
-                user32.GetWindowRect(h, ctypes.byref(other))
-                if (other.left < mine.right and mine.left < other.right
-                        and other.top < mine.bottom and mine.top < other.bottom):
-                    user32.GetWindowThreadProcessId(h, ctypes.byref(pid))
-                    if pid.value != os.getpid():
-                        return True
-            h = user32.GetWindow(h, 3)
-        return False
-
-    def set(self, *lines):
-        """Each line as (text, colour); a line without text is left out."""
-        if list(lines) == self.lines:
-            self._place()             # the overlay above may have come or gone
-            return
-        if [bool(t) for t, _ in lines] != [bool(old and old[0]) for old in self.lines]:
-            for label in self.labels:
-                label.pack_forget()
-            for label, (text, _) in zip(self.labels, lines):
-                if text:
-                    label.pack()
-        for label, line, old in zip(self.labels, lines, self.lines):
-            if line != old:
-                label.config(text=line[0], fg=line[1])
-        self.lines = list(lines)
-        self.win.update_idletasks()
-        self._place()
-
-
-class StopOverlay(Overlay):
-    """How far the next stop (or go-via) is, while its joystick button is held, and the speed limit now."""
-
-    def __init__(self, root, k):
-        super().__init__(root, k, 0.10, [(26, True), (12, False), (10, False), (11, True)])
-
-    def show(self, state, watch):
-        """`watch`: the SpeedWatch, for the limit and the units."""
-        self.update(state, watch)
-        super().show()
-
-    def update(self, state, watch):
-        imperial = watch.imperial
-        then = state["then"]
-        if then and state["then_metres"] is not None:
-            then += " in " + tsw_units.distance(state["then_metres"], imperial)
-        if state["metres"] is not None:
-            big = ("≈ " if state["estimated"] else "") + tsw_units.distance(state["metres"], imperial)
-            lines = (big, WARN if state["metres"] < -1 else FG), (state["label"], FG), (then, MUTED)
-        elif state["label"]:
-            lines = ("-", MUTED), (state["label"], FG), (state["text"], MUTED)
-        else:
-            lines = ("-", MUTED), (state["text"], FG), ("", MUTED)
-        self.set(*lines, self._limit(watch))
-
-    @staticmethod
-    def _limit(watch):
-        """'Speed limit 60 mph', amber / red while over it as the speeding popup is."""
-        limit, over = watch.limit, watch.state
-        if limit is None:
-            return "", MUTED
-        colour = (BAD if over["counted"] else WARN) if over else FG
-        return "Speed limit " + tsw_units.speed(limit, watch.imperial), colour
-
-
-def clock_time(seconds):
-    """'08:36:30' from seconds after midnight."""
-    s = int(seconds) % 86400
-    return f"{s // 3600:02d}:{s // 60 % 60:02d}:{s % 60:02d}"
-
-
-def minutes(seconds):
-    """'1:05' from seconds."""
-    s = int(round(abs(seconds)))
-    return f"{s // 60}:{s % 60:02d}"
-
-
-def whole(x):
-    """A comfort mark or score as it's shown: 94.5 -> 95."""
-    return int(math.floor(x + 0.5))
-
-
-def mark_colour(mark):
-    """Green from 90, amber from 75, else red."""
-    return GOOD if whole(mark) >= 90 else WARN if whole(mark) >= 75 else BAD
-
-
-def lost_text(lost, most=2):
-    """What cost a ride its points, the costliest `most` (tsw_comfort.losses): 'jolt on stopping, 1.4 m/s²  ·  4 s
-    firm braking'. Less than half a point isn't worth saying."""
-    words = []
-    for cost, what, *rest in lost[:most]:
-        if cost < 0.5:
-            break
-        if what in ("stop", "way"):
-            words.append(f"jolt {'on stopping' if what == 'stop' else 'at a stop on the way'}, {rest[0]:.1f} m/s²")
-        else:
-            kind, seconds = rest[0], max(1, whole(rest[-1]))
-            doing = "braking" if kind == "brake" else "acceleration"
-            words.append(f"harsh {doing} {rest[1]:.1f} m/s², {seconds} s" if what == "harsh"
-                         else f"{seconds} s firm {doing}")
-    return "  ·  ".join(words)
-
-
-class DwellOverlay(Overlay):
-    """While you're stopped at a stop, in the top right corner: whether to wait, shut the doors or go, the time
-    now and the departure time, your points (tsw_stops.StopTracker.stop) and how the ride here felt to the
-    passengers (tsw_comfort.py). Once you can go, also how far the next stop or go-via is, and that stays up for a
-    while after you move off."""
-    PHASES = {"wait": ("WAIT", FG), "close": ("SHUT THE DOORS", WARN), "depart": ("DEPART", GOOD),
-              "signal": ("WAIT FOR THE SIGNAL", WARN), "end": ("END OF SERVICE", FG), "departed": ("DEPARTED", GOOD)}
-
-    def __init__(self, root, k):
-        super().__init__(root, k, 0.03, [(24, True), (13, True), (12, False), (11, False), (12, True), (10, False),
-                                         (11, False), (11, True)], right=True)
-
-    def show(self, stop, state, imperial, ride=None):
-        """`state`: the tracker's next stop readout (tsw_stops.StopTracker.state); `ride`: the ride report
-        (tsw_comfort.ComfortWatch.report)."""
-        self.set(*self.lines_for(stop, state, imperial, ride))
-        super().show()
-
-    @staticmethod
-    def ride_lines(ride):
-        """'This ride 79  ·  jolt on stopping, 1.4 m/s²' (coloured by the mark) and 'Comfort 87 this service  ·
-        62 passengers'."""
-        if not ride:
-            return ("", FG), ("", MUTED)
-        why = lost_text(ride["lost"]) or ("smooth stop" if ride["stop"] == "smooth" else "")
-        line = f"This ride {whole(ride['mark'])}" + (f"  ·  {why}" if why else "")
-        n = ride["passengers"]
-        tally = f"{n} passenger{'s' * (n != 1)}" if n else "no passengers aboard"
-        if ride.get("score") is not None:
-            tally = f"Comfort {whole(ride['score'])} this service  ·  {tally}"
-        return (line, mark_colour(ride["mark"])), (tally, FG)
-
-    @classmethod
-    def lines_for(cls, stop, state=None, imperial=False, ride=None):
-        action, colour = cls.PHASES[stop["phase"]]
-        goal = ""
-        if state and state["label"] and stop["phase"] in ("depart", "signal", "departed"):  # the game has let the
-            goal = state["label"]                                   # train go: the readout is on to the next
-            if state["metres"] is not None:
-                goal += " in " + ("≈ " if state["estimated"] else "") + tsw_units.distance(state["metres"], imperial)
-        left, departs = stop["left"], stop["departs"]
-        if stop["phase"] == "close" and left is not None and left < 0:
-            colour = BAD                                  # it's past the departure time
-        where = stop["station"]
-        if stop["phase"] == "end":
-            where += "  ·  terminates here"
-        elif stop["phase"] == "departed":
-            where += "  ·  left " + clock_time(stop["moved"])
-        elif departs is not None:
-            where += "  ·  departs " + clock_time(departs)
-        now = "now " + clock_time(stop["now"])
-        if departs is not None and left is not None and stop["phase"] in ("wait", "close"):
-            now += f"  ·  in {minutes(left)}" if left >= 0.5 else f"  ·  {minutes(left)} late"
-        if stop["phase"] == "wait":
-            now += "  ·  doors " + ("open" if stop["doors"] else "shut")
-        points, arrival = stop["points"] or {}, ""
-        score = ""
-        if points.get("points") is not None:
-            score = f"{points['points']:,} points"
-            if points.get("change"):
-                score += f"  ({points['change']:+,})"
-        if points.get("late") is not None:
-            late = points["late"]
-            arrival = ("arrived on time" if abs(late) < 1 else
-                       f"arrived {minutes(late)} {'late' if late > 0 else 'early'}")
-            arrival += f", {points['off']:.1f} m from the marker"
-        return ((action, colour), (goal, FG), (where, FG), (now, MUTED), (score, FG), (arrival, MUTED),
-                *cls.ride_lines(ride))
-
-
-def short_time(seconds):
-    """'15:33' from seconds after midnight, or '08:36:30' where the seconds aren't 0."""
-    return clock_time(seconds) if int(seconds) % 60 else clock_time(seconds)[:5]
-
-
-class ScheduleOverlay(Overlay):
-    """The service's schedule from the stop you're at, as the game's own (T) lists it: that stop and the next
-    few, with their platforms and times. Under the what-to-do panel, for as long as that's shown."""
-    STOPS = 5                 # the stop you're at and the next four
-    TITLE, FOOT = (10, True), (9, False)      # font size, bold
-    HEAD, ROW = 8, 11
-
-    def __init__(self, root, k):
-        super().__init__(root, k, 0.03, [], right=True)
-        self.table = None
-        self.content = None
-
-    def show(self, stop):
-        if not stop.get("schedule"):
-            self.hide()
-            return
-        content = self.content_for(stop)
-        if content != self.content:
-            self._build(content)
-        super().show()
-
-    @classmethod
-    def content_for(cls, stop):
-        """(title, rows, footer, times) for tsw_stops.StopTracker.stop. Each row is cells of (text, colour, bold):
-        a mark, the station, its platform, the arrival and departure times. The first row is a heading; a column
-        nothing is known for is left out. `times`: which columns are times (set to the right)."""
-        stops = stop.get("schedule") or []
-        shown, rest = stops[:cls.STOPS], stops[cls.STOPS:]
-        left = stop["phase"] == "departed"
-        rows = []
-        for n, (station, platform, arrives, departs) in enumerate(shown):
-            mark, colour, bold = "", FG, False
-            if n == 0:
-                mark, colour, bold = ("✓", MUTED, False) if left else ("▸", FG, True)
-            elif n == 1 and left:
-                mark, bold = "▸", True                     # where you're going now
-            rows.append([(mark, GOOD if mark == "✓" else colour, bold), (station, colour, bold),
-                         ((platform.split()[-1].lstrip("0") or "0") if platform else "", MUTED, False),
-                         (short_time(arrives) if arrives is not None else "", colour, bold),
-                         (short_time(departs) if departs is not None else "", colour, bold)])
-        keep = [c for c in range(5) if c < 2 or any(r[c][0] for r in rows)]
-        heading = [("", MUTED, True), ("STATION", MUTED, True), ("PLAT", MUTED, True), ("ARR", MUTED, True),
-                   ("DEP", MUTED, True)]
-        rows = [tuple(r[c] for c in keep) for r in [heading] + rows]
-        footer = ""
-        if rest:
-            station, _, arrives, _ = rest[-1]
-            footer = f"+ {len(rest)} more stop{'s' * (len(rest) != 1)} to {station}"
-            if arrives is not None:
-                footer += f", arr {short_time(arrives)}"
-        title = "SCHEDULE" + (f"  ·  {stop['service']}" if stop.get("service") else "")
-        times = tuple(c >= 3 for c in keep)
-        return title, tuple(rows), footer, times
-
-    @staticmethod
-    def _label(parent, text, colour, size, bold, **grid):
-        tk.Label(parent, text=text, bg=PANEL, fg=colour, justify="left",
-                 font=(FONT, size, "bold") if bold else (FONT, size)).grid(**grid)
-
-    def _build(self, content):
-        """Lays the table out again (only when it changes: once a stop or so)."""
-        self.content = content
-        title, rows, footer, times = content[:4]
-        if self.table is not None:
-            self.table.destroy()
-        k, label = self.k, self._label
-        table = self.table = tk.Frame(self.box, bg=PANEL)
-        table.pack()
-        last = len(rows[0]) - 1
-        label(table, title, FG, *self.TITLE, row=0, column=0, columnspan=last + 1, sticky="w",
-              pady=(0, round(4 * k)))
-        for r, cells in enumerate(rows, start=1):
-            size = self.HEAD if r == 1 else self.ROW
-            for c, (text, colour, bold) in enumerate(cells):
-                label(table, text, colour, size, bold, row=r, column=c, sticky="e" if times[c] else "w",
-                      padx=(0, 0 if c == last else round((6 if c == 0 else 14) * k)))
-        row = self._more(table, len(rows) + 1, last + 1)
-        if footer:
-            label(table, footer, MUTED, *self.FOOT, row=row, column=0, columnspan=last + 1, sticky="w",
-                  pady=(round(4 * k), 0))
-        self.win.update_idletasks()
-        self._place()
-
-    def _more(self, table, row, columns):
-        """Anything under the table, from `row`: the row after it."""
-        return row
-
-
-class SummaryOverlay(ScheduleOverlay):
-    """At the end of a service, under the what-to-do panel in place of the schedule: how the run went against the
-    best run of the same service before (tsw_history.py), where it's better in green, and each ride's comfort mark."""
-    RIDES = 10                # more rides than this: only those that lost points, the worst this many
-
-    def show(self, run, best, count):
-        content = self.summary_for(run, best, count)
-        if content != self.content:
-            self._build(content)
-        Overlay.show(self)
-
-    def _more(self, table, row, columns):
-        """The rides' marks, in a table of their own under the comparison."""
-        rides = self.content[4]
-        if not rides:
-            return row
-        lines, note = rides
-        k, label = self.k, self._label
-        frame = tk.Frame(table, bg=PANEL)
-        frame.grid(row=row, column=0, columnspan=columns, sticky="w", pady=(round(8 * k), 0))
-        label(frame, "RIDES", FG, *self.TITLE, row=0, column=0, columnspan=3, sticky="w", pady=(0, round(2 * k)))
-        for r, (station, mark, colour, why) in enumerate(lines, start=1):
-            label(frame, station, FG, self.ROW, False, row=r, column=0, sticky="w", padx=(0, round(14 * k)))
-            label(frame, mark, colour, self.ROW, True, row=r, column=1, sticky="e", padx=(0, round(14 * k)))
-            label(frame, why, MUTED, *self.FOOT, row=r, column=2, sticky="w")
-        if note:
-            label(frame, note, MUTED, *self.FOOT, row=len(lines) + 1, column=0, columnspan=3, sticky="w")
-        return row + 1
-
-    @classmethod
-    def rides_for(cls, marks):
-        """(rows of (station, mark, colour, why), note) for the rides kept with a run (tsw_comfort._ride), or None.
-        All of them, or on a long service those that lost points, in the order driven."""
-        if not marks:
-            return None
-        shown = list(range(len(marks)))
-        if len(marks) > cls.RIDES:
-            lost = [i for i in shown if whole(marks[i]["mark"]) < 100]
-            worst = set(sorted(lost, key=lambda i: marks[i]["mark"])[:cls.RIDES])
-            shown = [i for i in lost if i in worst]
-        rows = tuple((marks[i].get("station") or "-", str(whole(marks[i]["mark"])), mark_colour(marks[i]["mark"]),
-                      lost_text(marks[i]["lost"])) for i in shown)
-        rest = [r for i, r in enumerate(marks) if i not in shown]
-        note = ""
-        if rest:
-            note = f"+ {len(rest)} more ride{'s' * (len(rest) != 1)}"
-            if all(whole(r["mark"]) >= 100 for r in rest):
-                note += " at 100"
-        return rows, note
-
-    @classmethod
-    def summary_for(cls, run, best, count):
-        """(title, rows, footer, times, rides): the first four as ScheduleOverlay.content_for has them, rides as
-        rides_for gives them."""
-        rows = [[("", MUTED, True), ("THIS RUN", MUTED, True)] + ([("BEST BEFORE", MUTED, True)] if best else [])]
-
-        def row(label, key, text, better=None):
-            if run.get(key) is None:
-                return
-            had = best is not None and best.get(key) is not None
-            colour = GOOD if had and better and better(run, best) else FG
-            cells = [(label, MUTED, False), (text(run), colour, True)]
-            if best:
-                cells.append((text(best) if had else "-", FG, False))
-            rows.append(cells)
-
-        row("Points", "points", lambda r: f"{r['points']:,}", lambda a, b: a["points"] > b["points"])
-        row("Comfort", "comfort", lambda r: str(whole(r["comfort"])),
-            lambda a, b: whole(a["comfort"]) > whole(b["comfort"]))
-        row("On time", "on_time", lambda r: f"{r['on_time']} of {r['stops']} stops",
-            lambda a, b: a["on_time"] / a["stops"] > b["on_time"] / b["stops"])
-        row("Stop accuracy", "accuracy", lambda r: f"{r['accuracy']:.1f} m off",
-            lambda a, b: a["accuracy"] < b["accuracy"])
-        if run.get("rides"):
-            row("Smooth rides", "smooth", lambda r: f"{r['smooth']} of {r['rides']}",
-                lambda a, b: a["smooth"] / a["rides"] > b["smooth"] / max(b.get("rides") or 0, 1))
-        if run.get("passengers"):
-            row("Passengers", "passengers", lambda r: f"up to {r['passengers']}")
-        footer = []
-        if run["worst_late"] > tsw_history.ON_TIME:
-            footer.append(f"Latest {minutes(run['worst_late'])} behind time at a stop")
-        if run.get("comfort") is not None:
-            footer.append("Comfort: each ride's mark, weighted by the passengers aboard" if run.get("passengers")
-                          else "Comfort: the rides' marks, nobody aboard")
-        if best:
-            line = f"Best before on {best['finished'][:10]}"
-            if best.get("train") and best["train"] != run.get("train"):
-                line += f" with the {pretty_train(best['train'])}"
-            footer.append(line + f"  ·  {count} runs of {run['service']} kept")
-        else:
-            footer.append(f"First run of {run['service']} kept")
-        title = f"SERVICE COMPLETE  ·  {run['service']}" + (f"  ·  {run['route']}" if run.get("route") else "")
-        times = tuple(c > 0 for c in range(len(rows[0])))
-        return title, tuple(tuple(r) for r in rows), "\n".join(footer), times, cls.rides_for(run.get("marks"))
-
-
-class SpeedOverlay(Overlay):
-    """The speed limit, for as long as you're over it: amber while within the game's tolerance, red once the game
-    counts it as speeding. Sits below the next stop readout, moving down while that's shown if it needs to."""
-
-    def __init__(self, root, k):
-        super().__init__(root, k, 0.20, [(9, True), (26, True), (11, False)])
-
-    def show(self, state, imperial):
-        limit, you = (tsw_units.speed(state[k], imperial) for k in ("limit", "speed"))
-        if you == limit:                  # just over: "you 60 mph" under "60 mph" would look wrong
-            you = tsw_units.speed(state["speed"], imperial, 1)
-        color = BAD if state["counted"] else WARN
-        self.set(("SPEED LIMIT", color), (limit, color), ("you " + you, FG))
-        super().show()
-
-
-class ComfortOverlay(Overlay):
-    """In the last seconds of a hard stop, to ease the brake off before the train stops; then how the stop went;
-    else while braking or speeding up is firm (amber) or harsh (red) for the passengers, and for a moment after
-    what that cost the service's comfort (tsw_comfort.ComfortWatch.coach). Below the speeding popup."""
-
-    def __init__(self, root, k):
-        super().__init__(root, k, 0.20, [(10, True), (24, True), (12, False)])
-
-    @staticmethod
-    def aboard(n):
-        return f"{n} passenger{'s' * (n != 1)} aboard" if n else "no passengers aboard"
-
-    def show(self, coach):
-        phase = coach["phase"]
-        if phase == "ease":
-            self.set((f"STOPPING IN {max(1, math.ceil(coach['seconds']))} s", WARN), ("EASE OFF THE BRAKE", WARN),
-                     (f"braking {coach['braking']:.1f} m/s²", FG))
-        elif phase == "stopped":
-            note = f"braking {coach['braking']:.1f} m/s² as it stopped"
-            if whole(coach.get("cost") or 0):
-                note += f"  ·  −{whole(coach['cost'])}"
-            score = coach.get("score")
-            self.set((f"COMFORT {whole(score)}" if score is not None else "", FG),
-                     ("JOLT ON STOPPING", BAD) if coach["jolt"] else ("SMOOTH STOP", GOOD), (note, MUTED))
-        elif phase == "lost":
-            what = "BRAKING" if coach["kind"] == "brake" else "ACCELERATION"
-            self.set((f"{coach['level'].upper()} {what}  −{whole(coach['cost'])}",
-                      BAD if coach["level"] == "harsh" else WARN),
-                     (f"COMFORT {whole(coach['score'])}", FG),
-                     (f"this ride {whole(coach['mark'])}  ·  {self.aboard(coach['passengers'])}", FG))
-        else:
-            colour = BAD if phase == "harsh" else WARN
-            what = "BRAKING" if coach["kind"] == "brake" else "ACCELERATION"
-            if phase == "harsh":
-                note = self.aboard(coach["passengers"])
-            else:
-                note = "ease off a step" if coach["kind"] == "brake" else "ease off the power"
-            self.set((f"{phase.upper()} {what}", colour), (f"{coach['felt']:.1f} m/s²", colour), (note, FG))
-        super().show()
-
-
 # ---------------------------------------------------------------- window
-class HistoryWindow:
-    """The services you've driven to the end (tsw_history.py), newest first, each service's best run in green."""
-    COLUMNS = (("finished", "Finished", 125, "w"), ("route", "Route", 150, "w"), ("service", "Service", 70, "w"),
-               ("train", "Train", 150, "w"), ("points", "Points", 65, "e"), ("on_time", "On time", 65, "e"),
-               ("accuracy", "From marker", 85, "e"), ("comfort", "Comfort", 65, "e"),
-               ("smooth", "Smooth rides", 90, "e"), ("passengers", "Passengers", 80, "e"))
-
-    def __init__(self, root, k, history):
-        win = self.win = tk.Toplevel(root)
-        win.title("Service history")
-        win.configure(bg=BG)
-        st = ttk.Style(root)
-        st.configure("History.Treeview", background=PANEL, fieldbackground=PANEL, foreground=FG, borderwidth=0,
-                     rowheight=round(22 * k))
-        st.configure("History.Treeview.Heading", background=TRACK, foreground=MUTED, font=(FONT, 9, "bold"),
-                     borderwidth=0, relief="flat")
-        st.map("History.Treeview", background=[("selected", "#3a414d")], foreground=[("selected", FG)])
-        st.map("History.Treeview.Heading", background=[("active", TRACK)])
-        outer = ttk.Frame(win, padding=(16, 12))
-        outer.pack(fill="both", expand=True)
-        ttk.Label(outer, text="Services driven to the end", style="Head.TLabel").pack(anchor="w")
-        ttk.Label(outer, text="Points, on time and the distance from the marker come from the game's own save; "
-                              "smooth rides and passengers from the passenger comfort watch. Each service's best "
-                              "run is in green.", style="Sub.TLabel", wraplength=round(860 * k),
-                  justify="left").pack(anchor="w", pady=(2, 10))
-        frame = ttk.Frame(outer)
-        frame.pack(fill="both", expand=True)
-        tree = ttk.Treeview(frame, columns=[c[0] for c in self.COLUMNS], show="headings", style="History.Treeview",
-                            height=18)
-        for key, title, width, anchor in self.COLUMNS:
-            tree.heading(key, text=title, anchor=anchor)
-            tree.column(key, width=round(width * k), anchor=anchor, stretch=key in ("route", "train"))
-        bar = ttk.Scrollbar(frame, orient="vertical", command=tree.yview)
-        tree.configure(yscrollcommand=bar.set)
-        tree.pack(side="left", fill="both", expand=True)
-        bar.pack(side="right", fill="y")
-        tree.tag_configure("best", foreground=GOOD)
-        best = {}
-        for run in history.runs:
-            if run.get("points") is not None and run["points"] > best.get(run["service"], (None, -1))[1]:
-                best[run["service"]] = (run["id"], run["points"])
-        for run in reversed(history.runs):
-            tree.insert("", "end", values=self.cells(run),
-                        tags=("best",) if best.get(run["service"], (None,))[0] == run["id"] else ())
-        if not history.runs:
-            ttk.Label(outer, text="None yet: a service is kept here once you reach its last stop.",
-                      style="Sub.TLabel").pack(anchor="w", pady=(8, 0))
-
-    @staticmethod
-    def cells(run):
-        def when(text):
-            try:
-                return datetime.datetime.fromisoformat(text).strftime("%d %b %Y %H:%M")
-            except (TypeError, ValueError):
-                return text or ""
-        return (when(run.get("finished")), run.get("route", ""), run["service"], pretty_train(run.get("train")),
-                "-" if run.get("points") is None else f"{run['points']:,}", f"{run['on_time']} of {run['stops']}",
-                f"{run['accuracy']:.1f} m",
-                "-" if run.get("comfort") is None else str(whole(run["comfort"])),
-                f"{run['smooth']} of {run['rides']}" if run.get("rides") else "-",
-                run.get("passengers", "-"))
-
-
 class App:
     CW, CH = 560, 290    # canvas size at 96 dpi
     GH = 250             # height of the gauge area; the look bar sits below it
@@ -966,25 +377,11 @@ class App:
         self.bridge = Bridge(self.log)
         self.bridge.enabled = not start_paused
         self.look = core.LookController(self.log)
-        self.comfort = tsw_comfort.ComfortWatch(self.log)
-        # the comfort watch reads the game 15 times a second in one request: the others take what they can from it
-        self.bridge.reading = self.comfort.reading
-        self.tracker = tsw_stops.StopTracker(self.log, self.comfort.reading)
-        self.speed_watch = tsw_speed.SpeedWatch(self.comfort.reading)
-        self.at_station = None        # service you're stopped at a station of, for the ride report
-        self.at_name = None           # ... and that station
-        self.at_first = False         # ... and it's the service's first stop
-        self.ride = None              # ride report for that station
-        self.restores = 0             # times the comfort went back to a game save's, as of that station
-        self.history = tsw_history.History()
-        self.history_window = None
         self.look_raw = 0.0           # twist position, +1 = full right
         self.stick = None
         self.next_stick_try = 0.0
         self.assigning = None         # settings key waiting for a joystick button press
         self.held = {name: False for name in CAB_BUTTONS.values()}   # cab buttons held down now
-        self.stop_held = set()        # what's holding the next stop up now: "button", "key"
-        self.fg_pid, self.fg_ok = None, False   # process with the focus, and whether the next stop key counts there
         self.raw_y = 0.0
         self.y = 0.0
         self.y_filter = core.AxisFilter()
@@ -1000,26 +397,12 @@ class App:
         pygame.init()
         self._style()
         self._build()
-        root.update_idletasks()       # shows this window first, so the overlays hand the focus back to it
-        self.dwell_overlay = DwellOverlay(root, self.k)
-        self.schedule_overlay = ScheduleOverlay(root, self.k)
-        self.schedule_overlay.under = (self.dwell_overlay,)
-        self.summary_overlay = SummaryOverlay(root, self.k)
-        self.summary_overlay.under = (self.dwell_overlay,)
-        self.overlay = StopOverlay(root, self.k)
-        self.speed_overlay = SpeedOverlay(root, self.k)
-        self.speed_overlay.under = (self.overlay,)
-        self.comfort_overlay = ComfortOverlay(root, self.k)
-        self.comfort_overlay.under = (self.overlay, self.speed_overlay)
         self._refresh_toggle()
         self._refresh_button_label()
         root.attributes("-topmost", bool(self.s["on_top"]))
         root.protocol("WM_DELETE_WINDOW", self.close)
         self.bridge.start()
         self.look.start()
-        self.tracker.start()
-        self.speed_watch.start()
-        self.comfort.start()
         self.log("Bridge started" + (" (paused)" if start_paused else ""))
         self.tick()
         if with_game:
@@ -1188,36 +571,13 @@ class App:
                        command=lambda k=key: self.on_assign(k)).pack(side="left", padx=(0, 6))
             ttk.Button(btn_row, text="Clear",
                        command=lambda k=key: self.on_clear_button(k)).pack(side="left")
-        row = 7 + len(BUTTON_ACTIONS)
-        ttk.Label(grid, text="Next stop key", style="Muted.TLabel").grid(row=row, column=0, sticky="w",
-                                                                        pady=3, padx=(0, 14))
-        key_row = ttk.Frame(grid, style="Panel.TFrame")
-        key_row.grid(row=row, column=1, columnspan=3, sticky="w", pady=3)
-        self.stop_key_combo = ttk.Combobox(key_row, state="readonly", width=11, values=[NO_KEY, *STOP_KEYS])
-        self.stop_key_combo.set(self.s["stop_key"] or NO_KEY)
-        self.stop_key_combo.pack(side="left")
-        self.stop_key_combo.bind("<<ComboboxSelected>>", self.on_stop_key)
-        ttk.Label(key_row, text="hold in the game to show the next stop",
-                  style="Muted.TLabel").pack(side="left", padx=(8, 0))
 
         bottom = ttk.Frame(setp, style="Panel.TFrame")
         bottom.pack(fill="x", pady=(8, 0))
         self.top_var = tk.BooleanVar(value=bool(self.s["on_top"]))
         ttk.Checkbutton(bottom, text="Keep this window on top", variable=self.top_var,
                         style="Panel.TCheckbutton", command=self.on_top).pack(side="left")
-        self.speed_var = tk.BooleanVar(value=bool(self.s["speed_popup"]))
-        ttk.Checkbutton(bottom, text="Show the limit when speeding", variable=self.speed_var,
-                        style="Panel.TCheckbutton", command=self.on_speed_popup).pack(side="left", padx=(16, 0))
-        self.stop_panel_var = tk.BooleanVar(value=bool(self.s["stop_panel"]))
-        ttk.Checkbutton(bottom, text="Show what to do at stops", variable=self.stop_panel_var,
-                        style="Panel.TCheckbutton", command=self.on_stop_panel).pack(side="left", padx=(16, 0))
         ttk.Button(bottom, text="Re-detect train", command=self.on_redetect).pack(side="right")
-        bottom2 = ttk.Frame(setp, style="Panel.TFrame")
-        bottom2.pack(fill="x", pady=(4, 0))
-        self.comfort_var = tk.BooleanVar(value=bool(self.s["comfort"]))
-        ttk.Checkbutton(bottom2, text="Show passenger comfort", variable=self.comfort_var,
-                        style="Panel.TCheckbutton", command=self.on_comfort).pack(side="left")
-        ttk.Button(bottom2, text="Service history", command=self.on_history).pack(side="right")
 
         # log
         lp = self._panel(outer, "LOG")
@@ -1280,12 +640,6 @@ class App:
         save_settings(self.s)
         self._refresh_button_label()
         self.log(f"Button {button + 1} now {BUTTON_ACTIONS[key][1]}")
-
-    def on_stop_key(self, _event=None):
-        key = self.stop_key_combo.get()
-        self.s["stop_key"] = key if key in STOP_KEYS else None
-        save_settings(self.s)
-        self.log(f"{key} now shows the next stop while held" if self.s["stop_key"] else "Next stop key cleared")
 
     def on_joystick(self, _event=None):
         self.s["joystick"] = self.joy_combo.get()
@@ -1389,23 +743,6 @@ class App:
         self.root.attributes("-topmost", self.s["on_top"])
         save_settings(self.s)
 
-    def on_speed_popup(self):
-        self.s["speed_popup"] = bool(self.speed_var.get())
-        save_settings(self.s)
-
-    def on_stop_panel(self):
-        self.s["stop_panel"] = bool(self.stop_panel_var.get())
-        save_settings(self.s)
-
-    def on_comfort(self):
-        self.s["comfort"] = bool(self.comfort_var.get())
-        save_settings(self.s)
-
-    def on_history(self):
-        if self.history_window is not None and self.history_window.win.winfo_exists():
-            self.history_window.win.destroy()           # open it again with the runs kept since
-        self.history_window = HistoryWindow(self.root, self.k, self.history)
-
     def on_redetect(self):
         self.bridge.force_detect = True
         self.log("Re-detecting train controls...")
@@ -1424,9 +761,6 @@ class App:
         self.bridge.running = False
         self.bridge.join(timeout=3)   # lets go of any handle it's holding
         self.look.running = False
-        self.tracker.running = False
-        self.speed_watch.running = False
-        self.comfort.running = False
         self.log("Bridge closed")
         self._drain_log()
         if self.log_file is not None:
@@ -1468,35 +802,6 @@ class App:
     def _release_all(self):
         for name in self.held:
             self._set_held(name, False)
-        self._show_stop("button", False)
-
-    def _show_stop(self, source, down):
-        """The next stop shows while its joystick button or its key ("button" / "key") is held."""
-        shown = bool(self.stop_held)
-        if down:
-            self.stop_held.add(source)
-        else:
-            self.stop_held.discard(source)
-        if bool(self.stop_held) == shown:
-            return
-        self.tracker.shown = bool(self.stop_held)
-        if self.stop_held:
-            self.overlay.show(self.tracker.state, self.speed_watch)
-        else:
-            self.overlay.hide()
-
-    def _stop_key_held(self):
-        """The next stop key is down while the game or this window has the focus (not while typing elsewhere)."""
-        return App._key_held(self, STOP_KEYS.get(self.s["stop_key"]))
-
-    def _key_held(self, vk):
-        """A key (Windows key code) is down while the game or this window has the focus."""
-        if not vk or not ctypes.windll.user32.GetAsyncKeyState(vk) & 0x8000:
-            return False
-        pid = autostart.foreground_pid()
-        if pid != self.fg_pid:
-            self.fg_pid, self.fg_ok = pid, pid == os.getpid() or autostart.is_game(pid)
-        return self.fg_ok
 
     def _poll_joystick(self):
         sid = self.stick.get_instance_id() if self.stick else None
@@ -1514,8 +819,6 @@ class App:
                     self._assign_button(ev.button)
                 elif cab_button:
                     self._set_held(cab_button, down)
-                elif ev.button == self.s["stop_button"]:
-                    self._show_stop("button", down)
                 elif down and ev.button == self.s["toggle_button"]:
                     self.toggle()
 
@@ -1886,61 +1189,13 @@ class App:
                               fill=mark, outline="")
 
     # ---- main loop
-    def _ride(self, stop):
-        """The ride report for the station you're stopped at (tsw_stops.StopTracker.stop): it follows the ride as
-        the judging catches up with the stop, and stays as it was once you've left; leaving starts the next ride.
-        A game save loaded since you got to the station takes you away from it without leaving it."""
-        if self.comfort.restores != self.restores:
-            self.restores, self.at_station, self.ride = self.comfort.restores, None, None
-        if stop and stop["phase"] != "departed":
-            self.at_station, self.at_name, self.at_first = stop["service"], stop["station"], bool(stop.get("first"))
-            self.ride = self.comfort.report(stop["service"], self.at_first)
-        elif self.at_station is not None:
-            self.comfort.new_leg(self.at_station, self.at_name, self.at_first, self.restores)
-            self.at_station = None
-        return self.ride if stop else None
-
     def tick(self):
         self.frame += 1
         try:
             self._sync_handle_speed()
             self._poll_joystick()
-            self._show_stop("key", self._stop_key_held())
             self._update_status()
             self._redraw()
-            stop = self.tracker.stop
-            ride = self._ride(stop)
-            run = self.history.finish(stop, self.comfort.service(stop["service"], stop["station"])) \
-                if stop and stop["phase"] == "end" else None
-            at_stop = stop if self.s["stop_panel"] else None
-            if at_stop:
-                self.dwell_overlay.show(at_stop, self.tracker.state, self.speed_watch.imperial,
-                                        ride if self.s["comfort"] else None)
-                if run:                                      # after it: these go under that panel
-                    self.summary_overlay.show(run, self.history.best_before(run), self.history.count(run["service"]))
-                    self.schedule_overlay.hide()
-                else:
-                    self.schedule_overlay.show(at_stop)
-                    self.summary_overlay.hide()
-            else:
-                self.dwell_overlay.hide()
-                self.schedule_overlay.hide()
-                self.summary_overlay.hide()
-            if self.overlay.shown:
-                self.overlay.update(self.tracker.state, self.speed_watch)
-            speeding = self.speed_watch.state if self.s["speed_popup"] else None
-            if speeding:
-                self.speed_overlay.show(speeding, self.speed_watch.imperial)
-            else:
-                self.speed_overlay.hide()
-            coach = self.comfort.coach if self.s["comfort"] else None
-            if coach:
-                self.comfort_overlay.show(coach)             # after the speeding popup: it goes under that
-            else:
-                self.comfort_overlay.hide()
-            for overlay in (self.dwell_overlay, self.schedule_overlay, self.summary_overlay, self.overlay,
-                            self.speed_overlay, self.comfort_overlay):
-                overlay.keep_on_top()
             self._drain_log()
         except Exception as e:
             self.log(f"UI error: {e}")

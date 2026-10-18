@@ -47,7 +47,6 @@ class PROCESSENTRY32W(ctypes.Structure):
 
 
 TH32CS_SNAPPROCESS = 0x2
-PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
 INVALID_HANDLE = ctypes.c_void_p(-1).value
 EVENT_MODIFY_STATE = 0x2
 WAIT_OBJECT_0, WAIT_ABANDONED, WAIT_TIMEOUT = 0x0, 0x80, 0x102
@@ -75,12 +74,6 @@ if os.name == "nt":
     SetEvent = _api(_k32, "SetEvent", wintypes.BOOL, wintypes.HANDLE)
     WaitForSingleObject = _api(_k32, "WaitForSingleObject", wintypes.DWORD, wintypes.HANDLE, wintypes.DWORD)
     FindWindowW = _api(_u32, "FindWindowW", wintypes.HWND, wintypes.LPCWSTR, wintypes.LPCWSTR)
-    GetForegroundWindow = _api(_u32, "GetForegroundWindow", wintypes.HWND)
-    GetWindowThreadProcessId = _api(_u32, "GetWindowThreadProcessId", wintypes.DWORD,
-                                    wintypes.HWND, ctypes.POINTER(wintypes.DWORD))
-    OpenProcess = _api(_k32, "OpenProcess", wintypes.HANDLE, wintypes.DWORD, wintypes.BOOL, wintypes.DWORD)
-    QueryFullProcessImageNameW = _api(_k32, "QueryFullProcessImageNameW", wintypes.BOOL, wintypes.HANDLE,
-                                      wintypes.DWORD, wintypes.LPWSTR, ctypes.POINTER(wintypes.DWORD))
 
 
 def game_running():
@@ -98,26 +91,6 @@ def game_running():
         return False
     finally:
         CloseHandle(snap)
-
-
-def foreground_pid():
-    """Process id of the window that has the focus (0 if none)."""
-    pid = wintypes.DWORD()
-    GetWindowThreadProcessId(GetForegroundWindow(), ctypes.byref(pid))
-    return pid.value
-
-
-def is_game(pid):
-    """True if the process is Train Sim World."""
-    h = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, False, pid) if pid else None
-    if not h:
-        return False
-    try:
-        buf, n = ctypes.create_unicode_buffer(1024), wintypes.DWORD(1024)
-        return bool(QueryFullProcessImageNameW(h, 0, buf, ctypes.byref(n))) \
-            and GAME_EXE in os.path.basename(buf.value).lower()
-    finally:
-        CloseHandle(h)
 
 
 def bridge_open():

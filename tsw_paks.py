@@ -50,7 +50,7 @@ class Pak:
     def __init__(self, path):
         self.path = path
         self._f = None
-        self._lock = threading.Lock()   # one file handle: the bridge and the stop tracker read from two threads
+        self._lock = threading.Lock()   # one file handle, read from more than one thread
         with open(path, "rb") as f:
             f.seek(0, 2)
             size = f.tell()
