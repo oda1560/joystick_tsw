@@ -351,21 +351,22 @@ class DoorDesk:
 
 
 class KeyedDoorDesk(DoorDesk):
-    """A Class 142's door buttons and the DoorKeySwitch they need; `sent` lists what was set, but not Interacting."""
+    """A Class 142's door buttons and the DoorKeySwitch they need (or another key by name); `sent` lists what was
+    set, but not Interacting."""
 
-    def __init__(self, key_on):
+    def __init__(self, key_on, key="DoorKeySwitch"):
         super().__init__()
-        self.key_value, self.sent = 1.0 if key_on else 0.0, []
+        self.key_name, self.key_value, self.sent = key, 1.0 if key_on else 0.0, []
 
     def get_value(self, path):
-        if path.startswith("CurrentDrivableActor/DoorKeySwitch."):
+        if path.startswith(f"CurrentDrivableActor/{self.key_name}."):
             return self.key_value
         return super().get_value(path)
 
     def set(self, path, value):
         if path.endswith(".InputValue"):
             self.sent.append((self._name(path), value))
-            if path.startswith("CurrentDrivableActor/DoorKeySwitch."):
+            if path.startswith(f"CurrentDrivableActor/{self.key_name}."):
                 self.key_value = value
 
 
@@ -415,6 +416,35 @@ class Doors(unittest.TestCase):
         controls.door_open_right.set(True)
         controls.let_go()
         self.assertEqual(api.sent[-1], ("DoorKeySwitch", 0.0))
+
+    # the Class 323's door panel buttons, as the game lists them (2026-10-18)
+    CLASS_323 = ["DoorControlPanel_Release_1_L", "DoorControlPanel_Release_2_L", "DoorControlPanel_Close_L",
+                 "DoorControlPanel_Release_1_R", "DoorControlPanel_Release_2_R", "DoorControlPanel_Close_R",
+                 "DoorPanelKeySwitch_L", "DoorPanelKeySwitch_R"]
+
+    def panel_keyed(self, train):
+        api = KeyedDoorDesk(key_on=False, key="DoorPanelKeySwitch_L")
+        controls = core.TrainControls(api)
+        controls.train_id = train
+        controls._detect_doors(self.CLASS_323)
+        return api, controls
+
+    def test_class_323_door_panel_key_turned_on_for_either_side(self):
+        """The Class 323's panel buttons do nothing unless DoorPanelKeySwitch_L is On, for both sides (game files)."""
+        api, controls = self.panel_keyed("RVM_MGP_NT_Class323_DMS_A_C")
+        controls.door_open_right.set(True)
+        self.assertEqual(api.sent, [("DoorPanelKeySwitch_L", 1.0), ("DoorControlPanel_Release_1_R", 1.0),
+                                    ("DoorControlPanel_Release_2_R", 1.0)])
+        controls.door_open_right.set(False)
+        self.assertEqual(api.sent[-1], ("DoorPanelKeySwitch_L", 0.0))
+        self.assertIn("(with DoorPanelKeySwitch_L)", controls.describe())
+
+    def test_a_door_panel_key_on_another_train_is_left_alone(self):
+        """The LIRR M7 has a DoorPanelKeySwitch_L too; what it does there isn't known."""
+        api, controls = self.panel_keyed("RVM_LIRR_M7_Cab_C")
+        self.assertIsNone(controls.door_key)
+        controls.door_close_left.set(True)
+        self.assertEqual(api.sent, [("DoorControlPanel_Close_L", 1.0)])
 
     def test_class_80x_close_interlock_buttons(self):
         """'Interlock' starts like 'int' (an interior door's button), but it's the desk's door close."""

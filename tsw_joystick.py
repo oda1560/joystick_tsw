@@ -123,10 +123,14 @@ DOOR_SKIP = ["guard", "ext", "int", "inner", "local", "gangway", "nose", "vestib
              "light", "lamp", "indicat", "fault", "test", "emerg", "egress", "toilet", "luggage", "lock"]
 # ... except these, which only start like one: the Class 80x desk's door close is DoorCloseInterlock_L(PushButton)
 DOOR_KEEP = ["interlock"]
-# Key switches the door buttons do nothing without, by name. Class 142 (both packs): its blueprint sends Door Open
-# and Door Close down the train only while DoorKeySwitch is On (UpdateDoorLeftMU / RightMU in the game files,
-# 2026-10-17); the game's own unlock task turns it On first and back Off after. Its only train.
-DOOR_KEYS = ["DoorKeySwitch"]
+# Key switches the door buttons do nothing without, by name, with the trains each is used on (part of their class
+# name; None: any train that has it). Class 142 (both packs): its blueprint sends Door Open and Door Close down the
+# train only while DoorKeySwitch is On (UpdateDoorLeftMU / RightMU in the game files, 2026-10-17); the game's own
+# unlock task turns it On first and back Off after. Its only train. Class 323 (all five packs): the door panel buttons do nothing unless
+# DoorPanelKeySwitch_L is On, for either side (CanOperateDoorControlPannel, 2026-10-18); the game's door task turns
+# it On, presses DoorControlPanel_Release_1_L / _R or Close_L / _R, and turns it Off. The LIRR and Metro-North
+# M3 / M7 have a DoorPanelKeySwitch_L too, not looked at.
+DOOR_KEYS = {"DoorKeySwitch": None, "DoorPanelKeySwitch_L": "Class323"}
 
 PRESS_MESSAGES = {"aws": "AWS acknowledged", "alerter": "Alerter acknowledged",
                   "door_open_left": "Opening the left doors", "door_open_right": "Opening the right doors",
@@ -1490,12 +1494,20 @@ class KeyedButton:
     def _turn(self, on):
         self.api.set(f"CurrentDrivableActor/{self.key}.InputValue", 1.0 if on else 0.0)
 
+    def _is_on(self):
+        v = self.api.get_value(f"CurrentDrivableActor/{self.key}.Function.GetCurrentOutputValue")
+        return isinstance(v, (int, float)) and v > 0.5
+
     def set(self, down):
-        if down and not self.turned:
-            v = self.api.get_value(f"CurrentDrivableActor/{self.key}.Function.GetCurrentOutputValue")
-            if not (isinstance(v, (int, float)) and v > 0.5):
-                self._turn(True)
-                self.turned = True
+        if down and not self.turned and not self._is_on():
+            self._turn(True)
+            self.turned = True
+            # the train looks at the key as the button goes in: the game's own door task waits for the key to
+            # get to On before pressing (Class 323 game files)
+            for _ in range(10):
+                if self._is_on():
+                    break
+                time.sleep(0.02)
         self.button.set(down)
         if not down and self.turned:
             self._turn(False)            # the doors stay released / closed: the train holds that, not the key
@@ -2036,7 +2048,8 @@ class TrainControls:
         if not any(r is not None and r < 3 for r in ranks.values()):
             # every door button switched off: the doors aren't the driver's (SBD Metrolink cab car), none used
             ranks = {n: None if r == 3 else r for n, r in ranks.items()}
-        self.door_key = next((n for n in names if n in DOOR_KEYS), None)
+        self.door_key = next((n for n in names if n in DOOR_KEYS
+                              and (DOOR_KEYS[n] is None or DOOR_KEYS[n] in (self.train_id or ""))), None)
         for action in ("open", "close"):
             for side in ("left", "right"):
                 group = [(ranks[n], n) for a, s, n in found if a == action and s in (side, None)
