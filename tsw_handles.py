@@ -109,6 +109,10 @@ class Control:
         self.snap_pull = min(0.5, 0.1 * float(p.get("NotchSnapSensitivity", 5.0)))
         # an IrregularLever with no table in the files uses the game's built-in one, which isn't known
         self.table_known = "ValueMap" in p or self.base != "IrregularLeverComponent"
+        # how far the handle moves (in input) each second its keyboard key is held; None where the files leave it
+        # to the game's built-in setting, which isn't known (Class 70 power handle 0.25: Idle to N8 in 3.1 s)
+        rate = p.get("DigitalSensitivity")
+        self.keyboard_rate = float(rate) if isinstance(rate, (int, float)) and rate > 0 else None
         # the DSD pedal button counts backwards in the game (rests at 1, pressed at 0); the train sets that up
         # when it starts, so it isn't in the files
         self.reversed_button = self.cls == "ReversiblePushButton_C"

@@ -37,7 +37,9 @@ DRIVING_IDS = {"throttle", "automaticbrake", "reverser"}
 ERROR = {"Result": "Error", "Message": "Node failed to return valid data."}
 
 STICK_MOVE_SECONDS = 0.8         # how long the simulated hand takes to move the stick to a new place
-STICK_HOLD_SECONDS = 0.7         # and how long it then holds it there
+STICK_HOLD_SECONDS = 0.7         # and how long it then holds it there (longer while a handle is still on its
+                                 # way there at its keyboard speed, up to STICK_WAIT_SECONDS)
+STICK_WAIT_SECONDS = 30.0
 SHORT_OF_FULL = 0.97             # full power / full brake reaching less than this of the handle's is flagged
 
 
@@ -87,6 +89,8 @@ class Control(tsw_handles.Control):
             "Property.bInputEnabled": lambda: {"Value": self.enabled},
             "Property.InteractionEnvironmentComponent": lambda: {"componentName": self.env},
             "Property.bCustomOutputValueMapping": lambda: {"Value": self.custom},
+            # (the game's built-in setting where the files have none, which isn't known: no answer then)
+            "Property.DigitalSensitivity": lambda: {"Value": self.keyboard_rate} if self.keyboard_rate else None,
             "Property.DisplayInfo": lambda: {
                 "mode": enum(di.get("Mode"), "None"),
                 "valueSource": enum(di.get("ValueSource"), "OutputNormalised"),
@@ -188,7 +192,8 @@ class Stick:
 
 
 class Driver:
-    """Works the stick as run() does: read 30 times a second, smoothed, and only sent on when it moves."""
+    """Works the stick as run() does: read 30 times a second, smoothed, and only sent on when it moves or a
+    handle is still on its way at its keyboard speed."""
 
     def __init__(self, controls, clock):
         self.controls, self.clock = controls, clock
@@ -199,7 +204,7 @@ class Driver:
         self.clock.sleep(1.0 / tj.POLL_HZ)
         self.stick.axes[tj.Y_AXIS] = -self.position          # pushing the stick forward reads negative
         y = self.filter.update(tj.read_y(self.stick, tj.Y_AXIS, False, tj.DEADZONE), self.clock.now)
-        if self.last_sent is not None and abs(y - self.last_sent) < tj.SEND_THRESHOLD:
+        if self.last_sent is not None and abs(y - self.last_sent) < tj.SEND_THRESHOLD and not self.controls.moving():
             return
         if self.last_sent is None:
             self.last_sent = y
@@ -213,6 +218,10 @@ class Driver:
             self.position = start + (position - start) * i / steps
             self.tick()
         for _ in range(round(STICK_HOLD_SECONDS * tj.POLL_HZ)):
+            self.tick()
+        for _ in range(round(STICK_WAIT_SECONDS * tj.POLL_HZ)):
+            if not self.controls.moving():
+                break
             self.tick()
 
 
@@ -231,6 +240,7 @@ class Result:
         self.lines = []                  # what each control did
         self.problems = []               # the bridge does something wrong on this train
         self.doubts = []                 # couldn't be checked properly, or the model may be off
+        self.keyboard = ""               # how fast the stick moves the handles (keyboard_speed)
 
     @property
     def verdict(self):
@@ -303,6 +313,9 @@ def check_train(train, package, files, cab=None):
                                else ""))
     elif b:
         result.lines.append(f"stick: brake {b.name} (no throttle)")
+    result.keyboard = keyboard_speed(controls)
+    if result.keyboard:
+        result.lines.append(f"  keyboard speed: {result.keyboard}")
     for name in snapshots:
         parts = [f"{c.name} {c.describe(on(c, name))}" for c in (tm, bm) if c]
         result.lines.append(f"  {name:<18} {'; '.join(parts)}")
@@ -377,6 +390,26 @@ def check_train(train, package, files, cab=None):
         result.doubts += [f"{p} (the game files don't give {name}'s table, so the model may be off)"
                           for p in moved]
     return result
+
+
+def keyboard_speed(controls):
+    """How fast the stick moves the handles, as their keyboard keys do (Lever.toward): Off to full power / brake
+    in seconds, or why a handle goes there at once."""
+    t, b = controls.throttle, controls.brake
+    power, brake = controls.keyboard_seconds()
+    parts = []
+    for lever, seconds, what in ((t, power, "Off to full power"),
+                                 (b or (t if t and t.brake_end is not None else None), brake,
+                                  "released to full brake" if b else "Off to full brake")):
+        if lever is None:
+            continue
+        if lever.positions:
+            parts.append(f"{what} at once (Release / Hold / Apply)")
+        elif seconds is None:
+            parts.append(f"{what} at once (no keyboard speed in the files)")
+        else:
+            parts.append(f"{what} {seconds:.1f} s ({lever.rate:g} a second)")
+    return ", ".join(parts)
 
 
 def check_cab(result, controls, model, cab):
@@ -567,6 +600,11 @@ def write_report(results, files, seconds):
            "PROBLEM: the bridge would do something wrong on this train (per the model of its controls).",
            "CHECK:   it looks right, but something couldn't be checked properly - worth a try in the game.",
            "Vehicles with identical results are listed together.",
+           "",
+           "Keyboard speed: the stick moves each handle no faster than its keyboard key does in the game, from",
+           f"the game files. {sum('at once (no keyboard' in r.keyboard for r in results)} cabs have a handle "
+           "the files give no speed for: the bridge asks the game for it",
+           "there, and moves it at once if the game doesn't say.",
            ""]
     tally = defaultdict(list)
     for r in results:

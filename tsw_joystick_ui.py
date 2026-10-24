@@ -48,7 +48,7 @@ DEFAULTS = {"axis": core.Y_AXIS, "invert": core.INVERT_Y, "deadzone": core.DEADZ
             "door_close_right_button": core.DOOR_CLOSE_RIGHT_BUTTON,
             "look_enabled": core.USE_LOOK, "look_axis": core.LOOK_AXIS, "look_invert": core.LOOK_INVERT,
             "look_deadzone": core.LOOK_DEADZONE, "look_angle": core.LOOK_MAX_ANGLE,
-            "look_smoothing": core.LOOK_SMOOTHING}
+            "look_smoothing": core.LOOK_SMOOTHING, "keyboard_speed": core.KEYBOARD_SPEED}
 
 BG, PANEL, TRACK = "#16181d", "#1f232b", "#2b3039"
 FG, MUTED = "#e6e8ec", "#8a919e"
@@ -315,8 +315,8 @@ class Bridge(threading.Thread):
             self.last_sent = y        # don't snap levers until the stick actually moves
             self.send_failed = False
             return
-        if abs(y - self.last_sent) < core.SEND_THRESHOLD and not self.send_failed:
-            return                    # stick not moved: leave levers alone so the keyboard still works
+        if abs(y - self.last_sent) < core.SEND_THRESHOLD and not self.send_failed and not controls.moving():
+            return                    # stick not moved, handles where it put them: leave them alone for the keyboard
         try:
             controls.apply(y)
         except Exception as e:
@@ -371,6 +371,7 @@ class App:
     def __init__(self, root, start_paused=False, with_game=False):
         self.root = root
         self.s = load_settings()
+        core.KEYBOARD_SPEED = bool(self.s["keyboard_speed"])
         self.logq = queue.Queue()
         self.last_log = None
         self.log_file = None          # bridge.log, opened with the first line
@@ -387,6 +388,7 @@ class App:
         self.y_filter = core.AxisFilter()
         self.follow = core.HandleFollower()   # moves the handle after the stick at the train's handle speed
         self.hs_train = None          # train the handle speed setting shows ("" = not in a train)
+        self.hs_controls = None       # and the handles whose keyboard speed it shows
         self._hs_quiet = False        # the slider is being set to the train's value, not by you
         self.rev_s = 0.0              # slider position, +1 = forward end
         self.rev_zone = None
@@ -502,6 +504,9 @@ class App:
                                                                        pady=3, padx=(0, 14))
         hs_row = ttk.Frame(grid, style="Panel.TFrame")
         hs_row.grid(row=3, column=1, columnspan=3, sticky="w", pady=3)
+        self.kb_var = tk.BooleanVar(value=bool(self.s["keyboard_speed"]))
+        ttk.Checkbutton(hs_row, text="Keyboard speed", variable=self.kb_var, style="Panel.TCheckbutton",
+                        command=self.on_keyboard_speed).pack(side="left", padx=(0, 12))
         ttk.Label(hs_row, text="With stick", style="Muted.TLabel").pack(side="left", padx=(0, 6))
         self.hs_scale = ttk.Scale(hs_row, from_=0.0, to=core.HANDLE_SECONDS_MAX, length=round(180 * self.k),
                                   value=0.0, command=self.on_handle_speed)
@@ -687,10 +692,19 @@ class App:
                      + (f"{self.follow.seconds:.1f} s from Off to full" if self.follow.seconds
                         else "follows the stick at once"))
 
+    def on_keyboard_speed(self):
+        self.s["keyboard_speed"] = core.KEYBOARD_SPEED = bool(self.kb_var.get())
+        save_settings(self.s)
+        self.log("Handles move " + ("no faster than their keyboard keys move them" if self.s["keyboard_speed"]
+                                    else "as fast as the stick (and the handle speed) lets them"))
+        self._show_handle_speed()
+
     def _sync_handle_speed(self):
         """Show and use the handle speed of the train you're in, each train having its own."""
         train = self.bridge.train or ""
         if train == self.hs_train:
+            if self.bridge.controls is not self.hs_controls:     # its handles found: their keyboard speed
+                self._show_handle_speed()
             return
         self.hs_train = train
         self.follow.seconds = core.handle_seconds(train) if train else core.HANDLE_SECONDS
@@ -705,8 +719,14 @@ class App:
         self._show_handle_speed()
 
     def _show_handle_speed(self):
-        seconds = self.follow.seconds
-        text = f"{seconds:.1f} s from Off to full" if seconds else "instant"
+        seconds, controls = self.follow.seconds, self.bridge.controls
+        self.hs_controls = controls
+        text = f"{seconds:.1f} s from Off to full" if seconds else ""
+        keys = controls.keyboard_seconds() if controls and self.s["keyboard_speed"] else ()
+        keys = [f"{s:.1f} s to full {what}" for s, what in zip(keys, ("power", "brake")) if s]
+        if keys:
+            text = (f"{text}; keyboard " if text else "keyboard ") + ", ".join(keys)
+        text = text or "instant"
         if self.hs_train:
             text += f"  ·  {pretty_train(core.train_family(self.hs_train))}"
         else:
@@ -963,7 +983,7 @@ class App:
         """What the gauges show, to tell whether they need drawing again: the stick, the handles it's moving,
         the reverser, the buttons held, the twist look and the settings drawn."""
         c, b, look = self.bridge.controls, self.bridge, self.look
-        levers = tuple((lv.name, lv.neutral, lv.brake_end, lv.safe_lo, lv.safe_hi)
+        levers = tuple((lv.name, lv.neutral, lv.brake_end, lv.safe_lo, lv.safe_hi, lv.on_way(None))
                        for lv in (c.throttle, c.brake) if lv) if c else ()
         return (id(c), levers, b.enabled, b.game_status[0], self.stick is not None, round(self.raw_y, 3),
                 round(self.y, 3), b.rev_actual, self.rev_zone, bool(c and c.reverser and c.reverser.ok),
@@ -1008,7 +1028,9 @@ class App:
             items.append((c.brake, "brake"))
         targets = c.targets(self.y) if c else {}
         for i, (lever, role) in enumerate(items):
-            self._draw_lever(lever, role, targets.get(lever), (135 + i * 150) * k, top, bot, mark)
+            value = targets.get(lever)
+            value = lever.on_way(value) if value is not None else None    # still on its way at keyboard speed
+            self._draw_lever(lever, role, value, (135 + i * 150) * k, top, bot, mark)
         if not items:
             msg = "Waiting for a train..." if c is None else "No throttle/brake found on this train"
             cv.create_text(255 * k, H / 2, text=msg, fill=MUTED, font=(FONT, 10))

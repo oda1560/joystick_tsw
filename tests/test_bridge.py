@@ -35,6 +35,12 @@ class Train:
     def apply(self, y):
         self._send()
         self.applied.append(y)
+        self.on_way = max(0, self.on_way - 1)
+
+    on_way = 0                             # applies a handle still needs to get where the stick sent it
+
+    def moving(self):
+        return self.on_way > 0
 
     def press(self, name, down):
         self._send()
@@ -112,6 +118,17 @@ class Stall(unittest.TestCase):
         bridge.step()
         bridge.step()
         self.assertEqual(train.applied, [])
+
+    def test_a_handle_on_its_way_at_keyboard_speed_is_sent_on_with_the_stick_still(self):
+        train = Train()
+        bridge = self.bridge(train)
+        bridge.y = 1.0
+        bridge.step()                          # stick pushed: the handle sets off
+        train.on_way = 2
+        bridge.step()
+        bridge.step()                          # stick still, the handle still on its way
+        bridge.step()                          # there: left alone for the keyboard
+        self.assertEqual(train.applied, [1.0, 1.0, 1.0])
 
     def test_an_error_the_game_answers_with_drops_the_train(self):
         error = urllib.error.HTTPError("http://127.0.0.1:31270/set", 404, "Not Found", None, None)

@@ -323,6 +323,91 @@ class PowerBrakeHandle(unittest.TestCase):
         self.assertEqual(controls.brake.name, "TrainBrake (Irregular Lever)")
 
 
+class KeyedHandle(Class807):
+    """The 484's power/brake handle (Off at -0.27, full power at 1) with a keyboard speed, `rate` input a second
+    (None: the game doesn't say), kept where it's sent, or where the keyboard moves it (`value`)."""
+
+    def __init__(self, rate):
+        super().__init__()
+        self.rate, self.value, self.sent = rate, 0.0, []
+
+    def _req(self, method, path, params=None):
+        if path.endswith(".Property.DigitalSensitivity"):
+            return {"Result": "Success", "Values": {"Value": self.rate}} if self.rate else {"Result": "Error"}
+        if path.endswith(".InputValue"):
+            return {"Result": "Success", "Values": {"InputValue": self.value}}
+        return super()._req(method, path, params)
+
+    def set(self, path, value):
+        self.sent.append(value)
+        self.value = value
+
+
+class KeyboardSpeed(unittest.TestCase):
+    """The stick moves a handle no faster than its keyboard key moves it in the game, so pushed all the way it
+    doesn't make the handle jump there (Class 70 power handle: 0.25 a second, Idle to N8 in 3.1 s)."""
+
+    def setUp(self):
+        self.clock = Clock()
+        self.clock.sleep = lambda seconds: None             # only the stick's ticks take time here
+        patch = mock.patch.object(core, "time", self.clock)
+        patch.start()
+        self.addCleanup(patch.stop)
+
+    def drive(self, rate, y, seconds):
+        """The stick pushed to y and held there `seconds`, the bridge sending 30 times a second as in run()."""
+        api = KeyedHandle(rate) if not isinstance(rate, KeyedHandle) else rate
+        controls = core.TrainControls(api)
+        controls.detect()
+        api.value = controls.throttle.neutral
+        controls.apply(y)
+        for _ in range(round(seconds * 30)):
+            self.clock.now += 1 / 30
+            if controls.moving():
+                controls.apply(y)
+        return api, controls
+
+    def test_the_stick_pushed_all_the_way_moves_the_handle_at_its_keyboard_speed(self):
+        api, controls = self.drive(0.25, 1.0, 1.0)
+        t = controls.throttle
+        self.assertTrue(controls.moving())
+        self.assertAlmostEqual(t.on_way(1.0), t.neutral + 0.25, places=6)
+        self.assertLess(max(api.sent), 0.0)                 # a notch on from Off, not full power
+        self.assertAlmostEqual(controls.keyboard_seconds()[0], (t.power_end - t.neutral) / 0.25)
+
+    def test_it_gets_there_in_the_time_the_keyboard_takes_and_is_left_alone_then(self):
+        api, controls = self.drive(0.25, 1.0, 5.2)          # 1.27 of the handle at 0.25 a second: 5.1 s
+        self.assertFalse(controls.moving())
+        self.assertEqual(api.sent[-1], controls.throttle.power_end)
+        self.assertEqual(api.sent, sorted(api.sent))        # through the notches in turn, never back
+
+    def test_a_move_starts_from_where_the_keyboard_left_the_handle(self):
+        api, controls = self.drive(0.25, 1.0, 6.0)
+        t = controls.throttle
+        api.value = t.notches[-4]                           # the keyboard took it back three notches
+        self.clock.now += 2.0
+        controls.apply(0.0)                                 # the stick let go: back to Off from there
+        self.assertEqual(api.sent[-1], t.notches[-4])
+        self.clock.now += 0.1
+        controls.apply(0.0)
+        self.assertAlmostEqual(t.on_way(None), t.notches[-4] - 0.025, places=6)
+        self.clock.now += 3.0                               # the game stalled: no jump after it
+        controls.apply(0.0)
+        self.assertAlmostEqual(t.on_way(None), t.notches[-4] - 0.05, places=6)
+
+    def test_without_a_keyboard_speed_the_handle_goes_there_at_once(self):
+        api, controls = self.drive(None, 1.0, 0.0)
+        self.assertIsNone(controls.keyboard_seconds()[0])
+        self.assertEqual(api.sent, [controls.throttle.power_end])
+        self.assertFalse(controls.moving())
+
+    def test_keyboard_speed_off_goes_there_at_once(self):
+        with mock.patch.object(core, "KEYBOARD_SPEED", False):
+            api, controls = self.drive(0.25, 1.0, 0.0)
+        self.assertEqual(api.sent, [controls.throttle.power_end])
+        self.assertFalse(controls.moving())
+
+
 class DoorDesk:
     """A cab's door buttons: `off` are switched off, `silent` don't answer."""
     key = "key"

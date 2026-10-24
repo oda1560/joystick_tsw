@@ -94,7 +94,9 @@ The stick drives power and brake, the base slider sets the reverser, the twist l
 
 ### Handle speed
 
-Some trains jump through notches if you flick the stick. The **Handle speed** slider (in a train) sets how long the handle takes from Off to full, up to 4 s, and the handle follows the stick no faster. It is kept per train class; "instant" follows the stick at once.
+With **Keyboard speed** on (the default), each handle moves no faster than its keyboard key moves it in the game, so pushing the stick all the way doesn't make the handle jump there. The speed comes from the game files: the Class 70's power handle takes about 3 s from Idle to N8, as holding A does, and its brake about 1 s to Full Service. The text beside the slider shows the times for the train you're in. Where the files give a handle no speed, the bridge asks the game for it, and moves the handle at once if the game doesn't say.
+
+Some trains still jump through notches if you flick the stick. The **Handle speed** slider (in a train) sets how long the handle takes from Off to full, up to 4 s, and the handle follows the stick no faster. It is kept per train class; "instant" follows the stick at once. With both on, the slower one wins.
 
 ### Reverser
 
@@ -149,7 +151,7 @@ The limits are those for passenger trains. A limit board marks where the front o
 
 ### Train checker
 
-The checker runs the bridge against a model of every installed train, built from the game files, without loading any of them. It pushes the stick to full power, centre and full brake, tries the reverser and presses each cab button, then writes what happened to `train_check_report.txt`, with anything doubtful flagged. Locos with a cab at each end are checked from each cab. Steam locomotives are left out.
+The checker runs the bridge against a model of every installed train, built from the game files, without loading any of them. It pushes the stick to full power, centre and full brake, tries the reverser and presses each cab button, then writes what happened to `train_check_report.txt`, with anything doubtful flagged. Each train's entry also gives its keyboard speed: how long the stick takes its handles from Off to full power and full brake. Locos with a cab at each end are checked from each cab. Steam locomotives are left out.
 
 | Command | What it checks |
 | --- | --- |
@@ -170,7 +172,8 @@ Everything is set in the bridge window and saved as soon as you change it. The a
 | Axis · Invert | The power and brake axis. Tick Invert if forward brakes |
 | Dead zone: Stick | How far the stick moves from centre before anything happens (0–30%) |
 | Dead zone: Twist | The same for the twist (0–50%) |
-| Handle speed | Per train class: how long the handle takes from Off to full (instant to 4 s) |
+| Handle speed: Keyboard speed | Each handle moves no faster than its keyboard key moves it in the game |
+| Handle speed: slider | Per train class: how long the handle takes from Off to full (instant to 4 s) |
 | Reverser: Use slider · axis · Invert | Turns slider control of the reverser on or off, and which axis it is |
 | Look: Use twist · axis · Invert · angle | Turns twist look on or off, and how far full twist turns the view (±30–150°) |
 | Look smoothing | Quick to Smooth: how gently the view follows the twist |

@@ -6,7 +6,9 @@ Joystick Y axis:
     centre        -> neutral (throttle 0, brake released)
     pull back     -> train brake (a Release / Hold / Apply valve, Class 66: a third of the travel each,
                      held in Release or Apply for as long as the stick is there)
-    Each train can have a handle speed (set in the window): the handle then follows the stick no faster
+    Each handle moves no faster than its keyboard key moves it in the game (the speed in the game files):
+    the stick pushed all the way takes the Class 70's power handle from Idle to N8 in 3.1 s, as the A key does.
+    Each train can also have a handle speed (set in the window): the handle then follows the stick no faster
     than that, instead of jumping wherever the stick is pushed or flicked (M3a: 1.5 s from Off to full).
 
 Base slider (Z axis) -> reverser: + end Forward, middle Neutral, - end Reverse
@@ -70,6 +72,8 @@ STICK_SMOOTHING = 0.05           # seconds of smoothing on the stick
 HANDLE_SECONDS = 0.0             # seconds for the handle to go from Off to full power / brake; 0 = with the
                                  # stick. Set per train in the window (handle_speed.json)
 HANDLE_SECONDS_MAX = 4.0
+KEYBOARD_SPEED = True            # each handle moves no faster than its keyboard key moves it in the game (the
+                                 # speed in the game files); the handle speed above can slow it more
 POLL_HZ = 30
 TRAIN_CHECK_SECONDS = 2.0        # how often to check whether you changed train
 REDETECTS = 5                    # times to look at a train again when the game didn't answer for a control found
@@ -448,6 +452,11 @@ class Lever:
         self.held = False                 # held in place in the game, as a hand would (see _set_valve)
         if model is not None and model.lever and model.table_known and not model.custom:
             self._from_game_files(model, role)
+        # input per second its keyboard key moves it (see toward); a valve's keys hold it, they don't move it
+        self.rate = self._keyboard_rate(model) if role != "reverser" and not self.positions else None
+        self._at = None                   # where it is on its way to the stick's place, and when (see toward)
+        self._at_time = 0.0
+        self._goal = None
 
     def _from_game_files(self, model, role):
         """Use the handle's settings from the game files instead of estimating: every named place where it
@@ -619,6 +628,7 @@ class Lever:
     def let_go(self):
         """Stop holding the handle, so it goes where the game takes it (a valve springs back to Hold). Done
         whenever the bridge stops driving: paused, joystick gone, another train or cab, closed."""
+        self._at = self._goal = None               # the next move starts from where the game has it
         if not self.held:
             return
         self._last_sent = (None, 0.0)              # held again on the next send
@@ -855,6 +865,50 @@ class Lever:
         """Value frac (0..1) of the way from start to end, never outside the safe range."""
         frac = min(1.0, max(0.0, frac))
         return min(self.safe_hi, max(self.safe_lo, start + (end - start) * frac))
+
+    def _keyboard_rate(self, model):
+        """How far the handle moves each second its keyboard key is held: the game's own setting, else the one
+        in the game files (the same, except where the files leave it to the game's built-in one), else None."""
+        values = self._get("Property.DigitalSensitivity")
+        rate = next((v for v in values.values() if isinstance(v, (int, float)) and not isinstance(v, bool)), None)
+        if rate is None:
+            rate = getattr(model, "keyboard_rate", None)
+        return float(rate) if rate and rate > 0 else None
+
+    KEYBOARD_REST = 0.5    # seconds a handle at rest is left alone before a move starts from where the game has it
+
+    def toward(self, target, now=None):
+        """Where to send the handle now on its way to target: no faster than its keyboard key moves it, so the
+        stick pushed or pulled all the way doesn't make it jump there (Class 70 power handle: 3.1 s from Idle to
+        N8, as with the A key held). A move starts from where the game has the handle, as the keyboard may have
+        moved it since. Without a keyboard speed (or KEYBOARD_SPEED off): target, at once."""
+        now = time.time() if now is None else now
+        if not KEYBOARD_SPEED or not self.rate:
+            self._at = self._goal = None
+            return target
+        if self._at is None or (not self.moving() and now - self._at_time > self.KEYBOARD_REST):
+            x = self._get("InputValue").get("InputValue")
+            if not isinstance(x, (int, float)):
+                x = self._last_sent[0]
+            if x is None:
+                self._at = self._goal = None
+                return target
+            self._at, self._at_time = min(self.safe_hi, max(self.safe_lo, float(x))), now
+            self._notch = None             # its notch: the one it's nearest now, not the one last sent
+        step = self.rate * min(0.1, max(0.0, now - self._at_time))   # a stall never makes it jump
+        self._at = min(target, self._at + step) if target > self._at else max(target, self._at - step)
+        self._at_time, self._goal = now, target
+        return self._at
+
+    def moving(self):
+        """Still on its way to where the stick last sent it (see toward)."""
+        at, goal = self._at, self._goal           # read once: the window reads them from its own thread
+        return at is not None and goal is not None and abs(at - goal) > 1e-9
+
+    def on_way(self, target):
+        """Where the handle is going now: target, or where it's got to on its way (see toward)."""
+        at = self._at
+        return at if at is not None and self.moving() else target
 
     def settle_neutral(self):
         """Put a combined power/brake lever on Off, checking with the game where Off really is.
@@ -2192,8 +2246,27 @@ class TrainControls:
             out[b] = b.value_between(start, end, max(0.0, -y))
         return out
 
+    def keyboard_seconds(self):
+        """(seconds from Off to full power, from released to full brake) at the handles' keyboard speed (see
+        Lever.toward), each None where there's no such handle or it has no keyboard speed."""
+        t, b = self.throttle, self.brake
+        power = abs(t.power_end - t.neutral) / t.rate if t and t.rate else None
+        if b:
+            start, end = (b.neutral, b.brake_end) if b.from_files else (b.safe_lo, b.safe_hi)
+            brake = abs(end - start) / b.rate if b.rate else None
+        else:
+            brake = abs(t.brake_end - t.neutral) / t.rate if t and t.rate and t.brake_end is not None else None
+        return power, brake
+
+    def moving(self):
+        """A handle is still on its way to where the stick sent it (see Lever.toward): keep applying the stick
+        even while it's still."""
+        return any(lever.moving() for lever in (self.throttle, self.brake) if lever)
+
     def apply(self, y):
+        now = time.time()
         for lever, value in self.targets(y).items():
+            value = lever.toward(value, now)
             message = None
             if (lever is self.throttle and lever.combined and not lever.neutral_verified
                     and value == lever.neutral):
@@ -2452,8 +2525,8 @@ def run():
                 continue
 
         y = follower.update(y_filter.update(read_y(stick)))
-        if last_sent is not None and abs(y - last_sent) < SEND_THRESHOLD:
-            continue   # stick not moved: leave levers alone so keyboard still works
+        if last_sent is not None and abs(y - last_sent) < SEND_THRESHOLD and not controls.moving():
+            continue   # stick not moved, handles where it put them: leave them alone so keyboard still works
         if last_sent is None:
             last_sent = y   # don't snap levers on startup / train change until stick moves
             continue
