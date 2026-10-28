@@ -74,6 +74,10 @@ HANDLE_SECONDS = 0.0             # seconds for the handle to go from Off to full
 HANDLE_SECONDS_MAX = 4.0
 KEYBOARD_SPEED = True            # each handle moves no faster than its keyboard key moves it in the game (the
                                  # speed in the game files); the handle speed above can slow it more
+HANDLE_CATCH_UP = 0.5            # seconds: the most a handle on its way makes up at once for the time since it
+                                 # was last moved. Each time round waits for the game's answers (and the look's
+                                 # questions to it), often more than 0.1 s, and capped at that a handle moved
+                                 # far slower than its keyboard key. Longer is the game stalling: no jump after it
 POLL_HZ = 30
 TRAIN_CHECK_SECONDS = 2.0        # how often to check whether you changed train
 REDETECTS = 5                    # times to look at a train again when the game didn't answer for a control found
@@ -895,7 +899,7 @@ class Lever:
                 return target
             self._at, self._at_time = min(self.safe_hi, max(self.safe_lo, float(x))), now
             self._notch = None             # its notch: the one it's nearest now, not the one last sent
-        step = self.rate * min(0.1, max(0.0, now - self._at_time))   # a stall never makes it jump
+        step = self.rate * min(HANDLE_CATCH_UP, max(0.0, now - self._at_time))   # a stall never makes it jump
         self._at = min(target, self._at + step) if target > self._at else max(target, self._at - step)
         self._at_time, self._goal = now, target
         return self._at
@@ -2367,7 +2371,7 @@ class HandleFollower:
         if self.value is None or self.seconds <= 0:
             self.value = target
         else:
-            step = min(0.1, max(0.0, now - self._time)) / self.seconds   # a stall never makes it jump
+            step = min(HANDLE_CATCH_UP, max(0.0, now - self._time)) / self.seconds   # a stall never makes it jump
             self.value = (min(target, self.value + step) if target > self.value
                           else max(target, self.value - step))
         self._time = now

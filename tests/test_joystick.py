@@ -354,15 +354,16 @@ class KeyboardSpeed(unittest.TestCase):
         patch.start()
         self.addCleanup(patch.stop)
 
-    def drive(self, rate, y, seconds):
-        """The stick pushed to y and held there `seconds`, the bridge sending 30 times a second as in run()."""
+    def drive(self, rate, y, seconds, each=1 / 30):
+        """The stick pushed to y and held there `seconds`, the bridge sending 30 times a second as in run(), or
+        every `each` seconds (the game slow to answer)."""
         api = KeyedHandle(rate) if not isinstance(rate, KeyedHandle) else rate
         controls = core.TrainControls(api)
         controls.detect()
         api.value = controls.throttle.neutral
         controls.apply(y)
-        for _ in range(round(seconds * 30)):
-            self.clock.now += 1 / 30
+        for _ in range(round(seconds / each)):
+            self.clock.now += each
             if controls.moving():
                 controls.apply(y)
         return api, controls
@@ -381,6 +382,12 @@ class KeyboardSpeed(unittest.TestCase):
         self.assertEqual(api.sent[-1], controls.throttle.power_end)
         self.assertEqual(api.sent, sorted(api.sent))        # through the notches in turn, never back
 
+    def test_the_game_slow_to_answer_doesnt_slow_the_handle(self):
+        # each time round taking 0.3 s, waiting on the game: a handle let move 0.1 s of it took 3 times as long
+        api, controls = self.drive(0.25, 1.0, 5.4, each=0.3)
+        self.assertFalse(controls.moving())
+        self.assertEqual(api.sent[-1], controls.throttle.power_end)
+
     def test_a_move_starts_from_where_the_keyboard_left_the_handle(self):
         api, controls = self.drive(0.25, 1.0, 6.0)
         t = controls.throttle
@@ -393,7 +400,7 @@ class KeyboardSpeed(unittest.TestCase):
         self.assertAlmostEqual(t.on_way(None), t.notches[-4] - 0.025, places=6)
         self.clock.now += 3.0                               # the game stalled: no jump after it
         controls.apply(0.0)
-        self.assertAlmostEqual(t.on_way(None), t.notches[-4] - 0.05, places=6)
+        self.assertAlmostEqual(t.on_way(None), t.notches[-4] - 0.025 - 0.25 * core.HANDLE_CATCH_UP, places=6)
 
     def test_without_a_keyboard_speed_the_handle_goes_there_at_once(self):
         api, controls = self.drive(None, 1.0, 0.0)
