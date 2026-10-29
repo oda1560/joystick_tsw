@@ -69,7 +69,9 @@ class Control(tsw_handles.Control):
 
     def rest(self):
         """Where a button rests: the game holds some down (DSD pedals; Class 142 at its maximum, the Class 350
-        one counting backwards, at 1)."""
+        one counting backwards, at 1). A door side selector rests where it starts (the NS ICMm's, in the middle)."""
+        if self.lever and self.name in tj.DOOR_SELECTORS:
+            return float(self.props.get("DefaultInputValue", 0.0))
         return 1.0 if self.reversed_button else self.hi if self.props.get("bDefaultToPressed") else self.lo
 
     def rests_down(self):
@@ -519,6 +521,8 @@ def check_buttons(result, controls, model, bound=frozenset()):
                                    f"joystick button does nothing")
             continue
         controls.press(name, True)
+        if isinstance(button, tj.GuardClose):
+            button.finish()               # what a timer does once the guard's wait is over (NS ICMm)
         if any(not m.interacting or abs(m.value - m.rest()) < 0.5 for m in parts):
             result.problems.append(f"{name}: {button} isn't held down while the joystick button is")
         controls.press(name, False)

@@ -142,11 +142,16 @@ DOOR_KEEP = ["interlock"]
 # M3 / M7 have a DoorPanelKeySwitch_L too, not looked at.
 DOOR_KEYS = {"DoorKeySwitch": None, "DoorPanelKeySwitch_L": "Class323"}
 # Trains with no door close button in the cab, closed the way their guard closes them (GuardClose): the guard's key
-# at a door turned to Set and straight back, then that door's own close button (the guard's door). NS SNG:
-# ZGN_SNG3_GuardMode in the game files (2026-10-28); NS ICMm: its guard layout, not tried in the game. The keys
-# and buttons at both ends of the car are used, {end} F / B, {side} L / R.
-GUARD_CLOSE = [("GuardKey_{end}{side}", "LocalDoorClose_{end}{side}"),           # SNG
-               ("GuardKey_{end}{side}", "PassengerDoorIntClose_{end}{side}")]    # ICMm
+# at a door turned to Set or put in, taken out again `wait` seconds later, then that door's own close button (the
+# guard's door). From their guard layouts in the game files (2026-10-28): the SNG's key goes straight back
+# (ZGN_SNG3_GuardMode); the ICMm's guard waits 5 s with the key in, as its doors close 5 - 5.3 s after
+# (PassDoorCloseDelay_FL etc.). The keys and buttons at both ends of the car are used, {end} F / B, {side} L / R.
+GUARD_CLOSE = [("GuardKey_{end}{side}", "LocalDoorClose_{end}{side}", 0.0),          # SNG
+               ("GuardKey_{end}{side}", "PassengerDoorIntClose_{end}{side}", 5.0)]   # ICMm
+# Door side selectors in the cab, turned to a side to unlock that side's doors and let back to the middle, where
+# they rest: {name: (where for Open Left, where for Open Right)}. NS ICMm: PassengerDoorsSelector, "Open Left" /
+# "0" / "Open Right" at 0 / 0.5 / 1, read by its cab's HandleDoorSideSelection (game files 2026-10-28).
+DOOR_SELECTORS = {"PassengerDoorsSelector": (0.0, 1.0)}
 
 PRESS_MESSAGES = {"aws": "AWS acknowledged", "alerter": "Alerter acknowledged",
                   "door_open_left": "Opening the left doors", "door_open_right": "Opening the right doors",
@@ -1482,9 +1487,10 @@ class Reverser:
 
 
 class PushButton:
-    """A momentary cab button, held down in the game for as long as the joystick button is held."""
+    """A momentary cab button, held down in the game for as long as the joystick button is held. pressed: where to
+    hold a switch that rests in the middle (DOOR_SELECTORS), let back to where it rests after."""
 
-    def __init__(self, api, name):
+    def __init__(self, api, name, pressed=None):
         self.api = api
         self.name = name
         self.node = f"CurrentDrivableActor/{name}"
@@ -1508,6 +1514,9 @@ class PushButton:
                 self.released, self.pressed = float(lo), float(hi)
         else:
             self.released, self.pressed = 0.0, 1.0
+        if pressed is not None:
+            self.released = float(rest) if isinstance(rest, (int, float)) else self.released
+            self.pressed = float(pressed)
 
     def set(self, down):
         """Pressed, the button is held in place as a hand would hold it (the game's Interacting flag). Sent
@@ -1602,36 +1611,78 @@ class KeyedButton:
 
 class GuardClose:
     """Doors closed as the guard closes them, on a train with no close button in the cab (GUARD_CLOSE): the guard's
-    keys turned to Set and straight back, then the close buttons on those doors, held down for as long as the
-    joystick button is. The keys stay where they're sent, as the door keys do (KeyedButton)."""
+    keys turned to Set (or put in), and back out once the guard's wait is over, then the close buttons on those
+    doors pressed, held for as long as the joystick button still is. A timer takes the keys out after a wait, so
+    a tap of the joystick button does it all. The keys stay where they're sent, as the door keys do (KeyedButton)."""
 
-    def __init__(self, api, keys, buttons):
-        self.api, self.keys, self.buttons = api, keys, buttons
+    def __init__(self, api, keys, buttons, wait=0.0):
+        self.api, self.keys, self.buttons, self.wait = api, keys, buttons, wait
         self.name = f"{' + '.join(keys)} then {' + '.join(b.name for b in buttons)}"
+        self.down = False                 # the joystick button is held
+        self.timer = None                 # takes the keys out after the wait
+        self.lock = threading.Lock()
 
     def _turn(self, value):
         for k in self.keys:
             self.api.set(f"CurrentDrivableActor/{k}.InputValue", value)
 
-    def _all_set(self):
+    def _all_in(self):
         values = [self.api.get_value(f"CurrentDrivableActor/{k}.Function.GetCurrentOutputValue") for k in self.keys]
         return all(isinstance(v, (int, float)) and v > 0.5 for v in values)
 
+    def _cancel(self):
+        if self.timer:
+            self.timer.cancel()
+            self.timer = None
+
     def set(self, down):
-        if down:
+        with self.lock:
+            self.down = down
+            if not down:
+                for b in self.buttons:
+                    b.let_go()
+                return
+            self._cancel()
             self._turn(1.0)
-            try:
-                # the game's guard turns the key back once it's at Set (the guard layout's next step)
-                for _ in range(25):
-                    if self._all_set():
-                        break
-                    time.sleep(0.02)
-            finally:
-                self._turn(0.0)
-        for b in self.buttons:
-            b.set(down)
+            # the game's guard moves on once the key is at Set / in (the guard layout's next step)
+            for _ in range(25):
+                if self._all_in():
+                    break
+                time.sleep(0.02)
+            if self.wait:
+                self.timer = threading.Timer(self.wait, self._later)
+                self.timer.daemon = True
+                self.timer.start()
+                return
+        self.finish()
+
+    def _later(self):
+        try:
+            self.finish()
+        except Exception:
+            pass                          # the game didn't answer: another press puts the keys in and out again
+
+    def finish(self):
+        """Keys out, then the doors' own close buttons pressed: held while the joystick button is, else tapped."""
+        with self.lock:
+            self._cancel()
+            self._turn(0.0)
+            for b in self.buttons:
+                b.set(True)
+            if not self.down:
+                time.sleep(0.2)
+                for b in self.buttons:
+                    b.set(False)
 
     def let_go(self):
+        with self.lock:
+            self.down = False
+            if self.timer:
+                self._cancel()
+                try:
+                    self._turn(0.0)       # never leave the guard's keys in
+                except Exception:
+                    pass
         for b in self.buttons:
             b.let_go()
 
@@ -2179,15 +2230,19 @@ class TrainControls:
                     button = buttons[0] if len(buttons) == 1 else ButtonGroup(buttons)
                     setattr(self, f"door_{action}_{side}",
                             KeyedButton(self.api, self.door_key, button) if self.door_key else button)
-        for side in ("left", "right"):
-            # no close button in the cab: closed with the guard's keys (NS SNG)
-            pairs = [(k, b) for key, button in GUARD_CLOSE for end in "FB"
-                     for k, b in [(key.format(end=end, side=side[0].upper()),
-                                   button.format(end=end, side=side[0].upper()))]
-                     if k in names and b in names]
-            if getattr(self, f"door_close_{side}") is None and pairs:
-                setattr(self, f"door_close_{side}",
-                        GuardClose(self.api, [k for k, _ in pairs], [PushButton(self.api, b) for _, b in pairs]))
+        selector = next((n for n in names if n in DOOR_SELECTORS), None)
+        for i, side in enumerate(("left", "right")):
+            # no open button in the cab: unlocked with the door side selector (NS ICMm)
+            if getattr(self, f"door_open_{side}") is None and selector:
+                setattr(self, f"door_open_{side}", PushButton(self.api, selector, DOOR_SELECTORS[selector][i]))
+            # no close button in the cab: closed with the guard's keys (NS SNG, ICMm)
+            for key, button, wait in GUARD_CLOSE:
+                pairs = [(k, b) for end in "FB" for k, b in [(key.format(end=end, side=side[0].upper()),
+                                                              button.format(end=end, side=side[0].upper()))]
+                         if k in names and b in names]
+                if getattr(self, f"door_close_{side}") is None and pairs:
+                    setattr(self, f"door_close_{side}", GuardClose(self.api, [k for k, _ in pairs],
+                                                                   [PushButton(self.api, b) for _, b in pairs], wait))
 
     def detect(self):
         listed = node_names(self.api.list("CurrentDrivableActor"))

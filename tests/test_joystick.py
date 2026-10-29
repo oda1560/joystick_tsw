@@ -500,6 +500,16 @@ class GuardKeyDesk(DoorDesk):
                 self.keys[self._name(path)] = value
 
 
+class ICMmDesk(GuardKeyDesk):
+    """An NS ICMm's door side selector (resting in the middle, at 0.5), guard keys and door buttons."""
+
+    def get_value(self, path):
+        if path.startswith("CurrentDrivableActor/PassengerDoorsSelector.Function."):
+            return {"GetMinimumInputValue": 0.0, "GetMaximumInputValue": 1.0,
+                    "GetDefaultInputValue": 0.5}.get(path.rsplit(".", 1)[1])
+        return super().get_value(path)
+
+
 class Doors(unittest.TestCase):
     def doors(self, api):
         controls = core.TrainControls(api)
@@ -609,6 +619,53 @@ class Doors(unittest.TestCase):
         self.assertEqual(api.sent[6:], [("LocalDoorClose_FL", 0.0), ("LocalDoorClose_BL", 0.0)])
         self.assertIn("close right GuardKey_FR + GuardKey_BR then LocalDoorClose_FR + LocalDoorClose_BR",
                       controls.describe())
+
+    # the NS ICMm's door controls, as the game lists them (2026-10-28)
+    ICMM = ["PassengerDoor_FL", "PassengerDoorButtonExt_FL", "GangwayDoor_B", "DoorManager", "PassengerDoorIntOpen_FL",
+            "PassengerDoorIntOpen_FR", "PassengerDoorIntOpen_BL", "PassengerDoorIntOpen_BR", "PassengerDoorIntClose_FL",
+            "PassengerDoorIntClose_FR", "PassengerDoorIntClose_BL", "PassengerDoorIntClose_BR", "GuardKey_FL",
+            "GuardKey_FR", "GuardKey_BL", "GuardKey_BR", "CabDoorExt", "DoorBuzzer", "CabLightDoor", "UnlockControls",
+            "PassengerDoorsSelector"]
+
+    def icmm(self):
+        api = ICMmDesk()
+        controls = core.TrainControls(api)
+        controls._detect_doors(self.ICMM)
+        return api, controls
+
+    def test_ns_icmm_door_selector_unlocks_each_side(self):
+        """The ICMm's desk has no door buttons: its selector is turned to Open Left / Open Right and back to the
+        middle, where it rests (game files)."""
+        api, controls = self.icmm()
+        controls.door_open_left.set(True)
+        controls.door_open_left.set(False)
+        controls.door_open_right.set(True)
+        controls.door_open_right.set(False)
+        self.assertEqual(api.sent, [("PassengerDoorsSelector", 0.0), ("PassengerDoorsSelector", 0.5),
+                                    ("PassengerDoorsSelector", 1.0), ("PassengerDoorsSelector", 0.5)])
+
+    def test_ns_icmm_guard_keys_stay_in_while_the_doors_close(self):
+        """The ICMm's guard waits 5 s with the key in, as the doors close 5 s after (game files): a timer takes
+        the keys out, then the guard's doors are closed."""
+        api, controls = self.icmm()
+        close = controls.door_close_right
+        self.assertEqual(close.wait, 5.0)
+        close.set(True)
+        close.set(False)
+        self.assertEqual(api.sent, [("GuardKey_FR", 1.0), ("GuardKey_BR", 1.0)])
+        self.assertIsNotNone(close.timer)
+        close.finish()
+        self.assertEqual(api.sent[2:], [("GuardKey_FR", 0.0), ("GuardKey_BR", 0.0), ("PassengerDoorIntClose_FR", 1.0),
+                                        ("PassengerDoorIntClose_BR", 1.0), ("PassengerDoorIntClose_FR", 0.0),
+                                        ("PassengerDoorIntClose_BR", 0.0)])
+        self.assertIsNone(close.timer)
+
+    def test_letting_go_takes_the_guard_keys_out(self):
+        api, controls = self.icmm()
+        controls.door_close_left.set(True)
+        controls.let_go()
+        self.assertEqual(api.sent[-2:], [("GuardKey_FL", 0.0), ("GuardKey_BL", 0.0)])
+        self.assertIsNone(controls.door_close_left.timer)
 
     def test_a_close_button_in_the_cab_is_used_before_the_guard_keys(self):
         controls = core.TrainControls(GuardKeyDesk())

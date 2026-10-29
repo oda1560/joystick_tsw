@@ -104,7 +104,7 @@ The reverser only moves when the slider enters a new zone, and only while the tr
 
 ### Buttons
 
-Cab buttons are held down in the cab for as long as you hold the joystick button, like a hand on the button. Doors won't open while the train is moving. On the Class 142 and the Class 323 the door buttons only work with the door key switch On: the bridge turns it On for the press and back Off after, as the game does. With the game's AI guard on, the guard's own door near the cab ignores the close buttons and closes by itself. On the NS SNG the open buttons unlock the doors for the passengers to open. Its cab has no close buttons, so the close buttons do what the guard does: turn the guard's key to Set and back, then press the close button on the guard's door.
+Cab buttons are held down in the cab for as long as you hold the joystick button, like a hand on the button. Doors won't open while the train is moving. On the Class 142 and the Class 323 the door buttons only work with the door key switch On: the bridge turns it On for the press and back Off after, as the game does. With the game's AI guard on, the guard's own door near the cab ignores the close buttons and closes by itself. On the NS SNG and ICMm the open buttons unlock the doors for the passengers to open (on the ICMm by turning the Passenger Doors selector to that side and back to 0). Their cabs have no close buttons, so the close buttons do what the guard does: turn the guard's key to Set (or put it in), take it out again, then press the close button on the guard's door. On the ICMm the key stays in for 5 seconds while the doors close, as the game's guard does: a tap of the button is enough.
 
 ### Looking around
 
