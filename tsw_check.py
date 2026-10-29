@@ -393,8 +393,8 @@ def check_train(train, package, files, cab=None):
 
 
 def keyboard_speed(controls):
-    """How fast the stick moves the handles, as their keyboard keys do (Lever.toward): Off to full power / brake
-    in seconds, or why a handle goes there at once."""
+    """How fast the stick moves the handles, as their keyboard keys do (Lever.toward, only on the Class 70): Off
+    to full power / brake in seconds, or why a handle goes there at once."""
     t, b = controls.throttle, controls.brake
     power, brake = controls.keyboard_seconds()
     parts = []
@@ -406,7 +406,8 @@ def keyboard_speed(controls):
         if lever.positions:
             parts.append(f"{what} at once (Release / Hold / Apply)")
         elif seconds is None:
-            parts.append(f"{what} at once (no keyboard speed in the files)")
+            parts.append(f"{what} at once" + (" (no keyboard speed in the files)"
+                                              if tj.keyboard_speed_train(controls.train_id) else ""))
         else:
             parts.append(f"{what} {seconds:.1f} s ({lever.rate:g} a second)")
     return ", ".join(parts)

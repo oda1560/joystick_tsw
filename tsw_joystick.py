@@ -6,8 +6,8 @@ Joystick Y axis:
     centre        -> neutral (throttle 0, brake released)
     pull back     -> train brake (a Release / Hold / Apply valve, Class 66: a third of the travel each,
                      held in Release or Apply for as long as the stick is there)
-    Each handle moves no faster than its keyboard key moves it in the game (the speed in the game files):
-    the stick pushed all the way takes the Class 70's power handle from Idle to N8 in 3.1 s, as the A key does.
+    On the Class 70, each handle moves no faster than its keyboard key moves it in the game (the speed in the
+    game files): the stick pushed all the way takes its power handle from Idle to N8 in 3.1 s, as the A key does.
     Each train can also have a handle speed (set in the window): the handle then follows the stick no faster
     than that, instead of jumping wherever the stick is pushed or flicked (M3a: 1.5 s from Off to full).
 
@@ -74,6 +74,8 @@ HANDLE_SECONDS = 0.0             # seconds for the handle to go from Off to full
 HANDLE_SECONDS_MAX = 4.0
 KEYBOARD_SPEED = True            # each handle moves no faster than its keyboard key moves it in the game (the
                                  # speed in the game files); the handle speed above can slow it more
+KEYBOARD_SPEED_TRAINS = re.compile(r"CL70_|Class_?70(?!\d)")   # only on these trains (the Class 70 is
+                                 # CL70_FL_RVM_C); on the rest the handles follow the stick at once
 HANDLE_CATCH_UP = 0.5            # seconds: the most a handle on its way makes up at once for the time since it
                                  # was last moved. Each time round waits for the game's answers (and the look's
                                  # questions to it), often more than 0.1 s, and capped at that a handle moved
@@ -299,6 +301,11 @@ def train_family(train):
     return re.sub(r"[-_][A-Z]_C$", "_C", str(train or ""))
 
 
+def keyboard_speed_train(train):
+    """Whether this train's handles move no faster than their keyboard keys (KEYBOARD_SPEED_TRAINS)."""
+    return bool(KEYBOARD_SPEED_TRAINS.search(str(train or "")))
+
+
 def handle_seconds(train):
     """Seconds the handle takes to go from Off to full power / brake on this train (see HandleFollower)."""
     try:
@@ -456,8 +463,10 @@ class Lever:
         self.held = False                 # held in place in the game, as a hand would (see _set_valve)
         if model is not None and model.lever and model.table_known and not model.custom:
             self._from_game_files(model, role)
-        # input per second its keyboard key moves it (see toward); a valve's keys hold it, they don't move it
-        self.rate = self._keyboard_rate(model) if role != "reverser" and not self.positions else None
+        # input per second its keyboard key moves it (see toward); a valve's keys hold it, they don't move it.
+        # Only on the trains in KEYBOARD_SPEED_TRAINS
+        self.rate = (self._keyboard_rate(model) if role != "reverser" and not self.positions
+                     and keyboard_speed_train(train) else None)
         self._at = None                   # where it is on its way to the stick's place, and when (see toward)
         self._at_time = 0.0
         self._goal = None
@@ -885,7 +894,8 @@ class Lever:
         """Where to send the handle now on its way to target: no faster than its keyboard key moves it, so the
         stick pushed or pulled all the way doesn't make it jump there (Class 70 power handle: 3.1 s from Idle to
         N8, as with the A key held). A move starts from where the game has the handle, as the keyboard may have
-        moved it since. Without a keyboard speed (or KEYBOARD_SPEED off): target, at once."""
+        moved it since. Without a keyboard speed (KEYBOARD_SPEED off, or a train not in KEYBOARD_SPEED_TRAINS):
+        target, at once."""
         now = time.time() if now is None else now
         if not KEYBOARD_SPEED or not self.rate:
             self._at = self._goal = None

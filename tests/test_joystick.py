@@ -344,8 +344,8 @@ class KeyedHandle(Class807):
 
 
 class KeyboardSpeed(unittest.TestCase):
-    """The stick moves a handle no faster than its keyboard key moves it in the game, so pushed all the way it
-    doesn't make the handle jump there (Class 70 power handle: 0.25 a second, Idle to N8 in 3.1 s)."""
+    """On the Class 70, the stick moves a handle no faster than its keyboard key moves it in the game, so pushed all
+    the way it doesn't make the handle jump there (power handle: 0.25 a second, Idle to N8 in 3.1 s)."""
 
     def setUp(self):
         self.clock = Clock()
@@ -354,11 +354,12 @@ class KeyboardSpeed(unittest.TestCase):
         patch.start()
         self.addCleanup(patch.stop)
 
-    def drive(self, rate, y, seconds, each=1 / 30):
-        """The stick pushed to y and held there `seconds`, the bridge sending 30 times a second as in run(), or
-        every `each` seconds (the game slow to answer)."""
+    def drive(self, rate, y, seconds, each=1 / 30, train="CL70_FL_RVM_C"):
+        """The stick pushed to y and held there `seconds` on a train, the bridge sending 30 times a second as in
+        run(), or every `each` seconds (the game slow to answer)."""
         api = KeyedHandle(rate) if not isinstance(rate, KeyedHandle) else rate
         controls = core.TrainControls(api)
+        controls.train_id = train
         controls.detect()
         api.value = controls.throttle.neutral
         controls.apply(y)
@@ -407,6 +408,23 @@ class KeyboardSpeed(unittest.TestCase):
         self.assertIsNone(controls.keyboard_seconds()[0])
         self.assertEqual(api.sent, [controls.throttle.power_end])
         self.assertFalse(controls.moving())
+
+    def test_on_any_other_train_the_handle_goes_there_at_once(self):
+        asked = []
+        api = KeyedHandle(0.25)
+        ask = api._req
+        api._req = lambda method, path, params=None: asked.append(path) or ask(method, path, params)
+        api, controls = self.drive(api, 1.0, 0.0, train="RVM_IOW_Class484_DMSO_C")
+        self.assertEqual(api.sent, [controls.throttle.power_end])
+        self.assertFalse(controls.moving())
+        self.assertEqual(controls.keyboard_seconds(), (None, None))
+        self.assertFalse(any("DigitalSensitivity" in path for path in asked))   # not even asked for
+
+    def test_only_the_class_70_is_a_keyboard_speed_train(self):
+        for train in ("CL70_FL_RVM_C", "RVM_AABS_Class70_C"):
+            self.assertTrue(core.keyboard_speed_train(train), train)
+        for train in ("RVM_IOW_Class484_DMSO_C", "RVM_Class700_C", "RVM_Class707_C", "", None):
+            self.assertFalse(core.keyboard_speed_train(train), train)
 
     def test_keyboard_speed_off_goes_there_at_once(self):
         with mock.patch.object(core, "KEYBOARD_SPEED", False):

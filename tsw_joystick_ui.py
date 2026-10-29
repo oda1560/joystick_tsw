@@ -695,8 +695,9 @@ class App:
     def on_keyboard_speed(self):
         self.s["keyboard_speed"] = core.KEYBOARD_SPEED = bool(self.kb_var.get())
         save_settings(self.s)
-        self.log("Handles move " + ("no faster than their keyboard keys move them" if self.s["keyboard_speed"]
-                                    else "as fast as the stick (and the handle speed) lets them"))
+        self.log("Class 70 handles move " + ("no faster than their keyboard keys move them"
+                                             if self.s["keyboard_speed"]
+                                             else "as fast as the stick (and the handle speed) lets them"))
         self._show_handle_speed()
 
     def _sync_handle_speed(self):
