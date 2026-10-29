@@ -104,7 +104,7 @@ The reverser only moves when the slider enters a new zone, and only while the tr
 
 ### Buttons
 
-Cab buttons are held down in the cab for as long as you hold the joystick button, like a hand on the button. Doors won't open while the train is moving. On the Class 142 and the Class 323 the door buttons only work with the door key switch On: the bridge turns it On for the press and back Off after, as the game does. With the game's AI guard on, the guard's own door near the cab ignores the close buttons and closes by itself.
+Cab buttons are held down in the cab for as long as you hold the joystick button, like a hand on the button. Doors won't open while the train is moving. On the Class 142 and the Class 323 the door buttons only work with the door key switch On: the bridge turns it On for the press and back Off after, as the game does. With the game's AI guard on, the guard's own door near the cab ignores the close buttons and closes by itself. On the NS SNG the open buttons unlock the doors for the passengers to open, and there are no close buttons: the guard closes them.
 
 ### Looking around
 

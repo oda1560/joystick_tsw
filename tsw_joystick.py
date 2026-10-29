@@ -2076,9 +2076,12 @@ class TrainControls:
         """Door open / close buttons for each side. Some trains carry two sets of desk buttons, only one of
         them wired to the driver's position (Class 350); the wired set is used."""
         found = []                                   # (action, side, name); side None = both sides
+        unlocks = set()                              # openers named Unlock: used only where nothing else opens
         for n in names:
             words = [w.lower() for w in re.findall(r"[A-Z]+(?![a-z])|[A-Z]?[a-z]+|\d+", n)]
-            opens, closes = bool({"open", "release"} & set(words)), "close" in words
+            opens, closes = bool({"open", "release", "unlock"} & set(words)), "close" in words
+            if "unlock" in words and not {"open", "release"} & set(words):
+                unlocks.add(n)
             if (not any(w.startswith("door") for w in words) or "cabdoor" in "".join(words)
                     or any(w.startswith(x) for w in words if w not in DOOR_KEEP for x in DOOR_SKIP)
                     or opens == closes):
@@ -2122,6 +2125,9 @@ class TrainControls:
             for side in ("left", "right"):
                 group = [(ranks[n], n) for a, s, n in found if a == action and s in (side, None)
                          and ranks[n] is not None]
+                # the NS SNG's desk only unlocks the doors (DoorsUnlock_L / _R; passengers open them, the guard
+                # closes them, game files 2026-10-28); the Class 150 / 385 / 484 have DoorsOpen_L as well
+                group = [(r, n) for r, n in group if n not in unlocks] or group
                 best = [n for r, n in group if r == min(r for r, _ in group)]
                 if best:
                     buttons = [PushButton(self.api, n) for n in best]

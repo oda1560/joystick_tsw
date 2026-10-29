@@ -563,6 +563,22 @@ class Doors(unittest.TestCase):
                                 "PassengerDoorBL_Close_Interior", "BL_Int_DoorClose_PushButton"])
         self.assertEqual(controls.door_close_left.name, "DoorCloseInterlock_L(PushButton)")
 
+    def test_ns_sng_unlock_buttons_open_the_doors(self):
+        """The SNG's desk only unlocks the doors; the buttons on each door and the guard's keys aren't the driver's."""
+        controls = core.TrainControls(DoorDesk())
+        controls._detect_doors(["DoorOpen_FL", "LocalDoorClose_FL", "GuardKey_FL", "DoorsUnlock_L", "DoorsUnlock_R",
+                                "DoorsClosedLamp"])
+        self.assertEqual(controls.door_open_left.name, "DoorsUnlock_L")
+        self.assertEqual(controls.door_open_right.name, "DoorsUnlock_R")
+        self.assertIsNone(controls.door_close_left)
+        self.assertIsNone(controls.door_close_right)
+
+    def test_an_unlock_button_beside_an_open_button_is_left_alone(self):
+        """The Class 150 has DoorsUnlock_L_PushButton as well as DoorsOpen_L_PushButton."""
+        controls = core.TrainControls(DoorDesk())
+        controls._detect_doors(["DoorsOpen_L_PushButton", "DoorsUnlock_L_PushButton", "DoorsClose_L_PushButton"])
+        self.assertEqual(controls.door_open_left.name, "DoorsOpen_L_PushButton")
+
 
 class Class350Vigilance(core.TSWApi):
     """The Class 350's two vigilance controls with the "Alerter" identifier, as the game reported them
