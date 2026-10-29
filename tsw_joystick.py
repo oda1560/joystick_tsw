@@ -141,6 +141,12 @@ DOOR_KEEP = ["interlock"]
 # it On, presses DoorControlPanel_Release_1_L / _R or Close_L / _R, and turns it Off. The LIRR and Metro-North
 # M3 / M7 have a DoorPanelKeySwitch_L too, not looked at.
 DOOR_KEYS = {"DoorKeySwitch": None, "DoorPanelKeySwitch_L": "Class323"}
+# Trains with no door close button in the cab, closed the way their guard closes them (GuardClose): the guard's key
+# at a door turned to Set and straight back, then that door's own close button (the guard's door). NS SNG:
+# ZGN_SNG3_GuardMode in the game files (2026-10-28); NS ICMm: its guard layout, not tried in the game. The keys
+# and buttons at both ends of the car are used, {end} F / B, {side} L / R.
+GUARD_CLOSE = [("GuardKey_{end}{side}", "LocalDoorClose_{end}{side}"),           # SNG
+               ("GuardKey_{end}{side}", "PassengerDoorIntClose_{end}{side}")]    # ICMm
 
 PRESS_MESSAGES = {"aws": "AWS acknowledged", "alerter": "Alerter acknowledged",
                   "door_open_left": "Opening the left doors", "door_open_right": "Opening the right doors",
@@ -1594,6 +1600,45 @@ class KeyedButton:
         return self.name
 
 
+class GuardClose:
+    """Doors closed as the guard closes them, on a train with no close button in the cab (GUARD_CLOSE): the guard's
+    keys turned to Set and straight back, then the close buttons on those doors, held down for as long as the
+    joystick button is. The keys stay where they're sent, as the door keys do (KeyedButton)."""
+
+    def __init__(self, api, keys, buttons):
+        self.api, self.keys, self.buttons = api, keys, buttons
+        self.name = f"{' + '.join(keys)} then {' + '.join(b.name for b in buttons)}"
+
+    def _turn(self, value):
+        for k in self.keys:
+            self.api.set(f"CurrentDrivableActor/{k}.InputValue", value)
+
+    def _all_set(self):
+        values = [self.api.get_value(f"CurrentDrivableActor/{k}.Function.GetCurrentOutputValue") for k in self.keys]
+        return all(isinstance(v, (int, float)) and v > 0.5 for v in values)
+
+    def set(self, down):
+        if down:
+            self._turn(1.0)
+            try:
+                # the game's guard turns the key back once it's at Set (the guard layout's next step)
+                for _ in range(25):
+                    if self._all_set():
+                        break
+                    time.sleep(0.02)
+            finally:
+                self._turn(0.0)
+        for b in self.buttons:
+            b.set(down)
+
+    def let_go(self):
+        for b in self.buttons:
+            b.let_go()
+
+    def __repr__(self):
+        return self.name
+
+
 class FirstSwitchedOn:
     """Cab buttons that do the same job, best first (a train's vigilance buttons): a press goes to the one in use
     while the game has it switched on, else to the best one it has on. The game switches some off after the train
@@ -2134,6 +2179,15 @@ class TrainControls:
                     button = buttons[0] if len(buttons) == 1 else ButtonGroup(buttons)
                     setattr(self, f"door_{action}_{side}",
                             KeyedButton(self.api, self.door_key, button) if self.door_key else button)
+        for side in ("left", "right"):
+            # no close button in the cab: closed with the guard's keys (NS SNG)
+            pairs = [(k, b) for key, button in GUARD_CLOSE for end in "FB"
+                     for k, b in [(key.format(end=end, side=side[0].upper()),
+                                   button.format(end=end, side=side[0].upper()))]
+                     if k in names and b in names]
+            if getattr(self, f"door_close_{side}") is None and pairs:
+                setattr(self, f"door_close_{side}",
+                        GuardClose(self.api, [k for k, _ in pairs], [PushButton(self.api, b) for _, b in pairs]))
 
     def detect(self):
         listed = node_names(self.api.list("CurrentDrivableActor"))

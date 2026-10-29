@@ -480,6 +480,26 @@ class KeyedDoorDesk(DoorDesk):
                 self.key_value = value
 
 
+class GuardKeyDesk(DoorDesk):
+    """An NS SNG's door buttons and the guard's keys at its doors, which get to where they're sent; `sent` lists
+    what was set, but not Interacting."""
+
+    def __init__(self):
+        super().__init__()
+        self.keys, self.sent = {}, []
+
+    def get_value(self, path):
+        if self._name(path).startswith("GuardKey"):
+            return self.keys.get(self._name(path), 0.0)
+        return super().get_value(path)
+
+    def set(self, path, value):
+        if path.endswith(".InputValue"):
+            self.sent.append((self._name(path), value))
+            if self._name(path).startswith("GuardKey"):
+                self.keys[self._name(path)] = value
+
+
 class Doors(unittest.TestCase):
     def doors(self, api):
         controls = core.TrainControls(api)
@@ -563,15 +583,38 @@ class Doors(unittest.TestCase):
                                 "PassengerDoorBL_Close_Interior", "BL_Int_DoorClose_PushButton"])
         self.assertEqual(controls.door_close_left.name, "DoorCloseInterlock_L(PushButton)")
 
+    # the NS SNG's door controls, as the game lists them (2026-10-28)
+    SNG = ["PassengerDoor_FL", "DoorOpen_FL", "DoorOpen_FR", "DoorOpen_BL", "DoorOpen_BR", "LocalDoorClose_FL",
+           "LocalDoorClose_FR", "LocalDoorClose_BL", "LocalDoorClose_BR", "GuardKey_FL", "GuardKey_FR", "GuardKey_BL",
+           "GuardKey_BR", "GuardKey_Proxy", "DoorManager", "CabDoor_L", "DoorsUnlock_L", "DoorsUnlock_R",
+           "DoorsClosedLamp"]
+
     def test_ns_sng_unlock_buttons_open_the_doors(self):
-        """The SNG's desk only unlocks the doors; the buttons on each door and the guard's keys aren't the driver's."""
+        """The SNG's desk only unlocks the doors; the buttons on each door aren't the driver's."""
         controls = core.TrainControls(DoorDesk())
-        controls._detect_doors(["DoorOpen_FL", "LocalDoorClose_FL", "GuardKey_FL", "DoorsUnlock_L", "DoorsUnlock_R",
-                                "DoorsClosedLamp"])
+        controls._detect_doors(self.SNG)
         self.assertEqual(controls.door_open_left.name, "DoorsUnlock_L")
         self.assertEqual(controls.door_open_right.name, "DoorsUnlock_R")
-        self.assertIsNone(controls.door_close_left)
-        self.assertIsNone(controls.door_close_right)
+
+    def test_ns_sng_doors_closed_with_the_guard_keys(self):
+        """The SNG's cab has no close button: the guard turns the key at a door to Set and back, then presses that
+        door's own close button (ZGN_SNG3_GuardMode in the game files)."""
+        api = GuardKeyDesk()
+        controls = core.TrainControls(api)
+        controls._detect_doors(self.SNG)
+        controls.door_close_left.set(True)
+        self.assertEqual(api.sent, [("GuardKey_FL", 1.0), ("GuardKey_BL", 1.0), ("GuardKey_FL", 0.0),
+                                    ("GuardKey_BL", 0.0), ("LocalDoorClose_FL", 1.0), ("LocalDoorClose_BL", 1.0)])
+        controls.door_close_left.set(False)
+        self.assertEqual(api.sent[6:], [("LocalDoorClose_FL", 0.0), ("LocalDoorClose_BL", 0.0)])
+        self.assertIn("close right GuardKey_FR + GuardKey_BR then LocalDoorClose_FR + LocalDoorClose_BR",
+                      controls.describe())
+
+    def test_a_close_button_in_the_cab_is_used_before_the_guard_keys(self):
+        controls = core.TrainControls(GuardKeyDesk())
+        controls._detect_doors(self.SNG + ["DoorsClose_L"])
+        self.assertEqual(controls.door_close_left.name, "DoorsClose_L")
+        self.assertIsInstance(controls.door_close_right, core.GuardClose)
 
     def test_an_unlock_button_beside_an_open_button_is_left_alone(self):
         """The Class 150 has DoorsUnlock_L_PushButton as well as DoorsOpen_L_PushButton."""
